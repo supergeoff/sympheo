@@ -70,6 +70,29 @@ impl AgentBackend for LocalBackend {
             .stdout
             .take()
             .ok_or_else(|| SymphonyError::AgentRunnerError("missing stdout".into()))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| SymphonyError::AgentRunnerError("missing stderr".into()))?;
+
+        // Spawn stderr reader task to capture agent diagnostic output
+        let issue_id_for_stderr = issue.id.clone();
+        let stderr_handle = tokio::spawn(async move {
+            let stderr_reader = BufReader::new(stderr);
+            let mut stderr_lines = stderr_reader.lines();
+            while let Ok(Some(line)) = stderr_lines.next_line().await {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    tracing::warn!(
+                        issue_id = %issue_id_for_stderr,
+                        target = "opencode::stderr",
+                        "{}",
+                        trimmed
+                    );
+                }
+            }
+        });
+
         let reader = BufReader::new(stdout);
         let mut lines = reader.lines();
 
@@ -95,7 +118,7 @@ impl AgentBackend for LocalBackend {
                     }
                     Some(OpencodeEvent::StepFinish { part, .. }) => {
                         tokens = part.tokens.clone();
-                        success = part.reason == "stop";
+                        success = part.reason == "stop" || part.reason == "tool-calls";
                         tracing::info!(
                             reason = %part.reason,
                             success,
@@ -111,20 +134,19 @@ impl AgentBackend for LocalBackend {
 
         if read_result.is_err() {
             let _ = child.kill().await;
+            let _ = stderr_handle.abort();
             return Err(SymphonyError::AgentTurnTimeout);
         }
 
-        let status = child
-            .wait()
-            .await
-            .map_err(|e| SymphonyError::AgentRunnerError(format!("wait failed: {e}")))?;
+        // Terminate the process since the turn is complete
+        // opencode run may not exit on its own after step_finish
+        let _ = child.kill().await;
+        let _ = stderr_handle.abort();
+        // Attempt to reap the process without blocking the result
+        let _ = timeout(Duration::from_secs(5), child.wait()).await;
 
         let sid = current_session.unwrap_or_else(|| issue.id.clone());
         let tid = current_turn.unwrap_or_else(|| "turn-1".into());
-
-        if !status.success() && !success {
-            return Err(SymphonyError::AgentProcessExit);
-        }
 
         Ok(TurnResult {
             session_id: sid.clone(),

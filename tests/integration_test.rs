@@ -95,3 +95,31 @@ fn test_config_var_resolution() {
         "plain"
     );
 }
+
+#[test]
+fn test_daytona_config_parsing() {
+    use std::path::PathBuf;
+    let mut raw = serde_yaml::Mapping::new();
+    let mut daytona = serde_yaml::Mapping::new();
+    daytona.insert(
+        serde_yaml::Value::String("enabled".into()),
+        serde_yaml::Value::Bool(true),
+    );
+    daytona.insert(
+        serde_yaml::Value::String("api_key".into()),
+        serde_yaml::Value::String("$DAYTONA_KEY".into()),
+    );
+    daytona.insert(
+        serde_yaml::Value::String("endpoint".into()),
+        serde_yaml::Value::String("https://api.daytona.io".into()),
+    );
+    raw.insert(
+        serde_yaml::Value::String("daytona".into()),
+        serde_yaml::Value::Mapping(daytona),
+    );
+    std::env::set_var("DAYTONA_KEY", "secret");
+    let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "prompt".into());
+    assert!(config.daytona_enabled());
+    assert_eq!(config.daytona_api_key(), Some("secret".into()));
+    assert_eq!(config.daytona_api_url(), "https://api.daytona.io");
+}

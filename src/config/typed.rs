@@ -43,6 +43,10 @@ impl ServiceConfig {
         self.raw.get("codex").and_then(|v| v.as_mapping())
     }
 
+    pub fn daytona(&self) -> Option<&serde_yaml::Mapping> {
+        self.raw.get("daytona").and_then(|v| v.as_mapping())
+    }
+
     pub fn tracker_kind(&self) -> Option<String> {
         self.tracker()
             .and_then(|m| resolver::get_string(m, "kind"))
@@ -195,6 +199,59 @@ impl ServiceConfig {
             .unwrap_or(300000)
     }
 
+    // Daytona helpers
+    pub fn daytona_enabled(&self) -> bool {
+        self.daytona()
+            .and_then(|m| m.get("enabled").and_then(|v| v.as_bool()))
+            .unwrap_or(false)
+    }
+
+    pub fn daytona_api_key(&self) -> Option<String> {
+        self.daytona()
+            .and_then(|m| resolver::get_string(m, "api_key"))
+            .map(|s| resolver::resolve_value(&s))
+            .filter(|s| !s.is_empty())
+    }
+
+    pub fn daytona_api_url(&self) -> String {
+        self.daytona()
+            .and_then(|m| resolver::get_string(m, "api_url"))
+            .unwrap_or_else(|| "https://app.daytona.io".to_string())
+    }
+
+    pub fn daytona_target(&self) -> String {
+        self.daytona()
+            .and_then(|m| resolver::get_string(m, "target"))
+            .unwrap_or_else(|| "us".to_string())
+    }
+
+    pub fn daytona_image(&self) -> Option<String> {
+        self.daytona()
+            .and_then(|m| resolver::get_string(m, "image"))
+            .filter(|s| !s.is_empty())
+    }
+
+    pub fn daytona_timeout_sec(&self) -> u64 {
+        self.daytona()
+            .and_then(|m| resolver::get_i64(m, "timeout_sec"))
+            .unwrap_or(3600)
+            .max(30) as u64
+    }
+
+    pub fn daytona_env(&self) -> HashMap<String, String> {
+        let mut map = HashMap::new();
+        if let Some(daytona_map) = self.daytona() {
+            if let Some(env_map) = daytona_map.get("env").and_then(|v| v.as_mapping()) {
+                for (k, v) in env_map {
+                    if let (Some(key), Some(val)) = (k.as_str(), v.as_str()) {
+                        map.insert(key.to_string(), resolver::resolve_value(val));
+                    }
+                }
+            }
+        }
+        map
+    }
+
     pub fn validate_for_dispatch(&self) -> Result<(), SymphonyError> {
         let kind = self.tracker_kind().ok_or(SymphonyError::InvalidConfiguration(
             "tracker.kind is required".into(),
@@ -218,6 +275,13 @@ impl ServiceConfig {
             return Err(SymphonyError::InvalidConfiguration(
                 "codex.command is empty".into(),
             ));
+        }
+        if self.daytona_enabled() {
+            if self.daytona_api_key().is_none() {
+                return Err(SymphonyError::InvalidConfiguration(
+                    "daytona.api_key is required when backend is enabled".into(),
+                ));
+            }
         }
         Ok(())
     }

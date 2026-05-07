@@ -58,6 +58,9 @@ pub enum SymphonyError {
 
     #[error("io error: {0}")]
     Io(String),
+
+    #[error("daytona api error: {0}")]
+    DaytonaApiError(String),
 }
 
 impl From<std::io::Error> for SymphonyError {

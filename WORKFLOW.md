@@ -2,11 +2,12 @@
 tracker:
   kind: github
   api_key: $GITHUB_TOKEN
-  project_slug: owner/repo
-  project_number: 5
+  project_slug: supergeoff/sympheo
+  project_number: 2
   active_states:
     - todo
     - in progress
+    - review
   terminal_states:
     - closed
     - done

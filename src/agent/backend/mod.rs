@@ -1,6 +1,16 @@
-# Backends for Agent Execution
+use async_trait::async_trait;
+use std::path::Path;
+use crate::tracker::model::Issue;
+use crate::error::SymphonyError;
+use crate::agent::parser::TurnResult;
 
-This module provides pluggable backends for executing agent turns.
-
-- `local` (default): runs the agent command directly on the host machine using a subprocess.
-- `daytona`: dispatches the agent command inside a Daytona sandbox via the Daytona REST API.
+#[async_trait]
+pub trait AgentBackend: Send + Sync {
+    async fn run_turn(
+        &self,
+        issue: &Issue,
+        prompt: &str,
+        session_id: Option<&str>,
+        workspace_path: &Path,
+    ) -> Result<TurnResult, SymphonyError>;
+}

@@ -1,5 +1,4 @@
-use crate::agent::backend::daytona::DaytonaBackend;
-use crate::agent::backend::local::LocalBackend;
+use crate::agent::backend::{daytona::DaytonaBackend, local::LocalBackend};
 use crate::agent::backend::AgentBackend;
 use crate::agent::parser::TurnResult;
 use crate::config::typed::ServiceConfig;

@@ -1,4 +1,3 @@
-# SYMPHEO-1 Retry/Continuation Log
+# SYMPHEO-1 Progress
 
-Attempt: 1
-
+- Cloning repo...

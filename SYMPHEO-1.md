@@ -1,3 +1,0 @@
-# SYMPHEO-1 Progress
-
-- Cloning repo...

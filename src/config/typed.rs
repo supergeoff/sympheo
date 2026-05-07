@@ -216,7 +216,7 @@ impl ServiceConfig {
     pub fn daytona_api_url(&self) -> String {
         self.daytona()
             .and_then(|m| resolver::get_string(m, "api_url"))
-            .unwrap_or_else(|| "https://app.daytona.io".to_string())
+            .unwrap_or_else(|| "https://api.daytona.io".to_string())
     }
 
     pub fn daytona_target(&self) -> String {

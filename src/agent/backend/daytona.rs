@@ -25,7 +25,7 @@ pub struct DaytonaConfig {
 
 impl DaytonaConfig {
     pub fn from_service(config: &ServiceConfig) -> Result<Self, SymphonyError> {
-        let daytona_map = config
+        let _daytona_map = config
             .daytona()
             .ok_or_else(|| SymphonyError::InvalidConfiguration(
                 "daytona section required when backend is enabled".into(),

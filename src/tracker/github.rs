@@ -102,13 +102,16 @@ impl GithubTracker {
               }
             }
         "#;
-        let org_data = self
+        let is_org = match self
             .graphql_query(org_query, json!({"owner": &self.owner, "projectNumber": self.project_number}))
-            .await?;
-        let is_org = org_data
-            .get("organization")
-            .and_then(|o| o.get("projectV2"))
-            .is_some();
+            .await
+        {
+            Ok(org_data) => org_data
+                .get("organization")
+                .and_then(|o| o.get("projectV2"))
+                .is_some(),
+            Err(_) => false, // Not an org (or project doesn't exist on org), try user
+        };
 
         let query_template = if is_org {
             r#"

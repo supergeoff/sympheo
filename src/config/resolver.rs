@@ -20,7 +20,7 @@ pub fn resolve_path(value: &str, workflow_dir: &Path) -> Result<PathBuf, Symphon
         let home = home::home_dir().ok_or_else(|| {
             SymphonyError::InvalidConfiguration("cannot resolve home dir".into())
         })?;
-        home.join(&value[1..])
+        home.join(value[1..].trim_start_matches('/'))
     } else {
         PathBuf::from(value)
     };

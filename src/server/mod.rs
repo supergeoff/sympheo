@@ -119,7 +119,8 @@ async fn dashboard(State(state): State<SharedState>) -> (StatusCode, String) {
         .unwrap_or_else(|| "never".to_string());
 
     let terminal_states = vec!["done".to_string(), "closed".to_string()];
-    let mut state_counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut state_counts: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
     let mut recent_changes: Vec<&RunningEntry> = Vec::new();
     let mut blocked_entries: Vec<&RunningEntry> = Vec::new();
 
@@ -178,7 +179,11 @@ async fn dashboard(State(state): State<SharedState>) -> (StatusCode, String) {
                 "<tr><td>{}</td><td>{}</td><td>Blocked by: {}</td></tr>",
                 html_escape(&e.issue.identifier),
                 html_escape(&e.issue.state),
-                if blockers.is_empty() { "-".to_string() } else { blockers }
+                if blockers.is_empty() {
+                    "-".to_string()
+                } else {
+                    blockers
+                }
             )
         })
         .collect();
@@ -308,7 +313,8 @@ async fn dashboard(State(state): State<SharedState>) -> (StatusCode, String) {
             recent_rows
         },
         if blocked_rows.is_empty() && delayed_rows.is_empty() {
-            "<tr><td colspan=3 style='text-align:center;'>No blocked or delayed tickets</td></tr>".to_string()
+            "<tr><td colspan=3 style='text-align:center;'>No blocked or delayed tickets</td></tr>"
+                .to_string()
         } else {
             blocked_rows + &delayed_rows
         },
@@ -372,7 +378,8 @@ async fn api_state(State(state): State<SharedState>) -> Json<serde_json::Value> 
         })
         .collect();
     let terminal_states = vec!["done".to_string(), "closed".to_string()];
-    let mut state_counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut state_counts: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
     let mut recent_changes: Vec<&RunningEntry> = Vec::new();
     let mut blocked_entries: Vec<&RunningEntry> = Vec::new();
     for entry in st.running.values() {
@@ -778,13 +785,11 @@ mod tests {
                     branch_name: None,
                     url: None,
                     labels: vec![],
-                    blocked_by: vec![
-                        crate::tracker::model::BlockerRef {
-                            id: Some("3".into()),
-                            identifier: Some("TEST-3".into()),
-                            state: Some("in progress".into()),
-                        },
-                    ],
+                    blocked_by: vec![crate::tracker::model::BlockerRef {
+                        id: Some("3".into()),
+                        identifier: Some("TEST-3".into()),
+                        state: Some("in progress".into()),
+                    }],
                     ..Default::default()
                 },
                 session: None,
@@ -836,13 +841,11 @@ mod tests {
                     branch_name: None,
                     url: None,
                     labels: vec![],
-                    blocked_by: vec![
-                        crate::tracker::model::BlockerRef {
-                            id: Some("2".into()),
-                            identifier: Some("TEST-2".into()),
-                            state: Some("in progress".into()),
-                        },
-                    ],
+                    blocked_by: vec![crate::tracker::model::BlockerRef {
+                        id: Some("2".into()),
+                        identifier: Some("TEST-2".into()),
+                        state: Some("in progress".into()),
+                    }],
                     ..Default::default()
                 },
                 session: None,
@@ -858,7 +861,10 @@ mod tests {
         let json = api_state(State(shared)).await.0;
         assert!(json["summary"].is_object());
         assert_eq!(json["summary"]["by_state"]["todo"], 1);
-        assert_eq!(json["summary"]["recent_changes"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            json["summary"]["recent_changes"].as_array().unwrap().len(),
+            1
+        );
         assert_eq!(json["summary"]["blocked"].as_array().unwrap().len(), 1);
         assert_eq!(json["summary"]["blocked"][0]["identifier"], "TEST-1");
         assert_eq!(json["summary"]["delayed"].as_array().unwrap().len(), 0);

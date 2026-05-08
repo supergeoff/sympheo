@@ -47,6 +47,10 @@ impl ServiceConfig {
         self.raw.get("daytona").and_then(|v| v.as_mapping())
     }
 
+    pub fn skills(&self) -> Option<&serde_yaml::Mapping> {
+        self.raw.get("skills").and_then(|v| v.as_mapping())
+    }
+
     pub fn tracker_kind(&self) -> Option<String> {
         self.tracker()
             .and_then(|m| resolver::get_string(m, "kind"))
@@ -283,6 +287,10 @@ impl ServiceConfig {
                 ));
             }
         Ok(())
+    }
+
+    pub fn skill_mapping(&self) -> crate::skills::SkillMapping {
+        crate::skills::SkillMapping::from_config(self)
     }
 }
 

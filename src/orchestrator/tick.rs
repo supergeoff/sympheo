@@ -3,10 +3,12 @@ use crate::config::typed::ServiceConfig;
 use crate::error::SympheoError;
 use crate::orchestrator::retry::schedule_retry;
 use crate::orchestrator::state::{OrchestratorState, RunningEntry};
+use crate::skills::Skill;
 use crate::tracker::model::{Issue, LiveSession};
 use crate::tracker::IssueTracker;
 use crate::workspace::manager::WorkspaceManager;
 use chrono::Utc;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -24,11 +26,13 @@ impl Orchestrator {
     pub fn new(
         config: ServiceConfig,
         tracker: Arc<dyn IssueTracker>,
+        skills: HashMap<String, Skill>,
     ) -> Result<Self, SympheoError> {
-        let state = OrchestratorState::new(
+        let mut state = OrchestratorState::new(
             config.poll_interval_ms(),
             config.max_concurrent_agents(),
         );
+        state.skills = skills;
         let workspace_manager = WorkspaceManager::new(&config)?;
         let runner = AgentRunner::new(&config)?;
         Ok(Self {
@@ -40,10 +44,11 @@ impl Orchestrator {
         })
     }
 
-    pub async fn reload_config(&self, config: ServiceConfig) {
+    pub async fn reload_config(&self, config: ServiceConfig, skills: HashMap<String, Skill>) {
         let mut state = self.state.write().await;
         state.poll_interval_ms = config.poll_interval_ms();
         state.max_concurrent_agents = config.max_concurrent_agents();
+        state.skills = skills;
         *self.config.write().await = config;
     }
 
@@ -439,14 +444,24 @@ async fn run_worker(
     let mut current_session: Option<String> = None;
     let mut turn_number = 1;
 
+    let skills = {
+        let st = state.read().await;
+        st.skills.clone()
+    };
+
     loop {
         if cancelled.load(Ordering::Relaxed) {
             info!(issue_id = %issue.id, "worker cancelled by orchestrator, stopping");
             break;
         }
 
+        let skill_content = skills
+            .get(&issue.state.to_lowercase())
+            .or_else(|| skills.get("default"))
+            .map(|s| s.content.as_str());
+
         let prompt = if turn_number == 1 {
-            build_prompt(config, &issue, attempt)?
+            build_prompt(config, &issue, attempt, skill_content)?
         } else {
             "Continue working on the current task. Review the conversation history and proceed with the next step.".to_string()
         };
@@ -525,6 +540,7 @@ fn build_prompt(
     config: &ServiceConfig,
     issue: &Issue,
     attempt: Option<u32>,
+    skill_instructions: Option<&str>,
 ) -> Result<String, SympheoError> {
     use liquid::model::Value;
     use std::collections::HashMap;
@@ -555,6 +571,14 @@ fn build_prompt(
     let output = template
         .render(&globals)
         .map_err(|e| SympheoError::TemplateRenderError(e.to_string()))?;
+
+    let output = match skill_instructions {
+        Some(instr) if !instr.trim().is_empty() => {
+            format!("{}\n\n---\n\n{}", instr.trim(), output)
+        }
+        _ => output,
+    };
+
     Ok(output)
 }
 
@@ -585,7 +609,7 @@ mod tests {
             created_at: None,
             updated_at: None,
         };
-        let prompt = build_prompt(&config, &issue, None).unwrap();
+        let prompt = build_prompt(&config, &issue, None, None).unwrap();
         assert_eq!(prompt, "Fix the bug");
     }
 
@@ -611,7 +635,7 @@ mod tests {
             created_at: None,
             updated_at: None,
         };
-        let prompt = build_prompt(&config, &issue, None).unwrap();
+        let prompt = build_prompt(&config, &issue, None, None).unwrap();
         assert_eq!(prompt, "You are working on an issue from the tracker.");
     }
 
@@ -637,7 +661,7 @@ mod tests {
             created_at: None,
             updated_at: None,
         };
-        let prompt = build_prompt(&config, &issue, Some(2)).unwrap();
+        let prompt = build_prompt(&config, &issue, Some(2), None).unwrap();
         assert_eq!(prompt, "Attempt 2");
     }
 
@@ -727,7 +751,7 @@ mod tests {
             created_at: None,
             updated_at: None,
         };
-        let result = build_prompt(&config, &issue, None);
+        let result = build_prompt(&config, &issue, None, None);
         assert!(matches!(result, Err(SympheoError::TemplateRenderError(_))));
     }
 
@@ -753,8 +777,36 @@ mod tests {
             created_at: None,
             updated_at: None,
         };
-        let result = build_prompt(&config, &issue, None);
+        let result = build_prompt(&config, &issue, None, None);
         assert!(matches!(result, Err(SympheoError::TemplateParseError(_))));
+    }
+
+    #[test]
+    fn test_build_prompt_with_skill() {
+        let mut raw = serde_yaml::Mapping::new();
+        raw.insert(
+            serde_yaml::Value::String("tracker".into()),
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+        );
+        let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "Fix {{ issue.title }}".into());
+        let issue = Issue {
+            id: "1".into(),
+            identifier: "TEST-1".into(),
+            title: "the bug".into(),
+            description: None,
+            priority: None,
+            state: "todo".into(),
+            branch_name: None,
+            url: None,
+            labels: vec![],
+            blocked_by: vec![],
+            created_at: None,
+            updated_at: None,
+        };
+        let prompt = build_prompt(&config, &issue, None, Some("Analyze the issue first.")).unwrap();
+        assert!(prompt.contains("Analyze the issue first."));
+        assert!(prompt.contains("Fix the bug"));
+        assert!(prompt.contains("---"));
     }
 }
 

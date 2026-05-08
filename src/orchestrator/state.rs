@@ -1,3 +1,4 @@
+use crate::skills::Skill;
 use crate::tracker::model::{Issue, LiveSession, RetryEntry, TokenTotals};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,6 +30,7 @@ pub struct OrchestratorState {
     pub completed: HashSet<String>,
     pub codex_totals: TokenTotals,
     pub codex_rate_limits: Option<serde_json::Value>,
+    pub skills: HashMap<String, Skill>,
 }
 
 impl OrchestratorState {
@@ -42,6 +44,7 @@ impl OrchestratorState {
             completed: HashSet::new(),
             codex_totals: TokenTotals::default(),
             codex_rate_limits: None,
+            skills: HashMap::new(),
         }
     }
 

@@ -150,10 +150,7 @@ mod tests {
             format!("{}", SympheoError::InvalidConfiguration("cfg".into())),
             "invalid configuration: cfg"
         );
-        assert_eq!(
-            format!("{}", SympheoError::Io("io".into())),
-            "io error: io"
-        );
+        assert_eq!(format!("{}", SympheoError::Io("io".into())), "io error: io");
         assert_eq!(
             format!("{}", SympheoError::DaytonaApiError("api".into())),
             "daytona api error: api"

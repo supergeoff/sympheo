@@ -31,10 +31,15 @@ pub trait IssueTracker: Send + Sync {
         _head_branch: &str,
         _base_branch: &str,
     ) -> Result<crate::tracker::model::PullRequest, SympheoError> {
-        Err(SympheoError::UnsupportedTrackerKind("create_pull_request not implemented".into()))
+        Err(SympheoError::UnsupportedTrackerKind(
+            "create_pull_request not implemented".into(),
+        ))
     }
 
-    async fn get_linked_prs(&self, _issue: &Issue) -> Result<Vec<crate::tracker::model::PullRequest>, SympheoError> {
+    async fn get_linked_prs(
+        &self,
+        _issue: &Issue,
+    ) -> Result<Vec<crate::tracker::model::PullRequest>, SympheoError> {
         Ok(vec![])
     }
 }
@@ -51,10 +56,16 @@ mod tests {
         async fn fetch_candidate_issues(&self) -> Result<Vec<Issue>, SympheoError> {
             Ok(vec![])
         }
-        async fn fetch_issues_by_states(&self, _states: &[String]) -> Result<Vec<Issue>, SympheoError> {
+        async fn fetch_issues_by_states(
+            &self,
+            _states: &[String],
+        ) -> Result<Vec<Issue>, SympheoError> {
             Ok(vec![])
         }
-        async fn fetch_issue_states_by_ids(&self, _ids: &[String]) -> Result<Vec<Issue>, SympheoError> {
+        async fn fetch_issue_states_by_ids(
+            &self,
+            _ids: &[String],
+        ) -> Result<Vec<Issue>, SympheoError> {
             Ok(vec![])
         }
     }
@@ -84,9 +95,14 @@ mod tests {
     async fn test_default_create_pull_request() {
         let tracker = DefaultTracker;
         let issue = Issue::default();
-        let result = tracker.create_pull_request(&issue, "title", "body", "head", "base").await;
+        let result = tracker
+            .create_pull_request(&issue, "title", "body", "head", "base")
+            .await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), SympheoError::UnsupportedTrackerKind(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            SympheoError::UnsupportedTrackerKind(_)
+        ));
     }
 
     #[tokio::test]

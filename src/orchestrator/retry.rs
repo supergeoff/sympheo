@@ -33,21 +33,18 @@ mod tests {
     use std::path::PathBuf;
 
     fn make_config() -> ServiceConfig {
-        ServiceConfig::new(serde_json::Map::<String, serde_json::Value>::new(), PathBuf::from("/tmp"), "".into())
+        ServiceConfig::new(
+            serde_json::Map::<String, serde_json::Value>::new(),
+            PathBuf::from("/tmp"),
+            "".into(),
+        )
     }
 
     #[test]
     fn test_schedule_retry_continuation() {
         let config = make_config();
         let before = Instant::now();
-        let entry = schedule_retry(
-            "id1".into(),
-            "ISSUE-1".into(),
-            1,
-            None,
-            &config,
-            true,
-        );
+        let entry = schedule_retry("id1".into(), "ISSUE-1".into(), 1, None, &config, true);
         let after = Instant::now();
         assert_eq!(entry.issue_id, "id1");
         assert_eq!(entry.identifier, "ISSUE-1");
@@ -101,10 +98,7 @@ mod tests {
             "max_retry_backoff_ms".into(),
             serde_json::Value::Number(15000.into()),
         );
-        raw.insert(
-            "agent".into(),
-            serde_json::Value::Object(agent),
-        );
+        raw.insert("agent".into(), serde_json::Value::Object(agent));
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
         let before = Instant::now();
         let entry = schedule_retry(

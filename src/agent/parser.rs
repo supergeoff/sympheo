@@ -152,15 +152,9 @@ pub enum AgentEvent {
         message: String,
     },
     #[serde(rename = "rate_limit")]
-    RateLimit {
-        payload: serde_json::Value,
-    },
+    RateLimit { payload: serde_json::Value },
     #[serde(rename = "token_usage")]
-    TokenUsage {
-        input: u64,
-        output: u64,
-        total: u64,
-    },
+    TokenUsage { input: u64, output: u64, total: u64 },
     #[serde(rename = "step_start")]
     StepStart {
         timestamp: i64,
@@ -203,7 +197,9 @@ mod tests {
         let json = r#"{"type":"step_start","timestamp":123,"sessionID":"sess-1","part":{"id":"p1","messageID":"msg-1","sessionID":"sess-1","type":"step"}}"#;
         let event = parse_line(json).unwrap();
         match event {
-            OpencodeEvent::StepStart { session_id, part, .. } => {
+            OpencodeEvent::StepStart {
+                session_id, part, ..
+            } => {
                 assert_eq!(session_id, "sess-1");
                 assert_eq!(part.id, "p1");
                 assert_eq!(part.message_id, "msg-1");
@@ -219,7 +215,13 @@ mod tests {
         match event {
             OpencodeEvent::Text { part, .. } => {
                 assert_eq!(part.text, "hello world");
-                assert_eq!(part.time, Some(TextTime { start: 100, end: 200 }));
+                assert_eq!(
+                    part.time,
+                    Some(TextTime {
+                        start: 100,
+                        end: 200
+                    })
+                );
             }
             _ => panic!("expected Text"),
         }
@@ -334,7 +336,11 @@ mod tests {
         let json = r#"{"type":"token_usage","input":100,"output":50,"total":150}"#;
         let event = parse_event_line(json).unwrap();
         match event {
-            AgentEvent::TokenUsage { input, output, total } => {
+            AgentEvent::TokenUsage {
+                input,
+                output,
+                total,
+            } => {
                 assert_eq!(input, 100);
                 assert_eq!(output, 50);
                 assert_eq!(total, 150);

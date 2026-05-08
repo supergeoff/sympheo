@@ -4,8 +4,8 @@ use std::sync::Arc;
 use sympheo::config::typed::ServiceConfig;
 use sympheo::error::SympheoError;
 use sympheo::orchestrator::tick::Orchestrator;
-use sympheo::tracker::model::Issue;
 use sympheo::tracker::IssueTracker;
+use sympheo::tracker::model::Issue;
 
 struct MockTracker {
     candidates: Vec<Issue>,
@@ -19,17 +19,11 @@ impl IssueTracker for MockTracker {
         Ok(self.candidates.clone())
     }
 
-    async fn fetch_issues_by_states(
-        &self,
-        _states: &[String],
-    ) -> Result<Vec<Issue>, SympheoError> {
+    async fn fetch_issues_by_states(&self, _states: &[String]) -> Result<Vec<Issue>, SympheoError> {
         Ok(self.by_states.clone())
     }
 
-    async fn fetch_issue_states_by_ids(
-        &self,
-        _ids: &[String],
-    ) -> Result<Vec<Issue>, SympheoError> {
+    async fn fetch_issue_states_by_ids(&self, _ids: &[String]) -> Result<Vec<Issue>, SympheoError> {
         Ok(self.by_ids.clone())
     }
 }
@@ -37,26 +31,14 @@ impl IssueTracker for MockTracker {
 fn valid_config() -> ServiceConfig {
     let mut raw = serde_json::Map::<String, serde_json::Value>::new();
     let mut tracker = serde_json::Map::<String, serde_json::Value>::new();
-    tracker.insert(
-        "kind".into(),
-        serde_json::Value::String("github".into()),
-    );
-    tracker.insert(
-        "api_key".into(),
-        serde_json::Value::String("key".into()),
-    );
+    tracker.insert("kind".into(), serde_json::Value::String("github".into()));
+    tracker.insert("api_key".into(), serde_json::Value::String("key".into()));
     tracker.insert(
         "project_slug".into(),
         serde_json::Value::String("owner/repo".into()),
     );
-    tracker.insert(
-        "project_number".into(),
-        serde_json::Value::Number(1.into()),
-    );
-    raw.insert(
-        "tracker".into(),
-        serde_json::Value::Object(tracker),
-    );
+    tracker.insert("project_number".into(), serde_json::Value::Number(1.into()));
+    raw.insert("tracker".into(), serde_json::Value::Object(tracker));
     ServiceConfig::new(raw, PathBuf::from("/tmp"), "prompt".into())
 }
 
@@ -159,10 +141,7 @@ async fn test_orchestrator_tick_respects_concurrency_limit() {
         "max_concurrent_agents".into(),
         serde_json::Value::Number(1.into()),
     );
-    raw.insert(
-        "agent".into(),
-        serde_json::Value::Object(agent),
-    );
+    raw.insert("agent".into(), serde_json::Value::Object(agent));
     let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "prompt".into());
 
     let tracker = Arc::new(MockTracker {
@@ -196,22 +175,17 @@ async fn test_orchestrator_reload_config() {
         "interval_ms".into(),
         serde_json::Value::Number(10000.into()),
     );
-    new_raw.insert(
-        "polling".into(),
-        serde_json::Value::Object(polling),
-    );
+    new_raw.insert("polling".into(), serde_json::Value::Object(polling));
     let mut agent = serde_json::Map::<String, serde_json::Value>::new();
     agent.insert(
         "max_concurrent_agents".into(),
         serde_json::Value::Number(5.into()),
     );
-    new_raw.insert(
-        "agent".into(),
-        serde_json::Value::Object(agent),
-    );
+    new_raw.insert("agent".into(), serde_json::Value::Object(agent));
     let new_config = ServiceConfig::new(new_raw, PathBuf::from("/tmp"), "prompt".into());
 
-    orch.reload_config(new_config, std::collections::HashMap::new()).await;
+    orch.reload_config(new_config, std::collections::HashMap::new())
+        .await;
 
     let state = orch.state.read().await;
     assert_eq!(state.poll_interval_ms, 10000);
@@ -282,7 +256,8 @@ async fn test_orchestrator_handle_worker_exit_error() {
         state.claimed.insert("1".into());
     }
 
-    orch.handle_worker_exit("1", false, Some("failed".into())).await;
+    orch.handle_worker_exit("1", false, Some("failed".into()))
+        .await;
 
     let state = orch.state.read().await;
     assert!(!state.running.contains_key("1"));
@@ -359,14 +334,8 @@ async fn test_orchestrator_tick_dispatches_non_todo() {
 async fn test_orchestrator_tick_worker_completes() {
     let mut raw = valid_config().raw().clone();
     let mut codex = serde_json::Map::<String, serde_json::Value>::new();
-    codex.insert(
-        "command".into(),
-        serde_json::Value::String("false".into()),
-    );
-    raw.insert(
-        "codex".into(),
-        serde_json::Value::Object(codex),
-    );
+    codex.insert("command".into(), serde_json::Value::String("false".into()));
+    raw.insert("codex".into(), serde_json::Value::Object(codex));
     let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "prompt".into());
     let issue = make_issue("1", "TEST-1", "todo");
     let tracker = Arc::new(MockTracker {
@@ -395,10 +364,7 @@ async fn test_orchestrator_tick_reconcile_stall_with_session() {
         "stall_timeout_ms".into(),
         serde_json::Value::Number(1.into()),
     );
-    raw.insert(
-        "codex".into(),
-        serde_json::Value::Object(codex),
-    );
+    raw.insert("codex".into(), serde_json::Value::Object(codex));
     let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "prompt".into());
     let tracker = Arc::new(MockTracker {
         candidates: vec![],
@@ -522,13 +488,23 @@ struct FailingTracker;
 
 #[async_trait]
 impl IssueTracker for FailingTracker {
-    async fn fetch_candidate_issues(&self) -> Result<Vec<sympheo::tracker::model::Issue>, sympheo::error::SympheoError> {
-        Err(sympheo::error::SympheoError::TrackerApiRequest("boom".into()))
+    async fn fetch_candidate_issues(
+        &self,
+    ) -> Result<Vec<sympheo::tracker::model::Issue>, sympheo::error::SympheoError> {
+        Err(sympheo::error::SympheoError::TrackerApiRequest(
+            "boom".into(),
+        ))
     }
-    async fn fetch_issues_by_states(&self, _states: &[String]) -> Result<Vec<sympheo::tracker::model::Issue>, sympheo::error::SympheoError> {
+    async fn fetch_issues_by_states(
+        &self,
+        _states: &[String],
+    ) -> Result<Vec<sympheo::tracker::model::Issue>, sympheo::error::SympheoError> {
         Ok(vec![])
     }
-    async fn fetch_issue_states_by_ids(&self, _ids: &[String]) -> Result<Vec<sympheo::tracker::model::Issue>, sympheo::error::SympheoError> {
+    async fn fetch_issue_states_by_ids(
+        &self,
+        _ids: &[String],
+    ) -> Result<Vec<sympheo::tracker::model::Issue>, sympheo::error::SympheoError> {
         Ok(vec![])
     }
 }
@@ -597,10 +573,7 @@ async fn test_orchestrator_process_retries_no_slots() {
         "max_concurrent_agents".into(),
         serde_json::Value::Number(1.into()),
     );
-    raw.insert(
-        "agent".into(),
-        serde_json::Value::Object(agent),
-    );
+    raw.insert("agent".into(), serde_json::Value::Object(agent));
     let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "prompt".into());
     let issue = make_issue("1", "TEST-1", "todo");
     let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
@@ -755,14 +728,8 @@ async fn test_orchestrator_tick_reconcile_unknown_state() {
 async fn test_orchestrator_process_retries_max_attempts_reached() {
     let mut raw = valid_config().raw().clone();
     let mut codex = serde_json::Map::<String, serde_json::Value>::new();
-    codex.insert(
-        "command".into(),
-        serde_json::Value::String("false".into()),
-    );
-    raw.insert(
-        "codex".into(),
-        serde_json::Value::Object(codex),
-    );
+    codex.insert("command".into(), serde_json::Value::String("false".into()));
+    raw.insert("codex".into(), serde_json::Value::Object(codex));
     let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "prompt".into());
     let issue = make_issue("1", "TEST-1", "todo");
     let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {

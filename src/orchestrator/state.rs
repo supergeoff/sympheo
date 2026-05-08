@@ -1,8 +1,8 @@
 use crate::skills::Skill;
 use crate::tracker::model::{Issue, LiveSession, RetryEntry, TokenTotals};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug, Clone)]
 pub struct RunningEntry {
@@ -85,11 +85,13 @@ impl OrchestratorState {
             codex_rate_limits: None,
             last_tick_at: None,
             refresh_notify: Arc::new(tokio::sync::Notify::new()),
-            skills: HashMap::new(),        }
+            skills: HashMap::new(),
+        }
     }
 
     pub fn available_slots(&self, _per_state: &HashMap<String, usize>) -> usize {
-        self.max_concurrent_agents.saturating_sub(self.running.len())
+        self.max_concurrent_agents
+            .saturating_sub(self.running.len())
     }
 
     pub fn count_running_by_state(&self, state: &str) -> usize {
@@ -207,8 +209,8 @@ mod tests {
                     started_at: chrono::Utc::now(),
                     retry_attempt: None,
                     turn_count: 0,
-                stagnation_counter: 0,
-                last_state_change_at: chrono::Utc::now(),
+                    stagnation_counter: 0,
+                    last_state_change_at: chrono::Utc::now(),
                     cancelled: Arc::new(AtomicBool::new(false)),
                 },
             );
@@ -238,8 +240,8 @@ mod tests {
             started_at: chrono::Utc::now(),
             retry_attempt: None,
             turn_count: 0,
-                stagnation_counter: 0,
-                last_state_change_at: chrono::Utc::now(),
+            stagnation_counter: 0,
+            last_state_change_at: chrono::Utc::now(),
             cancelled: Arc::new(AtomicBool::new(false)),
         };
         assert!(!entry.is_cancelled());

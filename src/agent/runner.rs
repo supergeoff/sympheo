@@ -1,13 +1,13 @@
-use crate::agent::backend::{daytona::DaytonaBackend, local::LocalBackend};
 use crate::agent::backend::AgentBackend;
+use crate::agent::backend::{daytona::DaytonaBackend, local::LocalBackend};
 use crate::agent::parser::{AgentEvent, TurnResult};
-use tokio::sync::mpsc::Receiver;
 use crate::config::typed::ServiceConfig;
 use crate::error::SympheoError;
 use crate::tracker::model::Issue;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use tokio::sync::mpsc::Receiver;
 
 pub struct AgentRunner {
     backend: Arc<dyn AgentBackend>,
@@ -31,7 +31,9 @@ impl AgentRunner {
         workspace_path: &Path,
         cancelled: Arc<AtomicBool>,
     ) -> Result<(TurnResult, Receiver<AgentEvent>), SympheoError> {
-        self.backend.run_turn(issue, prompt, session_id, workspace_path, cancelled).await
+        self.backend
+            .run_turn(issue, prompt, session_id, workspace_path, cancelled)
+            .await
     }
 
     pub async fn cleanup_workspace(&self, workspace_path: &Path) -> Result<(), SympheoError> {
@@ -47,14 +49,8 @@ mod tests {
     fn base_config() -> serde_json::Map<String, serde_json::Value> {
         let mut raw = serde_json::Map::<String, serde_json::Value>::new();
         let mut workspace = serde_json::Map::<String, serde_json::Value>::new();
-        workspace.insert(
-            "root".into(),
-            serde_json::Value::String("/tmp".into()),
-        );
-        raw.insert(
-            "workspace".into(),
-            serde_json::Value::Object(workspace),
-        );
+        workspace.insert("root".into(), serde_json::Value::String("/tmp".into()));
+        raw.insert("workspace".into(), serde_json::Value::Object(workspace));
         raw
     }
 
@@ -62,14 +58,8 @@ mod tests {
     fn test_agent_runner_local_success() {
         let mut raw = base_config();
         let mut codex = serde_json::Map::<String, serde_json::Value>::new();
-        codex.insert(
-            "command".into(),
-            serde_json::Value::String("echo".into()),
-        );
-        raw.insert(
-            "codex".into(),
-            serde_json::Value::Object(codex),
-        );
+        codex.insert("command".into(), serde_json::Value::String("echo".into()));
+        raw.insert("codex".into(), serde_json::Value::Object(codex));
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
         let runner = AgentRunner::new(&config);
         assert!(runner.is_ok());
@@ -79,10 +69,7 @@ mod tests {
     fn test_agent_runner_daytona_success() {
         let mut raw = base_config();
         let mut daytona = serde_json::Map::<String, serde_json::Value>::new();
-        daytona.insert(
-            "enabled".into(),
-            serde_json::Value::Bool(true),
-        );
+        daytona.insert("enabled".into(), serde_json::Value::Bool(true));
         daytona.insert(
             "api_key".into(),
             serde_json::Value::String("test-key".into()),
@@ -91,14 +78,8 @@ mod tests {
             "server_url".into(),
             serde_json::Value::String("http://localhost".into()),
         );
-        daytona.insert(
-            "target".into(),
-            serde_json::Value::String("local".into()),
-        );
-        raw.insert(
-            "daytona".into(),
-            serde_json::Value::Object(daytona),
-        );
+        daytona.insert("target".into(), serde_json::Value::String("local".into()));
+        raw.insert("daytona".into(), serde_json::Value::Object(daytona));
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
         let runner = AgentRunner::new(&config);
         assert!(runner.is_ok());
@@ -108,15 +89,9 @@ mod tests {
     fn test_agent_runner_daytona_failure() {
         let mut raw = base_config();
         let mut daytona = serde_json::Map::<String, serde_json::Value>::new();
-        daytona.insert(
-            "enabled".into(),
-            serde_json::Value::Bool(true),
-        );
+        daytona.insert("enabled".into(), serde_json::Value::Bool(true));
         // Missing api_key
-        raw.insert(
-            "daytona".into(),
-            serde_json::Value::Object(daytona),
-        );
+        raw.insert("daytona".into(), serde_json::Value::Object(daytona));
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
         let runner = AgentRunner::new(&config);
         assert!(runner.is_err());

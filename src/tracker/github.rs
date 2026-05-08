@@ -1,7 +1,7 @@
 use crate::config::typed::ServiceConfig;
 use crate::error::SympheoError;
-use crate::tracker::model::Issue;
 use crate::tracker::IssueTracker;
+use crate::tracker::model::Issue;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
@@ -11,6 +11,8 @@ use std::sync::Mutex;
 
 pub mod mutations;
 
+pub(crate) type FieldCache = HashMap<String, (String, HashMap<String, String>)>;
+
 pub struct GithubTracker {
     client: reqwest::Client,
     owner: String,
@@ -18,7 +20,7 @@ pub struct GithubTracker {
     project_number: i64,
     endpoint: String,
     project_id: Mutex<Option<String>>,
-    field_cache: Mutex<HashMap<String, (String, HashMap<String, String>)>>,
+    field_cache: Mutex<FieldCache>,
     fetch_blocked_by: bool,
 }
 
@@ -30,11 +32,11 @@ impl GithubTracker {
         let project = config
             .tracker_project_slug()
             .ok_or(SympheoError::MissingTrackerProjectSlug)?;
-        let project_number = config
-            .tracker_project_number()
-            .ok_or_else(|| SympheoError::InvalidConfiguration(
+        let project_number = config.tracker_project_number().ok_or_else(|| {
+            SympheoError::InvalidConfiguration(
                 "tracker.project_number is required for github projects".into(),
-            ))?;
+            )
+        })?;
         let parts: Vec<&str> = project.split('/').collect();
         if parts.len() != 2 {
             return Err(SympheoError::InvalidConfiguration(
@@ -45,10 +47,7 @@ impl GithubTracker {
         let auth = HeaderValue::from_str(&format!("Bearer {api_key}"))
             .map_err(|e| SympheoError::InvalidConfiguration(e.to_string()))?;
         headers.insert(AUTHORIZATION, auth);
-        headers.insert(
-            USER_AGENT,
-            HeaderValue::from_static("sympheo/0.1.0"),
-        );
+        headers.insert(USER_AGENT, HeaderValue::from_static("sympheo/0.1.0"));
         headers.insert(
             ACCEPT,
             HeaderValue::from_static("application/vnd.github+json"),
@@ -113,7 +112,10 @@ impl GithubTracker {
             }
         "#;
         let is_org = match self
-            .graphql_query(org_query, json!({"owner": &self.owner, "projectNumber": self.project_number}))
+            .graphql_query(
+                org_query,
+                json!({"owner": &self.owner, "projectNumber": self.project_number}),
+            )
             .await
         {
             Ok(org_data) => org_data
@@ -329,8 +331,14 @@ impl GithubTracker {
                 .to_lowercase()
         });
 
-        let node_id = content.get("id").and_then(|n| n.as_str()).map(|s| s.to_string());
-        let project_item_id = item.get("id").and_then(|n| n.as_str()).map(|s| s.to_string());
+        let node_id = content
+            .get("id")
+            .and_then(|n| n.as_str())
+            .map(|s| s.to_string());
+        let project_item_id = item
+            .get("id")
+            .and_then(|n| n.as_str())
+            .map(|s| s.to_string());
 
         let blocked_by = if self.fetch_blocked_by {
             item.get("linkedItems")
@@ -338,11 +346,24 @@ impl GithubTracker {
                 .and_then(|n| n.as_array())
                 .map(|arr| {
                     arr.iter()
-                        .filter_map(|node| {
-                            let id = node.get("id").and_then(|n| n.as_str()).map(|s| s.to_string());
-                            let number = node.get("number").and_then(|n| n.as_i64()).map(|n| n.to_string());
-                            let state = node.get("state").and_then(|s| s.as_str()).map(|s| s.to_lowercase());
-                            Some(crate::tracker::model::BlockerRef { id, identifier: number, state })
+                        .map(|node| {
+                            let id = node
+                                .get("id")
+                                .and_then(|n| n.as_str())
+                                .map(|s| s.to_string());
+                            let number = node
+                                .get("number")
+                                .and_then(|n| n.as_i64())
+                                .map(|n| n.to_string());
+                            let state = node
+                                .get("state")
+                                .and_then(|s| s.as_str())
+                                .map(|s| s.to_lowercase());
+                            crate::tracker::model::BlockerRef {
+                                id,
+                                identifier: number,
+                                state,
+                            }
                         })
                         .collect()
                 })
@@ -379,6 +400,53 @@ impl GithubTracker {
     }
 }
 
+#[async_trait]
+impl IssueTracker for GithubTracker {
+    async fn fetch_candidate_issues(&self) -> Result<Vec<Issue>, SympheoError> {
+        let items = self.fetch_project_items().await?;
+        let issues: Vec<Issue> = items
+            .iter()
+            .filter_map(|i| self.normalize_item(i))
+            .collect();
+        Ok(issues)
+    }
+
+    async fn fetch_issues_by_states(&self, states: &[String]) -> Result<Vec<Issue>, SympheoError> {
+        if states.is_empty() {
+            return Ok(vec![]);
+        }
+        let items = self.fetch_project_items().await?;
+        let issues: Vec<Issue> = items
+            .iter()
+            .filter_map(|i| self.normalize_item(i))
+            .filter(|issue| states.contains(&issue.state.to_lowercase()))
+            .collect();
+        Ok(issues)
+    }
+
+    async fn fetch_issue_states_by_ids(&self, ids: &[String]) -> Result<Vec<Issue>, SympheoError> {
+        let items = self.fetch_project_items().await?;
+        let issues: Vec<Issue> = items
+            .iter()
+            .filter_map(|i| self.normalize_item(i))
+            .filter(|issue| ids.contains(&issue.id))
+            .collect();
+        Ok(issues)
+    }
+
+    async fn move_issue_state(&self, issue: &Issue, new_state: &str) -> Result<(), SympheoError> {
+        self.move_issue_state(issue, new_state).await
+    }
+
+    async fn add_comment(&self, issue: &Issue, body: &str) -> Result<(), SympheoError> {
+        self.add_comment(issue, body).await
+    }
+
+    async fn update_issue_body(&self, issue: &Issue, body: &str) -> Result<(), SympheoError> {
+        self.update_issue_body(issue, body).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,14 +455,8 @@ mod tests {
     fn make_config(slug: &str, number: i64, api_key: &str) -> ServiceConfig {
         let mut raw = serde_json::Map::<String, serde_json::Value>::new();
         let mut tracker = serde_json::Map::<String, serde_json::Value>::new();
-        tracker.insert(
-            "kind".into(),
-            serde_json::Value::String("github".into()),
-        );
-        tracker.insert(
-            "api_key".into(),
-            serde_json::Value::String(api_key.into()),
-        );
+        tracker.insert("kind".into(), serde_json::Value::String("github".into()));
+        tracker.insert("api_key".into(), serde_json::Value::String(api_key.into()));
         tracker.insert(
             "project_slug".into(),
             serde_json::Value::String(slug.into()),
@@ -403,10 +465,7 @@ mod tests {
             "project_number".into(),
             serde_json::Value::Number(number.into()),
         );
-        raw.insert(
-            "tracker".into(),
-            serde_json::Value::Object(tracker),
-        );
+        raw.insert("tracker".into(), serde_json::Value::Object(tracker));
         ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into())
     }
 
@@ -430,14 +489,8 @@ mod tests {
     fn test_github_tracker_new_missing_api_key() {
         let mut raw = serde_json::Map::<String, serde_json::Value>::new();
         let mut tracker = serde_json::Map::<String, serde_json::Value>::new();
-        tracker.insert(
-            "kind".into(),
-            serde_json::Value::String("github".into()),
-        );
-        raw.insert(
-            "tracker".into(),
-            serde_json::Value::Object(tracker),
-        );
+        tracker.insert("kind".into(), serde_json::Value::String("github".into()));
+        raw.insert("tracker".into(), serde_json::Value::Object(tracker));
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
         let result = GithubTracker::new(&config);
         assert!(matches!(result, Err(SympheoError::MissingTrackerApiKey)));
@@ -461,7 +514,10 @@ mod tests {
                 ]
             }
         });
-        assert_eq!(tracker.extract_status(&item), Some("in progress".to_string()));
+        assert_eq!(
+            tracker.extract_status(&item),
+            Some("in progress".to_string())
+        );
     }
 
     #[test]
@@ -518,7 +574,10 @@ mod tests {
         assert_eq!(issue.description, Some("Description here".to_string()));
         assert_eq!(issue.state, "in progress");
         assert_eq!(issue.labels, vec!["bug", "urgent"]);
-        assert_eq!(issue.url, Some("https://github.com/owner/repo/issues/42".to_string()));
+        assert_eq!(
+            issue.url,
+            Some("https://github.com/owner/repo/issues/42".to_string())
+        );
         assert!(issue.created_at.is_some());
         assert!(issue.updated_at.is_some());
     }
@@ -603,93 +662,31 @@ mod tests {
     fn test_github_tracker_new_missing_project_slug() {
         let mut raw = serde_json::Map::<String, serde_json::Value>::new();
         let mut tracker = serde_json::Map::<String, serde_json::Value>::new();
-        tracker.insert(
-            "kind".into(),
-            serde_json::Value::String("github".into()),
-        );
-        tracker.insert(
-            "api_key".into(),
-            serde_json::Value::String("key".into()),
-        );
-        tracker.insert(
-            "project_number".into(),
-            serde_json::Value::Number(1.into()),
-        );
-        raw.insert(
-            "tracker".into(),
-            serde_json::Value::Object(tracker),
-        );
+        tracker.insert("kind".into(), serde_json::Value::String("github".into()));
+        tracker.insert("api_key".into(), serde_json::Value::String("key".into()));
+        tracker.insert("project_number".into(), serde_json::Value::Number(1.into()));
+        raw.insert("tracker".into(), serde_json::Value::Object(tracker));
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
         let result = GithubTracker::new(&config);
-        assert!(matches!(result, Err(SympheoError::MissingTrackerProjectSlug)));
+        assert!(matches!(
+            result,
+            Err(SympheoError::MissingTrackerProjectSlug)
+        ));
     }
 
     #[test]
     fn test_github_tracker_new_missing_project_number() {
         let mut raw = serde_json::Map::<String, serde_json::Value>::new();
         let mut tracker = serde_json::Map::<String, serde_json::Value>::new();
-        tracker.insert(
-            "kind".into(),
-            serde_json::Value::String("github".into()),
-        );
-        tracker.insert(
-            "api_key".into(),
-            serde_json::Value::String("key".into()),
-        );
+        tracker.insert("kind".into(), serde_json::Value::String("github".into()));
+        tracker.insert("api_key".into(), serde_json::Value::String("key".into()));
         tracker.insert(
             "project_slug".into(),
             serde_json::Value::String("owner/repo".into()),
         );
-        raw.insert(
-            "tracker".into(),
-            serde_json::Value::Object(tracker),
-        );
+        raw.insert("tracker".into(), serde_json::Value::Object(tracker));
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
         let result = GithubTracker::new(&config);
         assert!(matches!(result, Err(SympheoError::InvalidConfiguration(_))));
-    }
-}
-
-#[async_trait]
-impl IssueTracker for GithubTracker {
-    async fn fetch_candidate_issues(&self) -> Result<Vec<Issue>, SympheoError> {
-        let items = self.fetch_project_items().await?;
-        let issues: Vec<Issue> = items.iter().filter_map(|i| self.normalize_item(i)).collect();
-        Ok(issues)
-    }
-
-    async fn fetch_issues_by_states(&self, states: &[String]) -> Result<Vec<Issue>, SympheoError> {
-        if states.is_empty() {
-            return Ok(vec![]);
-        }
-        let items = self.fetch_project_items().await?;
-        let issues: Vec<Issue> = items
-            .iter()
-            .filter_map(|i| self.normalize_item(i))
-            .filter(|issue| states.contains(&issue.state.to_lowercase()))
-            .collect();
-        Ok(issues)
-    }
-
-    async fn fetch_issue_states_by_ids(&self, ids: &[String]) -> Result<Vec<Issue>, SympheoError> {
-        let items = self.fetch_project_items().await?;
-        let issues: Vec<Issue> = items
-            .iter()
-            .filter_map(|i| self.normalize_item(i))
-            .filter(|issue| ids.contains(&issue.id))
-            .collect();
-        Ok(issues)
-    }
-
-    async fn move_issue_state(&self, issue: &Issue, new_state: &str) -> Result<(), SympheoError> {
-        self.move_issue_state(issue, new_state).await
-    }
-
-    async fn add_comment(&self, issue: &Issue, body: &str) -> Result<(), SympheoError> {
-        self.add_comment(issue, body).await
-    }
-
-    async fn update_issue_body(&self, issue: &Issue, body: &str) -> Result<(), SympheoError> {
-        self.update_issue_body(issue, body).await
     }
 }

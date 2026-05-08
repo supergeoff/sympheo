@@ -4,8 +4,8 @@ use std::sync::Arc;
 use sympheo::config::typed::ServiceConfig;
 use sympheo::orchestrator::tick::Orchestrator;
 use sympheo::skills::loader::load_skills;
-use sympheo::tracker::github::GithubTracker;
 use sympheo::tracker::IssueTracker;
+use sympheo::tracker::github::GithubTracker;
 use sympheo::workflow::loader::WorkflowLoader;
 use tracing::{error, info, warn};
 
@@ -21,38 +21,6 @@ struct Cli {
     port: Option<u16>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use clap::Parser;
-
-    #[test]
-    fn test_cli_default() {
-        let cli = Cli::parse_from(["sympheo"]);
-        assert_eq!(cli.workflow_path, None);
-        assert_eq!(cli.port, None);
-    }
-
-    #[test]
-    fn test_cli_with_workflow_path() {
-        let cli = Cli::parse_from(["sympheo", "/path/to/WORKFLOW.md"]);
-        assert_eq!(cli.workflow_path, Some(PathBuf::from("/path/to/WORKFLOW.md")));
-    }
-
-    #[test]
-    fn test_cli_with_port() {
-        let cli = Cli::parse_from(["sympheo", "--port", "8080"]);
-        assert_eq!(cli.port, Some(8080));
-    }
-
-    #[test]
-    fn test_cli_with_both() {
-        let cli = Cli::parse_from(["sympheo", "--port", "9090", "/path/to/wf.md"]);
-        assert_eq!(cli.workflow_path, Some(PathBuf::from("/path/to/wf.md")));
-        assert_eq!(cli.port, Some(9090));
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
@@ -64,12 +32,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let cli = Cli::parse();
-    let workflow_path = cli.workflow_path.unwrap_or_else(|| PathBuf::from("WORKFLOW.md"));
+    let workflow_path = cli
+        .workflow_path
+        .unwrap_or_else(|| PathBuf::from("WORKFLOW.md"));
     let workflow_dir = workflow_path
         .parent()
         .unwrap_or(Path::new("."))
         .canonicalize()
-        .unwrap_or_else(|_| workflow_path.parent().unwrap_or(Path::new(".")).to_path_buf());
+        .unwrap_or_else(|_| {
+            workflow_path
+                .parent()
+                .unwrap_or(Path::new("."))
+                .to_path_buf()
+        });
 
     let loader = WorkflowLoader::new(Some(workflow_path.clone()));
     let workflow = loader.load().map_err(|e| {
@@ -108,7 +83,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config: &ServiceConfig,
         active_states: &[String],
     ) -> Result<usize, Box<dyn std::error::Error>> {
-        let issues = tracker.fetch_issues_by_states(&config.terminal_states()).await?;
+        let issues = tracker
+            .fetch_issues_by_states(&config.terminal_states())
+            .await?;
         use sympheo::workspace::manager::WorkspaceManager;
         let wm = WorkspaceManager::new(config)?;
         let runner = sympheo::agent::runner::AgentRunner::new(config);
@@ -120,8 +97,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     warn!(error = %e, issue_identifier = %issue.identifier, "startup cleanup daytona sandbox failed");
                 }
             }
-            wm.remove_workspace(&issue.identifier, config.hook_script("before_remove").as_deref())
-                .await;
+            wm.remove_workspace(
+                &issue.identifier,
+                config.hook_script("before_remove").as_deref(),
+            )
+            .await;
             cleaned += 1;
         }
         // Orphan directory enumeration
@@ -136,12 +116,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
                 // Check if this issue is active
-                if let Ok(issue_states) = tracker.fetch_issue_states_by_ids(&[identifier.clone()]).await {
-                    if let Some(issue) = issue_states.into_iter().next() {
-                        if active_states.iter().any(|s| s == &issue.state.to_lowercase()) {
-                            continue;
-                        }
-                    }
+                if let Ok(issue_states) = tracker
+                    .fetch_issue_states_by_ids(std::slice::from_ref(&identifier))
+                    .await
+                    && let Some(issue) = issue_states.into_iter().next()
+                    && active_states
+                        .iter()
+                        .any(|s| s == &issue.state.to_lowercase())
+                {
+                    continue;
                 }
                 let _ = tokio::fs::remove_dir_all(entry.path()).await;
                 cleaned += 1;
@@ -178,8 +161,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let git_adapter: Arc<dyn sympheo::git::GitAdapter> = Arc::new(sympheo::git::LocalGitAdapter::new());
-    let orchestrator = Arc::new(Orchestrator::new(config.clone(), tracker, skills, Some(git_adapter.clone()))?);
+    let git_adapter: Arc<dyn sympheo::git::GitAdapter> =
+        Arc::new(sympheo::git::LocalGitAdapter::new());
+    let orchestrator = Arc::new(Orchestrator::new(
+        config.clone(),
+        tracker,
+        skills,
+        Some(git_adapter.clone()),
+    )?);
     let state = orchestrator.state.clone();
 
     // Global graceful shutdown handler
@@ -225,19 +214,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let watch_path = workflow_path.clone();
     tokio::spawn(async move {
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-        let mut watcher = match notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
-            if let Ok(event) = res {
-                if event.kind.is_modify() {
+        let mut watcher =
+            match notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+                if let Ok(event) = res
+                    && event.kind.is_modify()
+                {
                     let _ = tx.try_send(());
                 }
-            }
-        }) {
-            Ok(w) => w,
-            Err(e) => {
-                warn!(error = %e, "failed to create file watcher");
-                return;
-            }
-        };
+            }) {
+                Ok(w) => w,
+                Err(e) => {
+                    warn!(error = %e, "failed to create file watcher");
+                    return;
+                }
+            };
         use notify::Watcher;
         let _ = watcher.watch(&watch_path, notify::RecursiveMode::NonRecursive);
         while rx.recv().await.is_some() {
@@ -270,7 +260,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Main loop
     let mut current_interval_ms = config.poll_interval_ms();
-    let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(current_interval_ms));
+    let mut interval =
+        tokio::time::interval(tokio::time::Duration::from_millis(current_interval_ms));
     interval.tick().await; // first tick immediate-ish
 
     loop {
@@ -289,9 +280,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if new_interval_ms != current_interval_ms {
             tracing::debug!(old = %current_interval_ms, new = %new_interval_ms, "polling interval changed");
             current_interval_ms = new_interval_ms;
-            interval = tokio::time::interval(tokio::time::Duration::from_millis(current_interval_ms));
+            interval =
+                tokio::time::interval(tokio::time::Duration::from_millis(current_interval_ms));
         }
         orchestrator.tick().await;
         orchestrator.process_retries().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_cli_default() {
+        let cli = Cli::parse_from(["sympheo"]);
+        assert_eq!(cli.workflow_path, None);
+        assert_eq!(cli.port, None);
+    }
+
+    #[test]
+    fn test_cli_with_workflow_path() {
+        let cli = Cli::parse_from(["sympheo", "/path/to/WORKFLOW.md"]);
+        assert_eq!(
+            cli.workflow_path,
+            Some(PathBuf::from("/path/to/WORKFLOW.md"))
+        );
+    }
+
+    #[test]
+    fn test_cli_with_port() {
+        let cli = Cli::parse_from(["sympheo", "--port", "8080"]);
+        assert_eq!(cli.port, Some(8080));
+    }
+
+    #[test]
+    fn test_cli_with_both() {
+        let cli = Cli::parse_from(["sympheo", "--port", "9090", "/path/to/wf.md"]);
+        assert_eq!(cli.workflow_path, Some(PathBuf::from("/path/to/wf.md")));
+        assert_eq!(cli.port, Some(9090));
     }
 }

@@ -1,17 +1,17 @@
-use async_trait::async_trait;
 use crate::agent::backend::AgentBackend;
-use crate::agent::parser::{parse_event_line, AgentEvent, TokenInfo, TurnResult};
+use crate::agent::parser::{AgentEvent, TokenInfo, TurnResult, parse_event_line};
 use crate::config::typed::ServiceConfig;
 use crate::error::SympheoError;
 use crate::tracker::model::Issue;
 use crate::workspace::manager::WorkspaceManager;
+use async_trait::async_trait;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tracing::Instrument;
 
 pub struct LocalBackend {
@@ -31,7 +31,8 @@ impl LocalBackend {
 
     async fn probe_opencode(&self, workspace_path: &Path) -> Result<(), SympheoError> {
         let probe_file = workspace_path.join(".sympheo_probe.txt");
-        tokio::fs::write(&probe_file, "__sympheo_probe__").await
+        tokio::fs::write(&probe_file, "__sympheo_probe__")
+            .await
             .map_err(|e| SympheoError::AgentRunnerError(format!("probe write failed: {e}")))?;
 
         let mut cmd = Command::new("bash");
@@ -47,24 +48,32 @@ impl LocalBackend {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
-        let mut child = cmd.spawn()
+        let mut child = cmd
+            .spawn()
             .map_err(|e| SympheoError::AgentRunnerError(format!("probe spawn failed: {e}")))?;
 
         let probe_result = timeout(Duration::from_secs(10), async {
-            let stderr = child.stderr.take()
+            let stderr = child
+                .stderr
+                .take()
                 .ok_or_else(|| SympheoError::AgentRunnerError("probe missing stderr".into()))?;
             let reader = BufReader::new(stderr);
             let mut lines = reader.lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 let trimmed = line.trim();
-                if trimmed.contains("Usage:") || trimmed.starts_with("--") || trimmed.contains("error: unknown") {
+                if trimmed.contains("Usage:")
+                    || trimmed.starts_with("--")
+                    || trimmed.contains("error: unknown")
+                {
                     return Err(SympheoError::AgentRunnerError(
-                        "OpenCode rejected arguments — check prompt length or special characters".into()
+                        "OpenCode rejected arguments — check prompt length or special characters"
+                            .into(),
                     ));
                 }
             }
             Ok(())
-        }).await;
+        })
+        .await;
 
         let _ = child.start_kill();
         let _ = tokio::fs::remove_file(&probe_file).await;
@@ -307,7 +316,6 @@ fn sanitize_prompt_for_opencode(prompt: &str) -> String {
         .to_string()
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -349,10 +357,7 @@ mod tests {
             "root".into(),
             serde_json::Value::String(tmp.to_string_lossy().to_string()),
         );
-        raw.insert(
-            "workspace".into(),
-            serde_json::Value::Object(workspace),
-        );
+        raw.insert("workspace".into(), serde_json::Value::Object(workspace));
         let mut codex = serde_json::Map::<String, serde_json::Value>::new();
         codex.insert(
             "command".into(),
@@ -362,10 +367,7 @@ mod tests {
             "turn_timeout_ms".into(),
             serde_json::Value::Number(200.into()),
         );
-        raw.insert(
-            "codex".into(),
-            serde_json::Value::Object(codex),
-        );
+        raw.insert("codex".into(), serde_json::Value::Object(codex));
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
         let backend = LocalBackend::new(&config).unwrap();
         let issue = crate::tracker::model::Issue {
@@ -381,7 +383,16 @@ mod tests {
             blocked_by: vec![],
             ..Default::default()
         };
-        let result = backend.run_turn(&issue, "prompt", None, &tmp, std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))).await.map(|(tr, _rx)| tr);
+        let result = backend
+            .run_turn(
+                &issue,
+                "prompt",
+                None,
+                &tmp,
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            )
+            .await
+            .map(|(tr, _rx)| tr);
         assert!(
             matches!(result, Err(SympheoError::AgentTurnTimeout)),
             "expected AgentTurnTimeout, got {:?}",
@@ -401,10 +412,7 @@ mod tests {
             "root".into(),
             serde_json::Value::String(tmp.to_string_lossy().to_string()),
         );
-        raw.insert(
-            "workspace".into(),
-            serde_json::Value::Object(workspace),
-        );
+        raw.insert("workspace".into(), serde_json::Value::Object(workspace));
         let mut codex = serde_json::Map::<String, serde_json::Value>::new();
         // Print valid opencode events and exit
         codex.insert(
@@ -415,10 +423,7 @@ mod tests {
             "turn_timeout_ms".into(),
             serde_json::Value::Number(5000.into()),
         );
-        raw.insert(
-            "codex".into(),
-            serde_json::Value::Object(codex),
-        );
+        raw.insert("codex".into(), serde_json::Value::Object(codex));
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
         let backend = LocalBackend::new(&config).unwrap();
         let issue = crate::tracker::model::Issue {
@@ -434,7 +439,17 @@ mod tests {
             blocked_by: vec![],
             ..Default::default()
         };
-        let result = backend.run_turn(&issue, "prompt", None, &tmp, std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))).await.unwrap().0;
+        let result = backend
+            .run_turn(
+                &issue,
+                "prompt",
+                None,
+                &tmp,
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            )
+            .await
+            .unwrap()
+            .0;
         assert!(result.success);
         assert_eq!(result.text, "hello");
         assert_eq!(result.session_id, "sess-1");
@@ -458,10 +473,7 @@ mod tests {
             "root".into(),
             serde_json::Value::String(tmp.to_string_lossy().to_string()),
         );
-        raw.insert(
-            "workspace".into(),
-            serde_json::Value::Object(workspace),
-        );
+        raw.insert("workspace".into(), serde_json::Value::Object(workspace));
         let mut codex = serde_json::Map::<String, serde_json::Value>::new();
         // Print step_start and text but no step_finish
         codex.insert(
@@ -472,10 +484,7 @@ mod tests {
             "turn_timeout_ms".into(),
             serde_json::Value::Number(5000.into()),
         );
-        raw.insert(
-            "codex".into(),
-            serde_json::Value::Object(codex),
-        );
+        raw.insert("codex".into(), serde_json::Value::Object(codex));
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
         let backend = LocalBackend::new(&config).unwrap();
         let issue = crate::tracker::model::Issue {
@@ -491,7 +500,17 @@ mod tests {
             blocked_by: vec![],
             ..Default::default()
         };
-        let result = backend.run_turn(&issue, "prompt", None, &tmp, std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))).await.unwrap().0;
+        let result = backend
+            .run_turn(
+                &issue,
+                "prompt",
+                None,
+                &tmp,
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            )
+            .await
+            .unwrap()
+            .0;
         assert!(!result.success);
         assert_eq!(result.text, "hello");
         let _ = std::fs::remove_dir_all(&tmp);
@@ -508,10 +527,7 @@ mod tests {
             "root".into(),
             serde_json::Value::String(tmp.to_string_lossy().to_string()),
         );
-        raw.insert(
-            "workspace".into(),
-            serde_json::Value::Object(workspace),
-        );
+        raw.insert("workspace".into(), serde_json::Value::Object(workspace));
         let mut codex = serde_json::Map::<String, serde_json::Value>::new();
         // Print valid opencode events to stdout and something to stderr
         codex.insert(
@@ -522,10 +538,7 @@ mod tests {
             "turn_timeout_ms".into(),
             serde_json::Value::Number(5000.into()),
         );
-        raw.insert(
-            "codex".into(),
-            serde_json::Value::Object(codex),
-        );
+        raw.insert("codex".into(), serde_json::Value::Object(codex));
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
         let backend = LocalBackend::new(&config).unwrap();
         let issue = crate::tracker::model::Issue {
@@ -541,7 +554,17 @@ mod tests {
             blocked_by: vec![],
             ..Default::default()
         };
-        let result = backend.run_turn(&issue, "prompt", Some("existing-session"), &tmp, std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))).await.unwrap().0;
+        let result = backend
+            .run_turn(
+                &issue,
+                "prompt",
+                Some("existing-session"),
+                &tmp,
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            )
+            .await
+            .unwrap()
+            .0;
         assert!(result.success);
         assert_eq!(result.text, "hello");
         let _ = std::fs::remove_dir_all(&tmp);
@@ -557,10 +580,7 @@ mod tests {
             "root".into(),
             serde_json::Value::String(tmp.to_string_lossy().to_string()),
         );
-        raw.insert(
-            "workspace".into(),
-            serde_json::Value::Object(workspace),
-        );
+        raw.insert("workspace".into(), serde_json::Value::Object(workspace));
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
         let backend = LocalBackend::new(&config).unwrap();
         let issue = crate::tracker::model::Issue {
@@ -576,7 +596,15 @@ mod tests {
             blocked_by: vec![],
             ..Default::default()
         };
-        let result = backend.run_turn(&issue, "prompt", None, Path::new("/etc"), std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))).await;
+        let result = backend
+            .run_turn(
+                &issue,
+                "prompt",
+                None,
+                Path::new("/etc"),
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            )
+            .await;
         assert!(matches!(result, Err(SympheoError::WorkspaceError(_))));
         let _ = std::fs::remove_dir_all(&tmp);
     }

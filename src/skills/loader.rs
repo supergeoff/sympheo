@@ -4,8 +4,13 @@ use std::collections::HashMap;
 use std::path::Path;
 
 pub fn load_skill(path: &Path) -> Result<Skill, SympheoError> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| SympheoError::Io(format!("failed to read skill file {}: {}", path.display(), e)))?;
+    let content = std::fs::read_to_string(path).map_err(|e| {
+        SympheoError::Io(format!(
+            "failed to read skill file {}: {}",
+            path.display(),
+            e
+        ))
+    })?;
     let name = path
         .file_stem()
         .and_then(|s| s.to_str())

@@ -1,20 +1,20 @@
+use crate::agent::parser::AgentEvent;
 use crate::agent::runner::AgentRunner;
 use crate::config::typed::ServiceConfig;
 use crate::error::SympheoError;
+use crate::git::adapter::GitStatus;
 use crate::orchestrator::retry::schedule_retry;
 use crate::orchestrator::state::{OrchestratorState, RunningEntry};
-use crate::agent::parser::AgentEvent;
 use crate::skills::Skill;
-use crate::tracker::model::{AttemptStatus, Issue, LiveSession, RunAttempt};
 use crate::tracker::IssueTracker;
+use crate::tracker::model::{AttemptStatus, Issue, LiveSession, RunAttempt};
 use crate::workspace::manager::WorkspaceManager;
 use chrono::Utc;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
-use crate::git::adapter::GitStatus;
 
 pub struct Orchestrator {
     pub state: Arc<RwLock<OrchestratorState>>,
@@ -31,10 +31,8 @@ impl Orchestrator {
         skills: HashMap<String, Skill>,
         git_adapter: Option<Arc<dyn crate::git::GitAdapter>>,
     ) -> Result<Self, SympheoError> {
-        let mut state = OrchestratorState::new(
-            config.poll_interval_ms(),
-            config.max_concurrent_agents(),
-        );
+        let mut state =
+            OrchestratorState::new(config.poll_interval_ms(), config.max_concurrent_agents());
         state.skills = skills;
         let mut workspace_manager = WorkspaceManager::new(&config)?;
         if let Some(adapter) = git_adapter {
@@ -203,7 +201,8 @@ impl Orchestrator {
                 let state = self.state.read().await;
                 state.running.get(&id).map(|e| e.issue.identifier.clone())
             };
-            self.handle_worker_exit(&id, false, Some("stalled".into())).await;
+            self.handle_worker_exit(&id, false, Some("stalled".into()))
+                .await;
             if let Some(ident) = identifier {
                 let ws_path = self.workspace_manager.workspace_path(&ident);
                 if let Err(e) = self.runner.cleanup_workspace(&ws_path).await {
@@ -216,10 +215,7 @@ impl Orchestrator {
         }
 
         // Tracker state refresh
-        let refreshed = self
-            .tracker
-            .fetch_issue_states_by_ids(&running_ids)
-            .await?;
+        let refreshed = self.tracker.fetch_issue_states_by_ids(&running_ids).await?;
 
         let active_states = config.active_states();
         let terminal_states = config.terminal_states();
@@ -240,7 +236,10 @@ impl Orchestrator {
                         warn!(error = %e, "daytona cleanup failed during reconcile");
                     }
                     self.workspace_manager
-                        .remove_workspace(&identifier, config.hook_script("before_remove").as_deref())
+                        .remove_workspace(
+                            &identifier,
+                            config.hook_script("before_remove").as_deref(),
+                        )
                         .await;
                     state = self.state.write().await;
                 }
@@ -261,7 +260,13 @@ impl Orchestrator {
         Ok(())
     }
 
-    fn spawn_worker(&self, issue: Issue, attempt: Option<u32>, max_turns: u32, cancelled: Arc<AtomicBool>) {
+    fn spawn_worker(
+        &self,
+        issue: Issue,
+        attempt: Option<u32>,
+        max_turns: u32,
+        cancelled: Arc<AtomicBool>,
+    ) {
         let state = self.state.clone();
         let config = self.config.clone();
         let runner = self.runner.clone();
@@ -329,12 +334,7 @@ impl Orchestrator {
         });
     }
 
-    pub async fn handle_worker_exit(
-        &self,
-        issue_id: &str,
-        normal: bool,
-        error: Option<String>,
-    ) {
+    pub async fn handle_worker_exit(&self, issue_id: &str, normal: bool, error: Option<String>) {
         let mut state = self.state.write().await;
         let cfg = self.config.read().await.clone();
         if let Some(entry) = state.running.remove(issue_id) {
@@ -470,7 +470,9 @@ async fn apply_agent_event(
     event: AgentEvent,
 ) {
     match event {
-        AgentEvent::StepStart { session_id, part, .. } => {
+        AgentEvent::StepStart {
+            session_id, part, ..
+        } => {
             let mut st = state.write().await;
             if let Some(entry) = st.running.get_mut(issue_id) {
                 let new_session_id = format!("{}-{}", session_id, part.message_id);
@@ -504,7 +506,11 @@ async fn apply_agent_event(
                 }
             }
         }
-        AgentEvent::TokenUsage { input, output, total } => {
+        AgentEvent::TokenUsage {
+            input,
+            output,
+            total,
+        } => {
             let (last_input, last_output, last_total) = {
                 let st = state.read().await;
                 st.running
@@ -529,15 +535,15 @@ async fn apply_agent_event(
             st.codex_totals.output_tokens += delta_output;
             st.codex_totals.total_tokens += delta_total;
 
-            if let Some(entry) = st.running.get_mut(issue_id) {
-                if let Some(ref mut sess) = entry.session {
-                    sess.last_reported_input_tokens = input;
-                    sess.last_reported_output_tokens = output;
-                    sess.last_reported_total_tokens = total;
-                    sess.input_tokens = input;
-                    sess.output_tokens = output;
-                    sess.total_tokens = total;
-                }
+            if let Some(entry) = st.running.get_mut(issue_id)
+                && let Some(ref mut sess) = entry.session
+            {
+                sess.last_reported_input_tokens = input;
+                sess.last_reported_output_tokens = output;
+                sess.last_reported_total_tokens = total;
+                sess.input_tokens = input;
+                sess.output_tokens = output;
+                sess.total_tokens = total;
             }
         }
         AgentEvent::RateLimit { payload } => {
@@ -545,39 +551,41 @@ async fn apply_agent_event(
             st.codex_rate_limits = Some(payload);
         }
         AgentEvent::Notification { message, .. }
-        | AgentEvent::TurnFailed { reason: message, .. } => {
+        | AgentEvent::TurnFailed {
+            reason: message, ..
+        } => {
             let mut st = state.write().await;
-            if let Some(entry) = st.running.get_mut(issue_id) {
-                if let Some(ref mut sess) = entry.session {
-                    sess.last_event = Some("notification_or_turn_failed".into());
-                    sess.last_message = Some(message);
-                    sess.last_timestamp = Some(Utc::now());
-                }
+            if let Some(entry) = st.running.get_mut(issue_id)
+                && let Some(ref mut sess) = entry.session
+            {
+                sess.last_event = Some("notification_or_turn_failed".into());
+                sess.last_message = Some(message);
+                sess.last_timestamp = Some(Utc::now());
             }
         }
         AgentEvent::Text { part, .. } => {
             let mut st = state.write().await;
-            if let Some(entry) = st.running.get_mut(issue_id) {
-                if let Some(ref mut sess) = entry.session {
-                    if let Some(ref mut msg) = sess.last_message {
-                        msg.push_str(&part.text);
-                    } else {
-                        sess.last_message = Some(part.text.clone());
-                    }
+            if let Some(entry) = st.running.get_mut(issue_id)
+                && let Some(ref mut sess) = entry.session
+            {
+                if let Some(ref mut msg) = sess.last_message {
+                    msg.push_str(&part.text);
+                } else {
+                    sess.last_message = Some(part.text.clone());
                 }
             }
         }
         AgentEvent::StepFinish { part, .. } => {
             let mut st = state.write().await;
-            if let Some(entry) = st.running.get_mut(issue_id) {
-                if let Some(ref mut sess) = entry.session {
-                    sess.last_event = Some("step_finish".into());
-                    sess.last_timestamp = Some(Utc::now());
-                    if let Some(ref t) = part.tokens {
-                        sess.input_tokens = t.input;
-                        sess.output_tokens = t.output;
-                        sess.total_tokens = t.total;
-                    }
+            if let Some(entry) = st.running.get_mut(issue_id)
+                && let Some(ref mut sess) = entry.session
+            {
+                sess.last_event = Some("step_finish".into());
+                sess.last_timestamp = Some(Utc::now());
+                if let Some(ref t) = part.tokens {
+                    sess.input_tokens = t.input;
+                    sess.output_tokens = t.output;
+                    sess.total_tokens = t.total;
                 }
             }
         }
@@ -585,7 +593,7 @@ async fn apply_agent_event(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // Reason: worker function naturally aggregates orchestrator state — splitting would add indirection without clarity.
 async fn run_worker(
     mut issue: Issue,
     attempt: Option<u32>,
@@ -605,25 +613,31 @@ async fn run_worker(
         .await?;
 
     // Auto-create branch when entering in progress
-    if issue.state.to_lowercase() == "in progress" && issue.branch_name.is_none() {
-        if let Some(adapter) = workspace_manager.git_adapter() {
-            let sanitized: String = issue.title.to_lowercase()
-                .replace(|c: char| !c.is_alphanumeric() && c != '-', "-")
-                .replace("--", "-")
-                .trim_matches('-')
-                .chars()
-                .take(40)
-                .collect();
-            let branch = format!("sympheo/{}-{}", issue.id, sanitized);
-            let branch = branch.trim_end_matches('-').to_string();
-            if let Err(e) = adapter.checkout_branch(&workspace.path, &branch, true).await {
-                warn!(issue_id = %issue.id, error = %e, "failed to create branch");
-            } else {
-                if let Err(e) = adapter.push(&workspace.path, "origin", &branch).await {
-                    warn!(issue_id = %issue.id, error = %e, "failed to push branch");
-                }
-                issue.branch_name = Some(branch);
+    if issue.state.to_lowercase() == "in progress"
+        && issue.branch_name.is_none()
+        && let Some(adapter) = workspace_manager.git_adapter()
+    {
+        let sanitized: String = issue
+            .title
+            .to_lowercase()
+            .replace(|c: char| !c.is_alphanumeric() && c != '-', "-")
+            .replace("--", "-")
+            .trim_matches('-')
+            .chars()
+            .take(40)
+            .collect();
+        let branch = format!("sympheo/{}-{}", issue.id, sanitized);
+        let branch = branch.trim_end_matches('-').to_string();
+        if let Err(e) = adapter
+            .checkout_branch(&workspace.path, &branch, true)
+            .await
+        {
+            warn!(issue_id = %issue.id, error = %e, "failed to create branch");
+        } else {
+            if let Err(e) = adapter.push(&workspace.path, "origin", &branch).await {
+                warn!(issue_id = %issue.id, error = %e, "failed to push branch");
             }
+            issue.branch_name = Some(branch);
         }
     }
 
@@ -699,7 +713,13 @@ async fn run_worker(
 
         attempt_record.transition(AttemptStatus::LaunchingAgentProcess);
         let (turn_result, event_rx) = runner
-            .run_turn(&issue, &prompt, current_session.as_deref(), &workspace.path, cancelled.clone())
+            .run_turn(
+                &issue,
+                &prompt,
+                current_session.as_deref(),
+                &workspace.path,
+                cancelled.clone(),
+            )
             .await?;
 
         attempt_record.transition(AttemptStatus::StreamingTurn);
@@ -727,22 +747,20 @@ async fn run_worker(
                 .unwrap_or(false)
         };
 
-        if !already_counted {
-            if let Some(ref token_info) = turn_result.tokens {
-                let mut st = state.write().await;
-                st.codex_totals.input_tokens += token_info.input;
-                st.codex_totals.output_tokens += token_info.output;
-                st.codex_totals.total_tokens += token_info.total;
-                if let Some(entry) = st.running.get_mut(&issue.id) {
-                    if let Some(ref mut sess) = entry.session {
-                        sess.input_tokens = token_info.input;
-                        sess.output_tokens = token_info.output;
-                        sess.total_tokens = token_info.total;
-                        sess.last_reported_input_tokens = token_info.input;
-                        sess.last_reported_output_tokens = token_info.output;
-                        sess.last_reported_total_tokens = token_info.total;
-                    }
-                }
+        if !already_counted && let Some(ref token_info) = turn_result.tokens {
+            let mut st = state.write().await;
+            st.codex_totals.input_tokens += token_info.input;
+            st.codex_totals.output_tokens += token_info.output;
+            st.codex_totals.total_tokens += token_info.total;
+            if let Some(entry) = st.running.get_mut(&issue.id)
+                && let Some(ref mut sess) = entry.session
+            {
+                sess.input_tokens = token_info.input;
+                sess.output_tokens = token_info.output;
+                sess.total_tokens = token_info.total;
+                sess.last_reported_input_tokens = token_info.input;
+                sess.last_reported_output_tokens = token_info.output;
+                sess.last_reported_total_tokens = token_info.total;
             }
         }
 
@@ -775,9 +793,21 @@ async fn run_worker(
                         input_tokens: turn_result.tokens.as_ref().map(|t| t.input).unwrap_or(0),
                         output_tokens: turn_result.tokens.as_ref().map(|t| t.output).unwrap_or(0),
                         total_tokens: turn_result.tokens.as_ref().map(|t| t.total).unwrap_or(0),
-                        last_reported_input_tokens: turn_result.tokens.as_ref().map(|t| t.input).unwrap_or(0),
-                        last_reported_output_tokens: turn_result.tokens.as_ref().map(|t| t.output).unwrap_or(0),
-                        last_reported_total_tokens: turn_result.tokens.as_ref().map(|t| t.total).unwrap_or(0),
+                        last_reported_input_tokens: turn_result
+                            .tokens
+                            .as_ref()
+                            .map(|t| t.input)
+                            .unwrap_or(0),
+                        last_reported_output_tokens: turn_result
+                            .tokens
+                            .as_ref()
+                            .map(|t| t.output)
+                            .unwrap_or(0),
+                        last_reported_total_tokens: turn_result
+                            .tokens
+                            .as_ref()
+                            .map(|t| t.total)
+                            .unwrap_or(0),
                         turn_count: entry.turn_count,
                         pr_url: None,
                     });
@@ -815,7 +845,9 @@ async fn run_worker(
                         entry.stagnation_counter += 1;
                         if entry.stagnation_counter >= 3 {
                             warn!(issue_id = %issue.id, "issue stagnant for 3 turns, forcing stop");
-                            return Err(SympheoError::AgentRunnerError("stagnation guardrail triggered".into()));
+                            return Err(SympheoError::AgentRunnerError(
+                                "stagnation guardrail triggered".into(),
+                            ));
                         }
                     } else {
                         entry.stagnation_counter = 0;
@@ -826,11 +858,11 @@ async fn run_worker(
             }
 
             let max_per_state = config.max_turns_per_state().get(&state_lc).copied();
-            if let Some(max_state_turns) = max_per_state {
-                if turn_number >= max_state_turns {
-                    info!(issue_id = %issue.id, state = %state_lc, max = %max_state_turns, "max turns for state reached");
-                    break;
-                }
+            if let Some(max_state_turns) = max_per_state
+                && turn_number >= max_state_turns
+            {
+                info!(issue_id = %issue.id, state = %state_lc, max = %max_state_turns, "max turns for state reached");
+                break;
             }
         }
 
@@ -840,10 +872,12 @@ async fn run_worker(
     }
 
     attempt_record.transition(AttemptStatus::Finishing);
-    if let Some(script) = config.hook_script("after_run") {
-        if let Err(e) = workspace_manager.run_hook("after_run", &script, &workspace.path).await {
-            warn!(error = %e, "after_run hook failed");
-        }
+    if let Some(script) = config.hook_script("after_run")
+        && let Err(e) = workspace_manager
+            .run_hook("after_run", &script, &workspace.path)
+            .await
+    {
+        warn!(error = %e, "after_run hook failed");
     }
 
     // Cleanup Daytona sandbox if issue is now terminal
@@ -854,10 +888,10 @@ async fn run_worker(
     let terminal_states = config.terminal_states();
     if let Some(refreshed_issue) = refreshed.into_iter().next() {
         let state_lc = refreshed_issue.state.to_lowercase();
-        if terminal_states.contains(&state_lc) || !active_states.contains(&state_lc) {
-            if let Err(e) = runner.cleanup_workspace(&workspace.path).await {
-                warn!(error = %e, "daytona cleanup failed after terminal issue");
-            }
+        if (terminal_states.contains(&state_lc) || !active_states.contains(&state_lc))
+            && let Err(e) = runner.cleanup_workspace(&workspace.path).await
+        {
+            warn!(error = %e, "daytona cleanup failed after terminal issue");
         }
     }
 
@@ -886,9 +920,10 @@ fn build_prompt_strict(
     for cap in re.captures_iter(&template_str) {
         let var_name = cap.get(1).unwrap().as_str();
         if !available_vars.contains(&var_name) {
-            return Err(SympheoError::TemplateRenderError(
-                format!("Unknown variable: {}", var_name)
-            ));
+            return Err(SympheoError::TemplateRenderError(format!(
+                "Unknown variable: {}",
+                var_name
+            )));
         }
     }
 
@@ -899,7 +934,8 @@ fn build_prompt_strict(
         .map_err(|e| SympheoError::TemplateParseError(e.to_string()))?;
 
     let mut globals = HashMap::new();
-    let issue_map = serde_json::to_value(issue).map_err(|e| SympheoError::TemplateRenderError(e.to_string()))?;
+    let issue_map = serde_json::to_value(issue)
+        .map_err(|e| SympheoError::TemplateRenderError(e.to_string()))?;
     let mut obj = liquid::model::Object::new();
     for (k, v) in issue_map.as_object().unwrap() {
         obj.insert(kstring::KString::from_ref(k), serde_json_to_liquid(v));
@@ -921,6 +957,33 @@ fn build_prompt_strict(
     };
 
     Ok(output)
+}
+
+fn serde_json_to_liquid(value: &serde_json::Value) -> liquid::model::Value {
+    match value {
+        serde_json::Value::Null => liquid::model::Value::Nil,
+        serde_json::Value::Bool(b) => liquid::model::Value::Scalar((*b).into()),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                liquid::model::Value::Scalar(i.into())
+            } else if let Some(f) = n.as_f64() {
+                liquid::model::Value::Scalar(f.into())
+            } else {
+                liquid::model::Value::Nil
+            }
+        }
+        serde_json::Value::String(s) => liquid::model::Value::Scalar(s.clone().into()),
+        serde_json::Value::Array(arr) => {
+            liquid::model::Value::Array(arr.iter().map(serde_json_to_liquid).collect())
+        }
+        serde_json::Value::Object(obj) => {
+            let mut m = liquid::model::Object::new();
+            for (k, v) in obj {
+                m.insert(kstring::KString::from_ref(k), serde_json_to_liquid(v));
+            }
+            liquid::model::Value::Object(m)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1030,7 +1093,9 @@ mod tests {
     #[test]
     fn test_serde_json_to_liquid_number_float() {
         assert_eq!(
-            serde_json_to_liquid(&serde_json::Value::Number(serde_json::Number::from_f64(std::f64::consts::PI).unwrap())),
+            serde_json_to_liquid(&serde_json::Value::Number(
+                serde_json::Number::from_f64(std::f64::consts::PI).unwrap()
+            )),
             liquid::model::Value::Scalar(std::f64::consts::PI.into())
         );
     }
@@ -1099,7 +1164,8 @@ mod tests {
             "tracker".into(),
             serde_json::Value::Object(serde_json::Map::new()),
         );
-        let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "Hello {{ unknown_var }}".into());
+        let config =
+            ServiceConfig::new(raw, PathBuf::from("/tmp"), "Hello {{ unknown_var }}".into());
         let issue = Issue {
             id: "1".into(),
             identifier: "TEST-1".into(),
@@ -1163,7 +1229,8 @@ mod tests {
             blocked_by: vec![],
             ..Default::default()
         };
-        let prompt = build_prompt_strict(&config, &issue, None, Some("Analyze the issue first.")).unwrap();
+        let prompt =
+            build_prompt_strict(&config, &issue, None, Some("Analyze the issue first.")).unwrap();
         assert!(prompt.contains("Analyze the issue first."));
         assert!(prompt.contains("Fix the bug"));
         assert!(prompt.contains("---"));
@@ -1174,8 +1241,8 @@ mod tests {
         use crate::agent::parser::{AgentEvent, StepStartPart};
         use crate::orchestrator::state::{OrchestratorState, RunningEntry};
         use crate::tracker::model::Issue;
-        use std::sync::atomic::AtomicBool;
         use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
 
         let state = Arc::new(RwLock::new(OrchestratorState::new(5000, 5)));
         {
@@ -1234,8 +1301,8 @@ mod tests {
         use crate::agent::parser::{AgentEvent, StepStartPart};
         use crate::orchestrator::state::{OrchestratorState, RunningEntry};
         use crate::tracker::model::{Issue, LiveSession};
-        use std::sync::atomic::AtomicBool;
         use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
 
         let state = Arc::new(RwLock::new(OrchestratorState::new(5000, 5)));
         {
@@ -1300,8 +1367,8 @@ mod tests {
         use crate::agent::parser::AgentEvent;
         use crate::orchestrator::state::{OrchestratorState, RunningEntry};
         use crate::tracker::model::{Issue, LiveSession};
-        use std::sync::atomic::AtomicBool;
         use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
 
         let state = Arc::new(RwLock::new(OrchestratorState::new(5000, 5)));
         {
@@ -1366,7 +1433,10 @@ mod tests {
         apply_agent_event(&state, "1", event).await;
 
         let st = state.read().await;
-        assert_eq!(st.codex_rate_limits, Some(serde_json::json!({"limit": 100})));
+        assert_eq!(
+            st.codex_rate_limits,
+            Some(serde_json::json!({"limit": 100}))
+        );
     }
 
     #[tokio::test]
@@ -1374,8 +1444,8 @@ mod tests {
         use crate::agent::parser::AgentEvent;
         use crate::orchestrator::state::{OrchestratorState, RunningEntry};
         use crate::tracker::model::{Issue, LiveSession};
-        use std::sync::atomic::AtomicBool;
         use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
 
         let state = Arc::new(RwLock::new(OrchestratorState::new(5000, 5)));
         {
@@ -1427,8 +1497,8 @@ mod tests {
         use crate::agent::parser::{AgentEvent, TextPart};
         use crate::orchestrator::state::{OrchestratorState, RunningEntry};
         use crate::tracker::model::{Issue, LiveSession};
-        use std::sync::atomic::AtomicBool;
         use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
 
         let state = Arc::new(RwLock::new(OrchestratorState::new(5000, 5)));
         {
@@ -1488,8 +1558,8 @@ mod tests {
         use crate::agent::parser::{AgentEvent, StepFinishPart, TokenInfo};
         use crate::orchestrator::state::{OrchestratorState, RunningEntry};
         use crate::tracker::model::{Issue, LiveSession};
-        use std::sync::atomic::AtomicBool;
         use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
 
         let state = Arc::new(RwLock::new(OrchestratorState::new(5000, 5)));
         {
@@ -1552,32 +1622,5 @@ mod tests {
         assert_eq!(sess.input_tokens, 40);
         assert_eq!(sess.output_tokens, 60);
         assert_eq!(sess.total_tokens, 100);
-    }
-}
-
-fn serde_json_to_liquid(value: &serde_json::Value) -> liquid::model::Value {
-    match value {
-        serde_json::Value::Null => liquid::model::Value::Nil,
-        serde_json::Value::Bool(b) => liquid::model::Value::Scalar((*b).into()),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                liquid::model::Value::Scalar(i.into())
-            } else if let Some(f) = n.as_f64() {
-                liquid::model::Value::Scalar(f.into())
-            } else {
-                liquid::model::Value::Nil
-            }
-        }
-        serde_json::Value::String(s) => liquid::model::Value::Scalar(s.clone().into()),
-        serde_json::Value::Array(arr) => {
-            liquid::model::Value::Array(arr.iter().map(serde_json_to_liquid).collect())
-        }
-        serde_json::Value::Object(obj) => {
-            let mut m = liquid::model::Object::new();
-            for (k, v) in obj {
-                m.insert(kstring::KString::from_ref(k), serde_json_to_liquid(v));
-            }
-            liquid::model::Value::Object(m)
-        }
     }
 }

@@ -1,40 +1,25 @@
 use std::path::PathBuf;
-use sympheo::agent::backend::daytona::DaytonaBackend;
 use sympheo::agent::backend::AgentBackend;
+use sympheo::agent::backend::daytona::DaytonaBackend;
 use sympheo::agent::runner::AgentRunner;
 use sympheo::config::typed::ServiceConfig;
 fn daytona_service_config(api_url: &str) -> ServiceConfig {
     let mut raw = serde_json::Map::<String, serde_json::Value>::new();
     let mut daytona = serde_json::Map::<String, serde_json::Value>::new();
-    daytona.insert(
-        "enabled".into(),
-        serde_json::Value::Bool(true),
-    );
+    daytona.insert("enabled".into(), serde_json::Value::Bool(true));
     daytona.insert(
         "api_key".into(),
         serde_json::Value::String("test-key".into()),
     );
-    daytona.insert(
-        "api_url".into(),
-        serde_json::Value::String(api_url.into()),
-    );
-    daytona.insert(
-        "target".into(),
-        serde_json::Value::String("eu".into()),
-    );
-    raw.insert(
-        "daytona".into(),
-        serde_json::Value::Object(daytona),
-    );
+    daytona.insert("api_url".into(), serde_json::Value::String(api_url.into()));
+    daytona.insert("target".into(), serde_json::Value::String("eu".into()));
+    raw.insert("daytona".into(), serde_json::Value::Object(daytona));
     let mut workspace = serde_json::Map::<String, serde_json::Value>::new();
     workspace.insert(
         "root".into(),
         serde_json::Value::String(std::env::temp_dir().to_string_lossy().to_string()),
     );
-    raw.insert(
-        "workspace".into(),
-        serde_json::Value::Object(workspace),
-    );
+    raw.insert("workspace".into(), serde_json::Value::Object(workspace));
     ServiceConfig::new(raw, PathBuf::from("/tmp"), "prompt".into())
 }
 
@@ -57,10 +42,7 @@ async fn test_daytona_backend_cleanup_reads_meta_file() {
     let config = daytona_service_config(&mock_server.uri());
     let backend = DaytonaBackend::new(&config).unwrap();
 
-    let tmp = std::env::temp_dir().join(format!(
-        "sympheo_int_cleanup_{}",
-        std::process::id()
-    ));
+    let tmp = std::env::temp_dir().join(format!("sympheo_int_cleanup_{}", std::process::id()));
     tokio::fs::create_dir_all(&tmp).await.unwrap();
     tokio::fs::write(tmp.join(".daytona_sandbox_id"), "sb-cleanup")
         .await
@@ -79,10 +61,12 @@ async fn test_daytona_backend_lifecycle_create_start_delete() {
     // Create sandbox
     wiremock::Mock::given(wiremock::matchers::method("POST"))
         .and(wiremock::matchers::path("/api/sandbox"))
-        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "id": "sb-lifecycle",
-            "state": "created"
-        })))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "sb-lifecycle",
+                "state": "created"
+            })),
+        )
         .mount(&mock_server)
         .await;
 
@@ -96,10 +80,12 @@ async fn test_daytona_backend_lifecycle_create_start_delete() {
     // Get state (after start)
     wiremock::Mock::given(wiremock::matchers::method("GET"))
         .and(wiremock::matchers::path("/api/sandbox/sb-lifecycle"))
-        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "id": "sb-lifecycle",
-            "state": "running"
-        })))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "sb-lifecycle",
+                "state": "running"
+            })),
+        )
         .mount(&mock_server)
         .await;
 
@@ -113,19 +99,14 @@ async fn test_daytona_backend_lifecycle_create_start_delete() {
     let config = daytona_service_config(&mock_server.uri());
     let backend = DaytonaBackend::new(&config).unwrap();
 
-    let tmp = std::env::temp_dir().join(format!(
-        "sympheo_int_lifecycle_{}",
-        std::process::id()
-    ));
+    let tmp = std::env::temp_dir().join(format!("sympheo_int_lifecycle_{}", std::process::id()));
     tokio::fs::create_dir_all(&tmp).await.unwrap();
 
     // ensure_sandbox_running should create + start
-    let id = sympheo::agent::backend::daytona::DaytonaBackend::ensure_sandbox_running(
-        &backend,
-        &tmp,
-    )
-    .await
-    .unwrap();
+    let id =
+        sympheo::agent::backend::daytona::DaytonaBackend::ensure_sandbox_running(&backend, &tmp)
+            .await
+            .unwrap();
     assert_eq!(id, "sb-lifecycle");
 
     // cleanup should delete
@@ -141,31 +122,28 @@ async fn test_daytona_backend_session_reuse() {
     // First get state call
     wiremock::Mock::given(wiremock::matchers::method("GET"))
         .and(wiremock::matchers::path("/api/sandbox/sb-reuse"))
-        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "id": "sb-reuse",
-            "state": "running"
-        })))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "sb-reuse",
+                "state": "running"
+            })),
+        )
         .mount(&mock_server)
         .await;
 
     let config = daytona_service_config(&mock_server.uri());
     let backend = DaytonaBackend::new(&config).unwrap();
 
-    let tmp = std::env::temp_dir().join(format!(
-        "sympheo_int_reuse_{}",
-        std::process::id()
-    ));
+    let tmp = std::env::temp_dir().join(format!("sympheo_int_reuse_{}", std::process::id()));
     tokio::fs::create_dir_all(&tmp).await.unwrap();
     tokio::fs::write(tmp.join(".daytona_sandbox_id"), "sb-reuse")
         .await
         .unwrap();
 
-    let id = sympheo::agent::backend::daytona::DaytonaBackend::ensure_sandbox_running(
-        &backend,
-        &tmp,
-    )
-    .await
-    .unwrap();
+    let id =
+        sympheo::agent::backend::daytona::DaytonaBackend::ensure_sandbox_running(&backend, &tmp)
+            .await
+            .unwrap();
     assert_eq!(id, "sb-reuse");
 
     let _ = tokio::fs::remove_dir_all(&tmp).await;
@@ -178,41 +156,40 @@ async fn test_daytona_backend_unstartable_sandbox_recreate() {
     // First: existing sandbox is in error state
     wiremock::Mock::given(wiremock::matchers::method("GET"))
         .and(wiremock::matchers::path("/api/sandbox/sb-error"))
-        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "id": "sb-error",
-            "state": "error"
-        })))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "sb-error",
+                "state": "error"
+            })),
+        )
         .mount(&mock_server)
         .await;
 
     // Then: create new sandbox
     wiremock::Mock::given(wiremock::matchers::method("POST"))
         .and(wiremock::matchers::path("/api/sandbox"))
-        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "id": "sb-new",
-            "state": "running"
-        })))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "sb-new",
+                "state": "running"
+            })),
+        )
         .mount(&mock_server)
         .await;
 
     let config = daytona_service_config(&mock_server.uri());
     let backend = DaytonaBackend::new(&config).unwrap();
 
-    let tmp = std::env::temp_dir().join(format!(
-        "sympheo_int_error_{}",
-        std::process::id()
-    ));
+    let tmp = std::env::temp_dir().join(format!("sympheo_int_error_{}", std::process::id()));
     tokio::fs::create_dir_all(&tmp).await.unwrap();
     tokio::fs::write(tmp.join(".daytona_sandbox_id"), "sb-error")
         .await
         .unwrap();
 
-    let id = sympheo::agent::backend::daytona::DaytonaBackend::ensure_sandbox_running(
-        &backend,
-        &tmp,
-    )
-    .await
-    .unwrap();
+    let id =
+        sympheo::agent::backend::daytona::DaytonaBackend::ensure_sandbox_running(&backend, &tmp)
+            .await
+            .unwrap();
     assert_eq!(id, "sb-new");
 
     let meta = tokio::fs::read_to_string(tmp.join(".daytona_sandbox_id"))
@@ -236,16 +213,12 @@ async fn test_daytona_backend_api_down_retry_then_fail() {
     let config = daytona_service_config(&mock_server.uri());
     let backend = DaytonaBackend::new(&config).unwrap();
 
-    let tmp = std::env::temp_dir().join(format!(
-        "sympheo_int_down_{}",
-        std::process::id()
-    ));
+    let tmp = std::env::temp_dir().join(format!("sympheo_int_down_{}", std::process::id()));
     tokio::fs::create_dir_all(&tmp).await.unwrap();
 
-    let result = sympheo::agent::backend::daytona::DaytonaBackend::create_sandbox_with_retry(
-        &backend, 2,
-    )
-    .await;
+    let result =
+        sympheo::agent::backend::daytona::DaytonaBackend::create_sandbox_with_retry(&backend, 2)
+            .await;
     assert!(result.is_err());
 
     let _ = tokio::fs::remove_dir_all(&tmp).await;

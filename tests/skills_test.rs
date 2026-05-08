@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use sympheo::config::typed::ServiceConfig;
-use sympheo::skills::loader::{load_skill, load_skills};
 use sympheo::skills::SkillMapping;
+use sympheo::skills::loader::{load_skill, load_skills};
 
 #[test]
 fn test_load_skill_from_file() {
@@ -27,7 +27,11 @@ fn test_load_skills_with_mapping() {
     assert_eq!(skills.len(), 2);
     assert!(skills.contains_key("todo"));
     assert!(skills.contains_key("in progress"));
-    assert!(skills["todo"].content.contains("Analyze the issue carefully"));
+    assert!(
+        skills["todo"]
+            .content
+            .contains("Analyze the issue carefully")
+    );
 }
 
 #[test]
@@ -51,35 +55,40 @@ fn test_skill_mapping_from_config() {
         "todo".into(),
         serde_json::Value::String("./skills/todo.md".into()),
     );
-    skills.insert(
-        "mapping".into(),
-        serde_json::Value::Object(mapping),
-    );
+    skills.insert("mapping".into(), serde_json::Value::Object(mapping));
     skills.insert(
         "default".into(),
         serde_json::Value::String("./skills/default.md".into()),
     );
-    raw.insert(
-        "skills".into(),
-        serde_json::Value::Object(skills),
-    );
+    raw.insert("skills".into(), serde_json::Value::Object(skills));
 
     let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
     let skill_mapping = config.skill_mapping();
     assert_eq!(skill_mapping.by_state.len(), 1);
-    assert_eq!(skill_mapping.by_state.get("todo"), Some(&"./skills/todo.md".to_string()));
-    assert_eq!(skill_mapping.default, Some("./skills/default.md".to_string()));
+    assert_eq!(
+        skill_mapping.by_state.get("todo"),
+        Some(&"./skills/todo.md".to_string())
+    );
+    assert_eq!(
+        skill_mapping.default,
+        Some("./skills/default.md".to_string())
+    );
 }
 
 #[test]
 fn test_skill_mapping_resolve() {
     let mut mapping = SkillMapping::default();
-    mapping.by_state.insert("todo".to_string(), "skills/todo.md".to_string());
+    mapping
+        .by_state
+        .insert("todo".to_string(), "skills/todo.md".to_string());
     mapping.default = Some("skills/default.md".to_string());
 
     assert_eq!(mapping.resolve_skill("Todo"), Some("skills/todo.md"));
     assert_eq!(mapping.resolve_skill("todo"), Some("skills/todo.md"));
-    assert_eq!(mapping.resolve_skill("in progress"), Some("skills/default.md"));
+    assert_eq!(
+        mapping.resolve_skill("in progress"),
+        Some("skills/default.md")
+    );
     assert_eq!(mapping.resolve_skill("unknown"), Some("skills/default.md"));
 }
 

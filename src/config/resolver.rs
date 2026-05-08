@@ -17,9 +17,8 @@ pub fn resolve_value(value: &str) -> String {
 
 pub fn resolve_path(value: &str, workflow_dir: &Path) -> Result<PathBuf, SympheoError> {
     let expanded = if let Some(stripped) = value.strip_prefix('~') {
-        let home = home::home_dir().ok_or_else(|| {
-            SympheoError::InvalidConfiguration("cannot resolve home dir".into())
-        })?;
+        let home = home::home_dir()
+            .ok_or_else(|| SympheoError::InvalidConfiguration("cannot resolve home dir".into()))?;
         home.join(stripped.trim_start_matches('/'))
     } else {
         PathBuf::from(value)
@@ -34,8 +33,14 @@ pub fn resolve_path(value: &str, workflow_dir: &Path) -> Result<PathBuf, Sympheo
     Ok(resolved.canonicalize().unwrap_or(resolved))
 }
 
-pub fn get_string(mapping: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<String> {
-    mapping.get(key).and_then(|v| v.as_str()).map(|s| s.to_string())
+pub fn get_string(
+    mapping: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Option<String> {
+    mapping
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
 pub fn get_i64(mapping: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<i64> {
@@ -46,7 +51,10 @@ pub fn get_bool(mapping: &serde_json::Map<String, serde_json::Value>, key: &str)
     mapping.get(key).and_then(|v| v.as_bool())
 }
 
-pub fn get_str_list(mapping: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<Vec<String>> {
+pub fn get_str_list(
+    mapping: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Option<Vec<String>> {
     mapping.get(key).and_then(|v| v.as_array()).map(|seq| {
         seq.iter()
             .filter_map(|item| item.as_str().map(|s| s.to_string()))
@@ -101,10 +109,7 @@ mod tests {
     #[test]
     fn test_get_string_found() {
         let mut map = serde_json::Map::<String, serde_json::Value>::new();
-        map.insert(
-            "key".into(),
-            serde_json::Value::String("value".into()),
-        );
+        map.insert("key".into(), serde_json::Value::String("value".into()));
         assert_eq!(get_string(&map, "key"), Some("value".to_string()));
     }
 
@@ -117,10 +122,7 @@ mod tests {
     #[test]
     fn test_get_i64_found() {
         let mut map = serde_json::Map::<String, serde_json::Value>::new();
-        map.insert(
-            "num".into(),
-            serde_json::Value::Number(42.into()),
-        );
+        map.insert("num".into(), serde_json::Value::Number(42.into()));
         assert_eq!(get_i64(&map, "num"), Some(42));
     }
 
@@ -131,11 +133,11 @@ mod tests {
             serde_json::Value::String("a".into()),
             serde_json::Value::String("b".into()),
         ];
-        map.insert(
-            "items".into(),
-            serde_json::Value::Array(seq),
+        map.insert("items".into(), serde_json::Value::Array(seq));
+        assert_eq!(
+            get_str_list(&map, "items"),
+            Some(vec!["a".to_string(), "b".to_string()])
         );
-        assert_eq!(get_str_list(&map, "items"), Some(vec!["a".to_string(), "b".to_string()]));
     }
 
     #[test]
@@ -152,11 +154,11 @@ mod tests {
             serde_json::Value::Number(42.into()),
             serde_json::Value::String("b".into()),
         ];
-        map.insert(
-            "items".into(),
-            serde_json::Value::Array(seq),
+        map.insert("items".into(), serde_json::Value::Array(seq));
+        assert_eq!(
+            get_str_list(&map, "items"),
+            Some(vec!["a".to_string(), "b".to_string()])
         );
-        assert_eq!(get_str_list(&map, "items"), Some(vec!["a".to_string(), "b".to_string()]));
     }
 
     #[test]
@@ -172,15 +174,9 @@ mod tests {
     #[test]
     fn test_get_string_map_found() {
         let mut inner = serde_json::Map::<String, serde_json::Value>::new();
-        inner.insert(
-            "x".into(),
-            serde_json::Value::String("y".into()),
-        );
+        inner.insert("x".into(), serde_json::Value::String("y".into()));
         let mut map = serde_json::Map::<String, serde_json::Value>::new();
-        map.insert(
-            "config".into(),
-            serde_json::Value::Object(inner.clone()),
-        );
+        map.insert("config".into(), serde_json::Value::Object(inner.clone()));
         assert_eq!(get_string_map(&map, "config"), Some(inner));
     }
 }

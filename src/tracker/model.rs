@@ -78,6 +78,35 @@ pub struct RunAttempt {
     pub error: Option<String>,
 }
 
+impl RunAttempt {
+    pub fn new(
+        issue_id: String,
+        issue_identifier: String,
+        attempt: Option<u32>,
+        workspace_path: std::path::PathBuf,
+    ) -> Self {
+        Self {
+            issue_id,
+            issue_identifier,
+            attempt,
+            workspace_path,
+            started_at: chrono::Utc::now(),
+            status: AttemptStatus::PreparingWorkspace,
+            error: None,
+        }
+    }
+
+    pub fn transition(&mut self, status: AttemptStatus) {
+        tracing::info!(
+            attempt = ?self.attempt,
+            issue = %self.issue_identifier,
+            ?status,
+            "Attempt status transition"
+        );
+        self.status = status;
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttemptStatus {
     PreparingWorkspace,

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use crate::agent::backend::AgentBackend;
-use crate::agent::parser::{parse_line, OpencodeEvent, TokenInfo, TurnResult};
+use crate::agent::parser::{parse_event_line, AgentEvent, TokenInfo, TurnResult};
 use crate::config::typed::ServiceConfig;
 use crate::error::SympheoError;
 use crate::tracker::model::Issue;
@@ -35,7 +35,7 @@ impl AgentBackend for LocalBackend {
         prompt: &str,
         session_id: Option<&str>,
         workspace_path: &Path,
-    ) -> Result<TurnResult, SympheoError> {
+    ) -> Result<(TurnResult, tokio::sync::mpsc::Receiver<AgentEvent>), SympheoError> {
         self.workspace_manager
             .validate_inside_root(workspace_path)?;
 
@@ -96,6 +96,8 @@ impl AgentBackend for LocalBackend {
         let reader = BufReader::new(stdout);
         let mut lines = reader.lines();
 
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(100);
+
         let mut current_session: Option<String> = None;
         let mut current_turn: Option<String> = None;
         let mut accumulated_text = String::new();
@@ -107,32 +109,35 @@ impl AgentBackend for LocalBackend {
                 if line.trim().is_empty() {
                     continue;
                 }
-                match parse_line(&line) {
-                    Some(OpencodeEvent::StepStart { session_id, part, .. }) => {
-                        current_session = Some(session_id);
-                        current_turn = Some(part.message_id.clone());
-                        tracing::debug!(session = %part.session_id, message = %part.message_id, "step_start");
+                if let Some(event) = parse_event_line(&line) {
+                    match &event {
+                        AgentEvent::StepStart { session_id, part, .. } => {
+                            current_session = Some(session_id.clone());
+                            current_turn = Some(part.message_id.clone());
+                            tracing::debug!(session = %part.session_id, message = %part.message_id, "step_start");
+                        }
+                        AgentEvent::Text { part, .. } => {
+                            accumulated_text.push_str(&part.text);
+                        }
+                        AgentEvent::StepFinish { part, .. } => {
+                            tokens = part.tokens.clone();
+                            success = part.reason == "stop" || part.reason == "tool-calls";
+                            tracing::info!(
+                                reason = %part.reason,
+                                success,
+                                "step_finish"
+                            );
+                        }
+                        _ => {}
                     }
-                    Some(OpencodeEvent::Text { part, .. }) => {
-                        accumulated_text.push_str(&part.text);
-                    }
-                    Some(OpencodeEvent::StepFinish { part, .. }) => {
-                        tokens = part.tokens.clone();
-                        success = part.reason == "stop" || part.reason == "tool-calls";
-                        tracing::info!(
-                            reason = %part.reason,
-                            success,
-                            "step_finish"
-                        );
-                        break;
-                    }
-                    _ => {}
+                    let _ = event_tx.send(event).await;
                 }
             }
         })
         .await;
 
         if read_result.is_err() {
+            drop(event_tx);
             let _ = child.kill().await;
             let _ = stderr_handle.abort();
             return Err(SympheoError::AgentTurnTimeout);
@@ -148,13 +153,16 @@ impl AgentBackend for LocalBackend {
         let sid = current_session.unwrap_or_else(|| issue.id.clone());
         let tid = current_turn.unwrap_or_else(|| "turn-1".into());
 
-        Ok(TurnResult {
-            session_id: sid.clone(),
-            turn_id: tid,
-            success,
-            text: accumulated_text,
-            tokens,
-        })
+        Ok((
+            TurnResult {
+                session_id: sid.clone(),
+                turn_id: tid,
+                success,
+                text: accumulated_text,
+                tokens,
+            },
+            event_rx,
+        ))
     }
 }
 
@@ -239,7 +247,7 @@ mod tests {
             created_at: None,
             updated_at: None,
         };
-        let result = backend.run_turn(&issue, "prompt", None, &tmp).await;
+        let result = backend.run_turn(&issue, "prompt", None, &tmp).await.map(|(tr, _rx)| tr);
         assert!(
             matches!(result, Err(SympheoError::AgentTurnTimeout)),
             "expected AgentTurnTimeout, got {:?}",
@@ -293,7 +301,7 @@ mod tests {
             created_at: None,
             updated_at: None,
         };
-        let result = backend.run_turn(&issue, "prompt", None, &tmp).await.unwrap();
+        let result = backend.run_turn(&issue, "prompt", None, &tmp).await.unwrap().0;
         assert!(result.success);
         assert_eq!(result.text, "hello");
         assert_eq!(result.session_id, "sess-1");
@@ -351,7 +359,7 @@ mod tests {
             created_at: None,
             updated_at: None,
         };
-        let result = backend.run_turn(&issue, "prompt", None, &tmp).await.unwrap();
+        let result = backend.run_turn(&issue, "prompt", None, &tmp).await.unwrap().0;
         assert!(!result.success);
         assert_eq!(result.text, "hello");
         let _ = std::fs::remove_dir_all(&tmp);
@@ -402,7 +410,7 @@ mod tests {
             created_at: None,
             updated_at: None,
         };
-        let result = backend.run_turn(&issue, "prompt", Some("existing-session"), &tmp).await.unwrap();
+        let result = backend.run_turn(&issue, "prompt", Some("existing-session"), &tmp).await.unwrap().0;
         assert!(result.success);
         assert_eq!(result.text, "hello");
         let _ = std::fs::remove_dir_all(&tmp);

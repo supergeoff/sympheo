@@ -1,6 +1,7 @@
 use crate::agent::backend::{daytona::DaytonaBackend, local::LocalBackend};
 use crate::agent::backend::AgentBackend;
-use crate::agent::parser::TurnResult;
+use crate::agent::parser::{AgentEvent, TurnResult};
+use tokio::sync::mpsc::Receiver;
 use crate::config::typed::ServiceConfig;
 use crate::error::SympheoError;
 use crate::tracker::model::Issue;
@@ -27,7 +28,7 @@ impl AgentRunner {
         prompt: &str,
         session_id: Option<&str>,
         workspace_path: &Path,
-    ) -> Result<TurnResult, SympheoError> {
+    ) -> Result<(TurnResult, Receiver<AgentEvent>), SympheoError> {
         self.backend.run_turn(issue, prompt, session_id, workspace_path).await
     }
 }

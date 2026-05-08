@@ -55,6 +55,11 @@ cat WORKFLOW.md | sed -n '/---/,/---/p' | head -n -1 | tail -n +2 | yq '.'
 2. Verify the `codex.command` in your config is correct.
 3. Check the `after_create` hook output. If the repo failed to clone, the agent has no code to work on.
 4. Look at the retry queue in the dashboard for the error message.
+5. **In local mode**, search the Sympheo logs for `opencode::stderr` warnings. Every line the agent writes to stderr is logged at WARN level and tagged with the issue ID:
+   ```bash
+   RUST_LOG=opencode::stderr=warn cargo run
+   ```
+5. **Check the logs for `opencode::stderr` lines.** In local mode, Sympheo captures the agent's stderr and logs each line at `WARN` level with the issue ID. This is often the fastest way to see why the agent exited (e.g., missing API key, invalid arguments, or runtime panics).
 
 ### "Agent stalls or times out"
 

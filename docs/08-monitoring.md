@@ -184,10 +184,39 @@ RUST_LOG=info cargo run -- --port 9090 2>&1 | jq .
 | New issue detected | INFO | `issue detected` |
 | Agent launched | INFO | `launching agent` |
 | Agent finished | INFO | `turn finished` |
+| Agent stderr output | WARN | `opencode::stderr` |
 | Retry scheduled | WARN | `scheduling retry` |
 | Workspace cleaned | INFO | `workspace removed` |
 | Config reloaded | INFO | `workflow reloaded` |
 | Validation error | ERROR | `startup validation failed` |
+### Agent Stderr Logging
+
+When running in **local mode**, Sympheo captures every line the agent writes to stderr and logs it at WARN level with the target `opencode::stderr`. Each line carries the `issue_id` field so you can correlate diagnostic output with the ticket it belongs to.
+
+To view only agent stderr output:
+
+```bash
+RUST_LOG=opencode::stderr=warn cargo run
+```
+
+In structured JSON mode the log entries look like:
+
+```json
+{
+  "timestamp": "2024-01-15T09:30:00Z",
+  "level": "WARN",
+  "target": "opencode::stderr",
+  "fields": {
+    "message": " LLMProviderError: rate limit exceeded",
+    "issue_id": "1234567890"
+  },
+  "span": {
+    "issue_identifier": "#42"
+  }
+}
+```
+
+> **Note:** Stderr logging is only available in local mode. Daytona mode runs the agent inside a sandbox; stderr is not forwarded to Sympheo's logs.
 
 ## Metrics
 

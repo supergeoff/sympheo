@@ -29,6 +29,13 @@ impl LocalBackend {
 
 #[async_trait]
 impl AgentBackend for LocalBackend {
+    /// Execute a single agent turn using the local backend.
+    ///
+    /// The agent process is spawned with both stdout and stderr piped.
+    /// stdout is parsed for JSON agent events; stderr is consumed by a
+    /// background task and logged at `WARN` level so diagnostic output
+    /// is never lost. The stderr task is aborted when the turn finishes
+    /// or times out, preventing leaked handles.
     async fn run_turn(
         &self,
         issue: &Issue,
@@ -89,7 +96,13 @@ impl AgentBackend for LocalBackend {
             .take()
             .ok_or_else(|| SympheoError::AgentRunnerError("missing stderr".into()))?;
 
-        // Spawn stderr reader task to capture agent diagnostic output
+        // Spawn an async reader task that consumes the agent's stderr stream.
+        // Each non-empty line is logged at WARN level with the target
+        // `opencode::stderr` and tagged with the issue ID so operators can
+        // correlate diagnostic output with the ticket it belongs to.
+        //
+        // The task is aborted when the turn completes or times out so the
+        // stderr pipe is always drained and never leaks.
         let issue_id_for_stderr = issue.id.clone();
         let stderr_handle = tokio::spawn(async move {
             let stderr_reader = BufReader::new(stderr);
@@ -153,14 +166,17 @@ impl AgentBackend for LocalBackend {
         if read_result.is_err() {
             drop(event_tx);
             kill_process_group(&mut child);
+            // Abort the stderr reader so the task does not outlive the turn.
             let _ = stderr_handle.abort();
             let _ = tokio::fs::remove_file(&prompt_file).await;
             return Err(SympheoError::AgentTurnTimeout);
         }
 
-        // Terminate the process since the turn is complete
-        // opencode run may not exit on its own after step_finish
+        // Terminate the process since the turn is complete.
+        // opencode run may not exit on its own after step_finish.
         kill_process_group(&mut child);
+        // Abort the stderr reader to ensure the task is reaped and no
+        // handles are leaked before we return.
         let _ = stderr_handle.abort();
         // Attempt to reap the process without blocking the result
         let _ = timeout(Duration::from_secs(5), child.wait()).await;

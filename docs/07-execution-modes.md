@@ -11,7 +11,8 @@ By default, if the `daytona` block is absent or `daytona.enabled` is `false`, Sy
 - Sympheo creates a directory under `workspace.root` for each issue (e.g., `~/sympheo_workspaces/ISSUE-42`).
 - The `after_create` hook is responsible for cloning the repository and setting up the environment.
 - The agent process (`codex.command`) is spawned as a child process on the host.
-- Sympheo reads the agent's stdout/stderr and parses events from the stream.
+- Sympheo reads the agent's stdout and parses JSON events from the stream.
+- The agent's **stderr is captured and logged** at `WARN` level, tagged with the issue ID, so diagnostic output is visible in the orchestrator logs.
 
 ### When to Use Local Mode
 

@@ -60,11 +60,11 @@ agent:
   max_turns: 10
   max_retry_backoff_ms: 300000
 
-codex:
+cli:
   command: opencode run
   turn_timeout_ms: 3600000
   read_timeout_ms: 5000
-  stall_timeout_ms: 300000
+  stall_timeout_ms: 1800000
 
 server:
   port: 9090

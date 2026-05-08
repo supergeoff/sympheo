@@ -47,8 +47,8 @@ impl ServiceConfig {
         self.raw.get("agent").and_then(|v| v.as_object())
     }
 
-    fn codex(&self) -> Option<&serde_json::Map<String, serde_json::Value>> {
-        self.raw.get("codex").and_then(|v| v.as_object())
+    fn cli(&self) -> Option<&serde_json::Map<String, serde_json::Value>> {
+        self.raw.get("cli").and_then(|v| v.as_object())
     }
 
     pub fn daytona(&self) -> Option<&serde_json::Map<String, serde_json::Value>> {
@@ -237,30 +237,30 @@ impl ServiceConfig {
         map
     }
 
-    pub fn codex_command(&self) -> String {
-        self.codex()
+    pub fn cli_command(&self) -> String {
+        self.cli()
             .and_then(|m| resolver::get_string(m, "command"))
-            .unwrap_or_else(|| "codex app-server".to_string())
+            .unwrap_or_else(|| "opencode run".to_string())
     }
 
-    pub fn codex_turn_timeout_ms(&self) -> u64 {
-        self.codex()
+    pub fn cli_turn_timeout_ms(&self) -> u64 {
+        self.cli()
             .and_then(|m| resolver::get_i64(m, "turn_timeout_ms"))
             .unwrap_or(3600000)
             .max(0) as u64
     }
 
-    pub fn codex_read_timeout_ms(&self) -> u64 {
-        self.codex()
+    pub fn cli_read_timeout_ms(&self) -> u64 {
+        self.cli()
             .and_then(|m| resolver::get_i64(m, "read_timeout_ms"))
             .unwrap_or(5000)
             .max(0) as u64
     }
 
-    pub fn codex_stall_timeout_ms(&self) -> i64 {
-        self.codex()
+    pub fn cli_stall_timeout_ms(&self) -> i64 {
+        self.cli()
             .and_then(|m| resolver::get_i64(m, "stall_timeout_ms"))
-            .unwrap_or(300000)
+            .unwrap_or(1800000)
     }
 
     pub fn continuation_prompt(&self) -> String {
@@ -357,7 +357,7 @@ impl ServiceConfig {
                 "tracker.project_number is required for github projects".into(),
             ));
         }
-        let cmd = self.codex_command();
+        let cmd = self.cli_command();
         if cmd.trim().is_empty() {
             return Err(SympheoError::InvalidConfiguration(
                 "codex.command is empty".into(),
@@ -652,8 +652,8 @@ mod tests {
     }
 
     #[test]
-    fn test_codex_command_default() {
-        assert_eq!(empty_config().codex_command(), "codex app-server");
+    fn test_cli_command_default() {
+        assert_eq!(empty_config().cli_command(), "opencode run");
     }
 
     #[test]
@@ -705,18 +705,18 @@ mod tests {
     }
 
     #[test]
-    fn test_codex_turn_timeout_default() {
-        assert_eq!(empty_config().codex_turn_timeout_ms(), 3600000);
+    fn test_cli_turn_timeout_default() {
+        assert_eq!(empty_config().cli_turn_timeout_ms(), 3600000);
     }
 
     #[test]
-    fn test_codex_read_timeout_default() {
-        assert_eq!(empty_config().codex_read_timeout_ms(), 5000);
+    fn test_cli_read_timeout_default() {
+        assert_eq!(empty_config().cli_read_timeout_ms(), 5000);
     }
 
     #[test]
-    fn test_codex_stall_timeout_default() {
-        assert_eq!(empty_config().codex_stall_timeout_ms(), 300000);
+    fn test_cli_stall_timeout_default() {
+        assert_eq!(empty_config().cli_stall_timeout_ms(), 1800000);
     }
 
     #[test]
@@ -877,7 +877,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_empty_codex_command() {
+    fn test_validate_empty_cli_command() {
         let mut raw = serde_json::Map::<String, serde_json::Value>::new();
         let mut tracker = serde_json::Map::<String, serde_json::Value>::new();
         tracker.insert("kind".into(), serde_json::Value::String("github".into()));
@@ -887,10 +887,10 @@ mod tests {
             serde_json::Value::String("owner/repo".into()),
         );
         tracker.insert("project_number".into(), serde_json::Value::Number(1.into()));
-        let mut codex = serde_json::Map::<String, serde_json::Value>::new();
-        codex.insert("command".into(), serde_json::Value::String("   ".into()));
+        let mut cli = serde_json::Map::<String, serde_json::Value>::new();
+        cli.insert("command".into(), serde_json::Value::String("   ".into()));
         raw.insert("tracker".into(), serde_json::Value::Object(tracker));
-        raw.insert("codex".into(), serde_json::Value::Object(codex));
+        raw.insert("cli".into(), serde_json::Value::Object(cli));
         let config = config_with(raw);
         assert!(matches!(
             config.validate_for_dispatch(),

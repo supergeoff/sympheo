@@ -7,7 +7,7 @@ use crate::tracker::model::Issue;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use tokio::sync::mpsc::Receiver;
+use tokio::sync::mpsc::Sender;
 
 pub struct AgentRunner {
     backend: Arc<dyn AgentBackend>,
@@ -30,9 +30,17 @@ impl AgentRunner {
         session_id: Option<&str>,
         workspace_path: &Path,
         cancelled: Arc<AtomicBool>,
-    ) -> Result<(TurnResult, Receiver<AgentEvent>), SympheoError> {
+        event_tx: Sender<AgentEvent>,
+    ) -> Result<TurnResult, SympheoError> {
         self.backend
-            .run_turn(issue, prompt, session_id, workspace_path, cancelled)
+            .run_turn(
+                issue,
+                prompt,
+                session_id,
+                workspace_path,
+                cancelled,
+                event_tx,
+            )
             .await
     }
 
@@ -57,9 +65,9 @@ mod tests {
     #[test]
     fn test_agent_runner_local_success() {
         let mut raw = base_config();
-        let mut codex = serde_json::Map::<String, serde_json::Value>::new();
-        codex.insert("command".into(), serde_json::Value::String("echo".into()));
-        raw.insert("codex".into(), serde_json::Value::Object(codex));
+        let mut cli = serde_json::Map::<String, serde_json::Value>::new();
+        cli.insert("command".into(), serde_json::Value::String("echo".into()));
+        raw.insert("cli".into(), serde_json::Value::Object(cli));
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
         let runner = AgentRunner::new(&config);
         assert!(runner.is_ok());

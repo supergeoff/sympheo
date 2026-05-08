@@ -34,15 +34,22 @@ hooks:
   timeout_ms: 60000
 
 agent:
-  max_concurrent_agents: 5
+  max_concurrent_agents: 1
   max_turns: 10
   max_retry_backoff_ms: 300000
 
-codex:
+cli:
   command: opencode run
+  # Hard ceiling for a single agent turn. Set well above the longest
+  # plausible spec/build session.
   turn_timeout_ms: 3600000
+  # stdin/stderr probe timeout; kept tight because it's a startup check.
   read_timeout_ms: 5000
-  stall_timeout_ms: 300000
+  # If no event has been observed for this many ms, the worker is
+  # considered stalled and forcibly killed. Must be larger than the
+  # silent-thinking gap of a model on a complex turn — 30 min covers
+  # planning + tool-call sequences without false positives.
+  stall_timeout_ms: 1800000
 
 server:
   port: 9090

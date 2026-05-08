@@ -5,7 +5,7 @@ use std::time::Duration;
 use tokio::time::timeout;
 
 use crate::agent::backend::AgentBackend;
-use crate::agent::parser::{parse_line, OpencodeEvent, TokenInfo, TurnResult};
+use crate::agent::parser::{parse_event_line, AgentEvent, TokenInfo, TurnResult};
 use crate::config::typed::ServiceConfig;
 use crate::error::SympheoError;
 use crate::tracker::model::Issue;
@@ -232,7 +232,7 @@ impl AgentBackend for DaytonaBackend {
         prompt: &str,
         session_id: Option<&str>,
         workspace_path: &Path,
-    ) -> Result<TurnResult, SympheoError> {
+    ) -> Result<(TurnResult, tokio::sync::mpsc::Receiver<AgentEvent>), SympheoError> {
         self.workspace_manager
             .validate_inside_root(workspace_path)?;
 
@@ -266,10 +266,13 @@ impl AgentBackend for DaytonaBackend {
             Duration::from_millis(self.config.turn_timeout_ms),
             self.execute_command(&sandbox_id, &opencode_cmd, "/workspace"),
         )
-        .await
-        .map_err(|_| SympheoError::AgentTurnTimeout)?;
+        .await;
 
-        let exec = exec_result?;
+        let exec = match exec_result {
+            Ok(Ok(exec)) => exec,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => return Err(SympheoError::AgentTurnTimeout),
+        };
 
         if exec.exit_code != 0 {
             return Err(SympheoError::AgentRunnerError(format!(
@@ -277,6 +280,8 @@ impl AgentBackend for DaytonaBackend {
                 exec.exit_code, exec.result
             )));
         }
+
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(100);
 
         let mut current_session: Option<String> = None;
         let mut current_turn: Option<String> = None;
@@ -288,33 +293,38 @@ impl AgentBackend for DaytonaBackend {
             if line.trim().is_empty() {
                 continue;
             }
-            match parse_line(line) {
-                Some(OpencodeEvent::StepStart { session_id, part, .. }) => {
-                    current_session = Some(session_id);
-                    current_turn = Some(part.message_id.clone());
+            if let Some(event) = parse_event_line(line) {
+                match &event {
+                    AgentEvent::StepStart { session_id, part, .. } => {
+                        current_session = Some(session_id.clone());
+                        current_turn = Some(part.message_id.clone());
+                    }
+                    AgentEvent::Text { part, .. } => {
+                        accumulated_text.push_str(&part.text);
+                    }
+                    AgentEvent::StepFinish { part, .. } => {
+                        tokens = part.tokens.clone();
+                        success = part.reason == "stop" || part.reason == "tool-calls";
+                    }
+                    _ => {}
                 }
-                Some(OpencodeEvent::Text { part, .. }) => {
-                    accumulated_text.push_str(&part.text);
-                }
-                Some(OpencodeEvent::StepFinish { part, .. }) => {
-                    tokens = part.tokens.clone();
-                    success = part.reason == "stop" || part.reason == "tool-calls";
-                    break;
-                }
-                _ => {}
+                let _ = event_tx.send(event).await;
             }
         }
 
         let sid = current_session.unwrap_or_else(|| issue.id.clone());
         let tid = current_turn.unwrap_or_else(|| "turn-1".into());
 
-        Ok(TurnResult {
-            session_id: sid.clone(),
-            turn_id: tid,
-            success,
-            text: accumulated_text,
-            tokens,
-        })
+        Ok((
+            TurnResult {
+                session_id: sid.clone(),
+                turn_id: tid,
+                success,
+                text: accumulated_text,
+                tokens,
+            },
+            event_rx,
+        ))
     }
 }
 

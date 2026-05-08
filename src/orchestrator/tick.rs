@@ -3,7 +3,8 @@ use crate::config::typed::ServiceConfig;
 use crate::error::SympheoError;
 use crate::orchestrator::retry::schedule_retry;
 use crate::orchestrator::state::{OrchestratorState, RunningEntry};
-use crate::tracker::model::{Issue, LiveSession};
+use crate::agent::parser::AgentEvent;
+use crate::tracker::model::{AttemptStatus, Issue, LiveSession, RunAttempt};
 use crate::tracker::IssueTracker;
 use crate::workspace::manager::WorkspaceManager;
 use chrono::Utc;
@@ -430,7 +431,15 @@ async fn run_worker(
         )
         .await?;
 
+    let mut attempt_record = RunAttempt::new(
+        issue.id.clone(),
+        issue.identifier.clone(),
+        attempt,
+        workspace.path.clone(),
+    );
+
     if let Some(script) = config.hook_script("before_run") {
+        attempt_record.transition(AttemptStatus::PreparingWorkspace);
         workspace_manager
             .run_hook("before_run", &script, &workspace.path)
             .await?;
@@ -445,17 +454,79 @@ async fn run_worker(
             break;
         }
 
+        attempt_record.transition(AttemptStatus::BuildingPrompt);
         let prompt = if turn_number == 1 {
-            build_prompt(config, &issue, attempt)?
+            build_prompt_strict(config, &issue, attempt)?
         } else {
-            "Continue working on the current task. Review the conversation history and proceed with the next step.".to_string()
+            config.continuation_prompt()
         };
 
-        let turn_result = runner
+        attempt_record.transition(AttemptStatus::LaunchingAgentProcess);
+        let (turn_result, mut event_rx) = runner
             .run_turn(&issue, &prompt, current_session.as_deref(), &workspace.path)
             .await?;
 
-        // Update orchestrator state with session metadata and tokens
+        attempt_record.transition(AttemptStatus::StreamingTurn);
+
+        // Consume streamed events and update state
+        while let Some(event) = event_rx.recv().await {
+            match &event {
+                AgentEvent::RateLimit { payload } => {
+                    let mut st = state.write().await;
+                    st.codex_rate_limits = Some(payload.clone());
+                }
+                AgentEvent::TokenUsage { input, output, total } => {
+                    let (last_input, last_output, last_total) = {
+                        let st = state.read().await;
+                        if let Some(entry) = st.running.get(&issue.id) {
+                            if let Some(ref sess) = entry.session {
+                                (
+                                    sess.last_reported_input_tokens,
+                                    sess.last_reported_output_tokens,
+                                    sess.last_reported_total_tokens,
+                                )
+                            } else {
+                                (0, 0, 0)
+                            }
+                        } else {
+                            (0, 0, 0)
+                        }
+                    };
+                    let delta_input = input.saturating_sub(last_input);
+                    let delta_output = output.saturating_sub(last_output);
+                    let delta_total = total.saturating_sub(last_total);
+
+                    let mut st = state.write().await;
+                    st.codex_totals.input_tokens += delta_input;
+                    st.codex_totals.output_tokens += delta_output;
+                    st.codex_totals.total_tokens += delta_total;
+                    if let Some(entry) = st.running.get_mut(&issue.id) {
+                        if let Some(ref mut sess) = entry.session {
+                            sess.last_reported_input_tokens = *input;
+                            sess.last_reported_output_tokens = *output;
+                            sess.last_reported_total_tokens = *total;
+                            sess.input_tokens = *input;
+                            sess.output_tokens = *output;
+                            sess.total_tokens = *total;
+                        }
+                    }
+                }
+                AgentEvent::Notification { message, .. }
+                | AgentEvent::TurnFailed { reason: message, .. } => {
+                    let mut st = state.write().await;
+                    if let Some(entry) = st.running.get_mut(&issue.id) {
+                        if let Some(ref mut sess) = entry.session {
+                            sess.last_event = Some(format!("{:?}", std::mem::discriminant(&event)));
+                            sess.last_message = Some(message.clone());
+                            sess.last_timestamp = Some(Utc::now());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Update session metadata from turn result
         {
             let mut st = state.write().await;
             if let Some(entry) = st.running.get_mut(&issue.id) {
@@ -476,15 +547,11 @@ async fn run_worker(
                     last_reported_total_tokens: turn_result.tokens.as_ref().map(|t| t.total).unwrap_or(0),
                     turn_count: entry.turn_count,
                 });
-                if let Some(ref tokens) = turn_result.tokens {
-                    st.codex_totals.input_tokens += tokens.input;
-                    st.codex_totals.output_tokens += tokens.output;
-                    st.codex_totals.total_tokens += tokens.total;
-                }
             }
         }
 
         if !turn_result.success {
+            attempt_record.transition(AttemptStatus::Failed);
             return Err(SympheoError::AgentRunnerError(
                 "turn reported failure".into(),
             ));
@@ -512,6 +579,7 @@ async fn run_worker(
         turn_number += 1;
     }
 
+    attempt_record.transition(AttemptStatus::Finishing);
     if let Some(script) = config.hook_script("after_run") {
         if let Err(e) = workspace_manager.run_hook("after_run", &script, &workspace.path).await {
             warn!(error = %e, "after_run hook failed");
@@ -521,7 +589,7 @@ async fn run_worker(
     Ok(())
 }
 
-fn build_prompt(
+fn build_prompt_strict(
     config: &ServiceConfig,
     issue: &Issue,
     attempt: Option<u32>,
@@ -534,6 +602,19 @@ fn build_prompt(
     } else {
         config.prompt_template.clone()
     };
+
+    // Strict mode: validate root variables
+    let re = regex::Regex::new(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}")
+        .map_err(|e| SympheoError::TemplateParseError(e.to_string()))?;
+    let available_vars = ["issue", "attempt"];
+    for cap in re.captures_iter(&template_str) {
+        let var_name = cap.get(1).unwrap().as_str();
+        if !available_vars.contains(&var_name) {
+            return Err(SympheoError::TemplateRenderError(
+                format!("Unknown variable: {}", var_name)
+            ));
+        }
+    }
 
     let template = liquid::ParserBuilder::with_stdlib()
         .build()
@@ -585,7 +666,7 @@ mod tests {
             created_at: None,
             updated_at: None,
         };
-        let prompt = build_prompt(&config, &issue, None).unwrap();
+        let prompt = build_prompt_strict(&config, &issue, None).unwrap();
         assert_eq!(prompt, "Fix the bug");
     }
 
@@ -611,7 +692,7 @@ mod tests {
             created_at: None,
             updated_at: None,
         };
-        let prompt = build_prompt(&config, &issue, None).unwrap();
+        let prompt = build_prompt_strict(&config, &issue, None).unwrap();
         assert_eq!(prompt, "You are working on an issue from the tracker.");
     }
 
@@ -637,7 +718,7 @@ mod tests {
             created_at: None,
             updated_at: None,
         };
-        let prompt = build_prompt(&config, &issue, Some(2)).unwrap();
+        let prompt = build_prompt_strict(&config, &issue, Some(2)).unwrap();
         assert_eq!(prompt, "Attempt 2");
     }
 
@@ -668,8 +749,8 @@ mod tests {
     #[test]
     fn test_serde_json_to_liquid_number_float() {
         assert_eq!(
-            serde_json_to_liquid(&serde_json::Value::Number(serde_json::Number::from_f64(3.14).unwrap())),
-            liquid::model::Value::Scalar(3.14f64.into())
+            serde_json_to_liquid(&serde_json::Value::Number(serde_json::Number::from_f64(2.71).unwrap())),
+            liquid::model::Value::Scalar(2.71f64.into())
         );
     }
 
@@ -727,7 +808,33 @@ mod tests {
             created_at: None,
             updated_at: None,
         };
-        let result = build_prompt(&config, &issue, None);
+        let result = build_prompt_strict(&config, &issue, None);
+        assert!(matches!(result, Err(SympheoError::TemplateRenderError(_))));
+    }
+
+    #[test]
+    fn test_build_prompt_strict_unknown_root_var() {
+        let mut raw = serde_yaml::Mapping::new();
+        raw.insert(
+            serde_yaml::Value::String("tracker".into()),
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+        );
+        let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "Hello {{ unknown_var }}".into());
+        let issue = Issue {
+            id: "1".into(),
+            identifier: "TEST-1".into(),
+            title: "bug".into(),
+            description: None,
+            priority: None,
+            state: "todo".into(),
+            branch_name: None,
+            url: None,
+            labels: vec![],
+            blocked_by: vec![],
+            created_at: None,
+            updated_at: None,
+        };
+        let result = build_prompt_strict(&config, &issue, None);
         assert!(matches!(result, Err(SympheoError::TemplateRenderError(_))));
     }
 
@@ -753,7 +860,7 @@ mod tests {
             created_at: None,
             updated_at: None,
         };
-        let result = build_prompt(&config, &issue, None);
+        let result = build_prompt_strict(&config, &issue, None);
         assert!(matches!(result, Err(SympheoError::TemplateParseError(_))));
     }
 }

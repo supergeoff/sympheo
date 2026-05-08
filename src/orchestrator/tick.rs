@@ -1,12 +1,13 @@
 use crate::agent::runner::AgentRunner;
 use crate::config::typed::ServiceConfig;
-use crate::error::SymphonyError;
+use crate::error::SympheoError;
 use crate::orchestrator::retry::schedule_retry;
 use crate::orchestrator::state::{OrchestratorState, RunningEntry};
-use crate::tracker::model::Issue;
+use crate::tracker::model::{Issue, LiveSession};
 use crate::tracker::IssueTracker;
 use crate::workspace::manager::WorkspaceManager;
 use chrono::Utc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
@@ -23,7 +24,7 @@ impl Orchestrator {
     pub fn new(
         config: ServiceConfig,
         tracker: Arc<dyn IssueTracker>,
-    ) -> Result<Self, SymphonyError> {
+    ) -> Result<Self, SympheoError> {
         let state = OrchestratorState::new(
             config.poll_interval_ms(),
             config.max_concurrent_agents(),
@@ -119,6 +120,7 @@ impl Orchestrator {
 
             // Dispatch
             let issue_id = issue.id.clone();
+            let cancelled = Arc::new(AtomicBool::new(false));
             state.claimed.insert(issue_id.clone());
             state.running.insert(
                 issue_id.clone(),
@@ -128,11 +130,12 @@ impl Orchestrator {
                     started_at: Utc::now(),
                     retry_attempt: None,
                     turn_count: 0,
+                    cancelled: cancelled.clone(),
                 },
             );
             drop(state); // release lock before spawning
 
-            self.spawn_worker(issue, None, max_turns);
+            self.spawn_worker(issue, None, max_turns, cancelled);
 
             state = self.state.write().await;
         }
@@ -140,7 +143,7 @@ impl Orchestrator {
         info!("orchestrator tick end");
     }
 
-    async fn reconcile(&self) -> Result<(), SymphonyError> {
+    async fn reconcile(&self) -> Result<(), SympheoError> {
         let running_ids: Vec<String> = {
             let state = self.state.read().await;
             state.running.keys().cloned().collect()
@@ -195,6 +198,9 @@ impl Orchestrator {
         for issue in refreshed {
             let state_lc = issue.state.to_lowercase();
             if terminal_states.contains(&state_lc) {
+                if let Some(entry) = state.running.get(&issue.id) {
+                    entry.cancelled.store(true, Ordering::Relaxed);
+                }
                 if let Some(entry) = state.running.remove(&issue.id) {
                     state.claimed.remove(&issue.id);
                     drop(state);
@@ -208,6 +214,9 @@ impl Orchestrator {
                     entry.issue = issue;
                 }
             } else {
+                if let Some(entry) = state.running.get(&issue.id) {
+                    entry.cancelled.store(true, Ordering::Relaxed);
+                }
                 if state.running.remove(&issue.id).is_some() {
                     state.claimed.remove(&issue.id);
                 }
@@ -217,7 +226,7 @@ impl Orchestrator {
         Ok(())
     }
 
-    fn spawn_worker(&self, issue: Issue, attempt: Option<u32>, max_turns: u32) {
+    fn spawn_worker(&self, issue: Issue, attempt: Option<u32>, max_turns: u32, cancelled: Arc<AtomicBool>) {
         let state = self.state.clone();
         let config = self.config.clone();
         let runner = self.runner.clone();
@@ -234,10 +243,17 @@ impl Orchestrator {
                 runner.as_ref(),
                 tracker.as_ref(),
                 workspace_manager.as_ref(),
+                state.clone(),
+                cancelled,
             )
             .await;
 
             let mut st = state.write().await;
+            // Accumulate runtime for the finished session
+            if let Some(entry) = st.running.get(&issue.id) {
+                let elapsed = (Utc::now() - entry.started_at).num_seconds() as f64;
+                st.codex_totals.seconds_running += elapsed;
+            }
             match result {
                 Ok(()) => {
                     info!(issue_id = %issue.id, "worker exited normally");
@@ -282,6 +298,8 @@ impl Orchestrator {
         let mut state = self.state.write().await;
         let cfg = self.config.read().await.clone();
         if let Some(entry) = state.running.remove(issue_id) {
+            let elapsed = (Utc::now() - entry.started_at).num_seconds() as f64;
+            state.codex_totals.seconds_running += elapsed;
             if normal {
                 state.completed.insert(issue_id.to_string());
                 let retry = schedule_retry(
@@ -327,7 +345,21 @@ impl Orchestrator {
 
             let candidates = match self.tracker.fetch_candidate_issues().await {
                 Ok(c) => c,
-                Err(_) => continue,
+                Err(e) => {
+                    warn!(issue_id = %issue_id, error = %e, "retry candidate fetch failed, requeuing");
+                    let config = self.config.read().await.clone();
+                    let new_retry = schedule_retry(
+                        issue_id.clone(),
+                        retry.identifier.clone(),
+                        retry.attempt + 1,
+                        Some("retry poll failed".into()),
+                        &config,
+                        false,
+                    );
+                    let mut st = self.state.write().await;
+                    st.retry_attempts.insert(issue_id, new_retry);
+                    continue;
+                }
             };
 
             let config = self.config.read().await.clone();
@@ -346,7 +378,7 @@ impl Orchestrator {
                     let new_retry = schedule_retry(
                         issue_id.clone(),
                         issue.identifier.clone(),
-                        retry.attempt + 1,
+                        retry.attempt,
                         Some("no available orchestrator slots".into()),
                         &config,
                         false,
@@ -354,6 +386,7 @@ impl Orchestrator {
                     st.retry_attempts.insert(issue_id, new_retry);
                     continue;
                 }
+                let cancelled = Arc::new(AtomicBool::new(false));
                 st.claimed.insert(issue_id.clone());
                 st.running.insert(
                     issue_id.clone(),
@@ -363,10 +396,11 @@ impl Orchestrator {
                         started_at: Utc::now(),
                         retry_attempt: Some(retry.attempt),
                         turn_count: 0,
+                        cancelled: cancelled.clone(),
                     },
                 );
                 drop(st);
-                self.spawn_worker(issue, Some(retry.attempt), config.max_turns());
+                self.spawn_worker(issue, Some(retry.attempt), config.max_turns(), cancelled);
             } else {
                 let mut st = self.state.write().await;
                 st.claimed.remove(&issue_id);
@@ -377,6 +411,7 @@ impl Orchestrator {
 
 use std::time::Instant;
 
+#[allow(clippy::too_many_arguments)]
 async fn run_worker(
     issue: Issue,
     attempt: Option<u32>,
@@ -385,7 +420,9 @@ async fn run_worker(
     runner: &AgentRunner,
     tracker: &dyn IssueTracker,
     workspace_manager: &WorkspaceManager,
-) -> Result<(), SymphonyError> {
+    state: Arc<RwLock<OrchestratorState>>,
+    cancelled: Arc<AtomicBool>,
+) -> Result<(), SympheoError> {
     let workspace = workspace_manager
         .create_or_reuse(
             &issue.identifier,
@@ -403,6 +440,11 @@ async fn run_worker(
     let mut turn_number = 1;
 
     loop {
+        if cancelled.load(Ordering::Relaxed) {
+            info!(issue_id = %issue.id, "worker cancelled by orchestrator, stopping");
+            break;
+        }
+
         let prompt = if turn_number == 1 {
             build_prompt(config, &issue, attempt)?
         } else {
@@ -413,8 +455,37 @@ async fn run_worker(
             .run_turn(&issue, &prompt, current_session.as_deref(), &workspace.path)
             .await?;
 
+        // Update orchestrator state with session metadata and tokens
+        {
+            let mut st = state.write().await;
+            if let Some(entry) = st.running.get_mut(&issue.id) {
+                entry.turn_count += 1;
+                entry.session = Some(LiveSession {
+                    session_id: format!("{}-{}", turn_result.session_id, turn_result.turn_id),
+                    thread_id: turn_result.session_id.clone(),
+                    turn_id: turn_result.turn_id.clone(),
+                    agent_pid: None,
+                    last_event: Some("turn_completed".into()),
+                    last_timestamp: Some(Utc::now()),
+                    last_message: Some(turn_result.text.clone()),
+                    input_tokens: turn_result.tokens.as_ref().map(|t| t.input).unwrap_or(0),
+                    output_tokens: turn_result.tokens.as_ref().map(|t| t.output).unwrap_or(0),
+                    total_tokens: turn_result.tokens.as_ref().map(|t| t.total).unwrap_or(0),
+                    last_reported_input_tokens: turn_result.tokens.as_ref().map(|t| t.input).unwrap_or(0),
+                    last_reported_output_tokens: turn_result.tokens.as_ref().map(|t| t.output).unwrap_or(0),
+                    last_reported_total_tokens: turn_result.tokens.as_ref().map(|t| t.total).unwrap_or(0),
+                    turn_count: entry.turn_count,
+                });
+                if let Some(ref tokens) = turn_result.tokens {
+                    st.codex_totals.input_tokens += tokens.input;
+                    st.codex_totals.output_tokens += tokens.output;
+                    st.codex_totals.total_tokens += tokens.total;
+                }
+            }
+        }
+
         if !turn_result.success {
-            return Err(SymphonyError::AgentRunnerError(
+            return Err(SympheoError::AgentRunnerError(
                 "turn reported failure".into(),
             ));
         }
@@ -423,7 +494,7 @@ async fn run_worker(
 
         // Refresh issue state
         let refreshed = tracker
-            .fetch_issue_states_by_ids(&[issue.id.clone()])
+            .fetch_issue_states_by_ids(std::slice::from_ref(&issue.id))
             .await?;
         let active_states = config.active_states();
         let terminal_states = config.terminal_states();
@@ -454,7 +525,7 @@ fn build_prompt(
     config: &ServiceConfig,
     issue: &Issue,
     attempt: Option<u32>,
-) -> Result<String, SymphonyError> {
+) -> Result<String, SympheoError> {
     use liquid::model::Value;
     use std::collections::HashMap;
 
@@ -466,12 +537,12 @@ fn build_prompt(
 
     let template = liquid::ParserBuilder::with_stdlib()
         .build()
-        .map_err(|e| SymphonyError::TemplateParseError(e.to_string()))?
+        .map_err(|e| SympheoError::TemplateParseError(e.to_string()))?
         .parse(&template_str)
-        .map_err(|e| SymphonyError::TemplateParseError(e.to_string()))?;
+        .map_err(|e| SympheoError::TemplateParseError(e.to_string()))?;
 
     let mut globals = HashMap::new();
-    let issue_map = serde_json::to_value(issue).map_err(|e| SymphonyError::TemplateRenderError(e.to_string()))?;
+    let issue_map = serde_json::to_value(issue).map_err(|e| SympheoError::TemplateRenderError(e.to_string()))?;
     let mut obj = liquid::model::Object::new();
     for (k, v) in issue_map.as_object().unwrap() {
         obj.insert(kstring::KString::from_ref(k), serde_json_to_liquid(v));
@@ -483,8 +554,208 @@ fn build_prompt(
 
     let output = template
         .render(&globals)
-        .map_err(|e| SymphonyError::TemplateRenderError(e.to_string()))?;
+        .map_err(|e| SympheoError::TemplateRenderError(e.to_string()))?;
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_build_prompt_with_template() {
+        let mut raw = serde_yaml::Mapping::new();
+        raw.insert(
+            serde_yaml::Value::String("tracker".into()),
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+        );
+        let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "Fix {{ issue.title }}".into());
+        let issue = Issue {
+            id: "1".into(),
+            identifier: "TEST-1".into(),
+            title: "the bug".into(),
+            description: None,
+            priority: None,
+            state: "todo".into(),
+            branch_name: None,
+            url: None,
+            labels: vec![],
+            blocked_by: vec![],
+            created_at: None,
+            updated_at: None,
+        };
+        let prompt = build_prompt(&config, &issue, None).unwrap();
+        assert_eq!(prompt, "Fix the bug");
+    }
+
+    #[test]
+    fn test_build_prompt_empty_template() {
+        let mut raw = serde_yaml::Mapping::new();
+        raw.insert(
+            serde_yaml::Value::String("tracker".into()),
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+        );
+        let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
+        let issue = Issue {
+            id: "1".into(),
+            identifier: "TEST-1".into(),
+            title: "bug".into(),
+            description: None,
+            priority: None,
+            state: "todo".into(),
+            branch_name: None,
+            url: None,
+            labels: vec![],
+            blocked_by: vec![],
+            created_at: None,
+            updated_at: None,
+        };
+        let prompt = build_prompt(&config, &issue, None).unwrap();
+        assert_eq!(prompt, "You are working on an issue from the tracker.");
+    }
+
+    #[test]
+    fn test_build_prompt_with_attempt() {
+        let mut raw = serde_yaml::Mapping::new();
+        raw.insert(
+            serde_yaml::Value::String("tracker".into()),
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+        );
+        let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "Attempt {{ attempt }}".into());
+        let issue = Issue {
+            id: "1".into(),
+            identifier: "TEST-1".into(),
+            title: "bug".into(),
+            description: None,
+            priority: None,
+            state: "todo".into(),
+            branch_name: None,
+            url: None,
+            labels: vec![],
+            blocked_by: vec![],
+            created_at: None,
+            updated_at: None,
+        };
+        let prompt = build_prompt(&config, &issue, Some(2)).unwrap();
+        assert_eq!(prompt, "Attempt 2");
+    }
+
+    #[test]
+    fn test_serde_json_to_liquid_null() {
+        assert_eq!(
+            serde_json_to_liquid(&serde_json::Value::Null),
+            liquid::model::Value::Nil
+        );
+    }
+
+    #[test]
+    fn test_serde_json_to_liquid_bool() {
+        assert_eq!(
+            serde_json_to_liquid(&serde_json::Value::Bool(true)),
+            liquid::model::Value::Scalar(true.into())
+        );
+    }
+
+    #[test]
+    fn test_serde_json_to_liquid_number_int() {
+        assert_eq!(
+            serde_json_to_liquid(&serde_json::Value::Number(42.into())),
+            liquid::model::Value::Scalar(42i64.into())
+        );
+    }
+
+    #[test]
+    fn test_serde_json_to_liquid_number_float() {
+        assert_eq!(
+            serde_json_to_liquid(&serde_json::Value::Number(serde_json::Number::from_f64(3.14).unwrap())),
+            liquid::model::Value::Scalar(3.14f64.into())
+        );
+    }
+
+    #[test]
+    fn test_serde_json_to_liquid_string() {
+        assert_eq!(
+            serde_json_to_liquid(&serde_json::Value::String("hello".into())),
+            liquid::model::Value::Scalar("hello".into())
+        );
+    }
+
+    #[test]
+    fn test_serde_json_to_liquid_array() {
+        let json = serde_json::json!([1, 2, 3]);
+        let liquid = serde_json_to_liquid(&json);
+        match liquid {
+            liquid::model::Value::Array(arr) => {
+                assert_eq!(arr.len(), 3);
+            }
+            _ => panic!("expected array"),
+        }
+    }
+
+    #[test]
+    fn test_serde_json_to_liquid_object() {
+        let json = serde_json::json!({"a": 1, "b": "two"});
+        let liquid = serde_json_to_liquid(&json);
+        match liquid {
+            liquid::model::Value::Object(obj) => {
+                assert_eq!(obj.len(), 2);
+            }
+            _ => panic!("expected object"),
+        }
+    }
+
+    #[test]
+    fn test_build_prompt_unknown_variable_fails() {
+        let mut raw = serde_yaml::Mapping::new();
+        raw.insert(
+            serde_yaml::Value::String("tracker".into()),
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+        );
+        let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "Hello {{ unknown }}".into());
+        let issue = Issue {
+            id: "1".into(),
+            identifier: "TEST-1".into(),
+            title: "bug".into(),
+            description: None,
+            priority: None,
+            state: "todo".into(),
+            branch_name: None,
+            url: None,
+            labels: vec![],
+            blocked_by: vec![],
+            created_at: None,
+            updated_at: None,
+        };
+        let result = build_prompt(&config, &issue, None);
+        assert!(matches!(result, Err(SympheoError::TemplateRenderError(_))));
+    }
+
+    #[test]
+    fn test_build_prompt_invalid_template_syntax() {
+        let mut raw = serde_yaml::Mapping::new();
+        raw.insert(
+            serde_yaml::Value::String("tracker".into()),
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+        );
+        let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "{{ unclosed".into());
+        let issue = Issue {
+            id: "1".into(),
+            identifier: "TEST-1".into(),
+            title: "bug".into(),
+            description: None,
+            priority: None,
+            state: "todo".into(),
+            branch_name: None,
+            url: None,
+            labels: vec![],
+            blocked_by: vec![],
+            created_at: None,
+            updated_at: None,
+        };
+        let result = build_prompt(&config, &issue, None);
+        assert!(matches!(result, Err(SympheoError::TemplateParseError(_))));
+    }
 }
 
 fn serde_json_to_liquid(value: &serde_json::Value) -> liquid::model::Value {

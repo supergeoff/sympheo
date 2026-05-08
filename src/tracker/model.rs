@@ -108,3 +108,146 @@ pub struct WorkspaceInfo {
     pub workspace_key: String,
     pub created_now: bool,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_issue_is_blocked_with_active_blocker() {
+        let issue = Issue {
+            id: "1".into(),
+            identifier: "TEST-1".into(),
+            title: "test".into(),
+            description: None,
+            priority: None,
+            state: "todo".into(),
+            branch_name: None,
+            url: None,
+            labels: vec![],
+            blocked_by: vec![BlockerRef {
+                id: Some("2".into()),
+                identifier: Some("TEST-2".into()),
+                state: Some("in progress".into()),
+            }],
+            created_at: None,
+            updated_at: None,
+        };
+        let terminal = vec!["closed".into(), "done".into()];
+        assert!(issue.is_blocked(&terminal));
+    }
+
+    #[test]
+    fn test_issue_is_not_blocked_when_blocker_terminal() {
+        let issue = Issue {
+            id: "1".into(),
+            identifier: "TEST-1".into(),
+            title: "test".into(),
+            description: None,
+            priority: None,
+            state: "todo".into(),
+            branch_name: None,
+            url: None,
+            labels: vec![],
+            blocked_by: vec![BlockerRef {
+                id: Some("2".into()),
+                identifier: Some("TEST-2".into()),
+                state: Some("Closed".into()),
+            }],
+            created_at: None,
+            updated_at: None,
+        };
+        let terminal = vec!["closed".into(), "done".into()];
+        assert!(!issue.is_blocked(&terminal));
+    }
+
+    #[test]
+    fn test_issue_not_blocked_empty_blockers() {
+        let issue = Issue {
+            id: "1".into(),
+            identifier: "TEST-1".into(),
+            title: "test".into(),
+            description: None,
+            priority: None,
+            state: "todo".into(),
+            branch_name: None,
+            url: None,
+            labels: vec![],
+            blocked_by: vec![],
+            created_at: None,
+            updated_at: None,
+        };
+        let terminal = vec!["closed".into()];
+        assert!(!issue.is_blocked(&terminal));
+    }
+
+    #[test]
+    fn test_issue_blocked_blocker_with_no_state() {
+        let issue = Issue {
+            id: "1".into(),
+            identifier: "TEST-1".into(),
+            title: "test".into(),
+            description: None,
+            priority: None,
+            state: "todo".into(),
+            branch_name: None,
+            url: None,
+            labels: vec![],
+            blocked_by: vec![BlockerRef {
+                id: Some("2".into()),
+                identifier: Some("TEST-2".into()),
+                state: None,
+            }],
+            created_at: None,
+            updated_at: None,
+        };
+        let terminal = vec!["closed".into()];
+        assert!(!issue.is_blocked(&terminal));
+    }
+
+    #[test]
+    fn test_issue_blocked_multiple_blockers() {
+        let issue = Issue {
+            id: "1".into(),
+            identifier: "TEST-1".into(),
+            title: "test".into(),
+            description: None,
+            priority: None,
+            state: "todo".into(),
+            branch_name: None,
+            url: None,
+            labels: vec![],
+            blocked_by: vec![
+                BlockerRef {
+                    id: Some("2".into()),
+                    identifier: Some("TEST-2".into()),
+                    state: Some("closed".into()),
+                },
+                BlockerRef {
+                    id: Some("3".into()),
+                    identifier: Some("TEST-3".into()),
+                    state: Some("in progress".into()),
+                },
+            ],
+            created_at: None,
+            updated_at: None,
+        };
+        let terminal = vec!["closed".into(), "done".into()];
+        assert!(issue.is_blocked(&terminal));
+    }
+
+    #[test]
+    fn test_token_totals_default() {
+        let totals = TokenTotals::default();
+        assert_eq!(totals.input_tokens, 0);
+        assert_eq!(totals.output_tokens, 0);
+        assert_eq!(totals.total_tokens, 0);
+        assert_eq!(totals.seconds_running, 0.0);
+    }
+
+    #[test]
+    fn test_attempt_status_equality() {
+        assert_eq!(AttemptStatus::Succeeded, AttemptStatus::Succeeded);
+        assert_ne!(AttemptStatus::Succeeded, AttemptStatus::Failed);
+    }
+}

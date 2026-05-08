@@ -1,8 +1,8 @@
 [package]
-name = "symphonie"
+name = "sympheo"
 version = "0.1.0"
 edition = "2021"
-authors = ["Symphony Contributors"]
+authors = ["Sympheo Contributors"]
 description = "Orchestrates coding agents to get project work done"
 
 [dependencies]
@@ -30,3 +30,5 @@ home = "0.5"
 
 [dev-dependencies]
 tokio-test = "0.4"
+wiremock = "0.6"
+reqwest = { version = "0.12", features = ["json"] }

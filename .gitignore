@@ -22,4 +22,4 @@ log/
 .env.local
 
 # Workspaces (runtime data)
-symphonie_workspaces/
+sympheo_workspaces/

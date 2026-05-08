@@ -17,11 +17,11 @@ polling:
   interval_ms: 30000
 
 workspace:
-  root: ~/symphony_workspaces
+  root: ~/sympheo_workspaces
 
 hooks:
   after_create: |
-    echo "Workspace created"
+    git clone https://x-access-token:${GITHUB_TOKEN}@github.com/supergeoff/sympheo.git .
   before_run: |
     echo "Starting run"
   after_run: |
@@ -49,5 +49,15 @@ You are working on issue {{ issue.identifier }}: {{ issue.title }}.
 
 Description: {{ issue.description }}
 
-Please analyze the issue, implement the necessary changes, and ensure tests pass.
+The repository has been cloned into this workspace. Please analyze the issue, implement the necessary changes, and ensure tests pass.
+
+When you start working, move this issue to the "In Progress" column in the GitHub project.
+When you are done and ready for review, move it to the "Review" column.
+When the task is fully completed, move it to the "Done" column.
+
+You can use `gh` or `curl` with the `GITHUB_TOKEN` environment variable to interact with the GitHub API.
+The project number is 2 for repository supergeoff/sympheo.
+
+**IMPORTANT:** Do NOT run `sympheo`, `cargo run`, or any orchestrator commands. Do NOT start long-running background processes or servers. Focus only on implementing the requested changes.
+
 {% if attempt %}This is retry/continuation attempt {{ attempt }}.{% endif %}

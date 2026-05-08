@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 #[derive(Error, Debug, Clone)]
-pub enum SymphonyError {
+pub enum SympheoError {
     #[error("missing workflow file: {0}")]
     MissingWorkflowFile(String),
 
@@ -63,8 +63,105 @@ pub enum SymphonyError {
     DaytonaApiError(String),
 }
 
-impl From<std::io::Error> for SymphonyError {
+impl From<std::io::Error> for SympheoError {
     fn from(e: std::io::Error) -> Self {
-        SymphonyError::Io(e.to_string())
+        SympheoError::Io(e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_error_display_variants() {
+        assert_eq!(
+            format!("{}", SympheoError::MissingWorkflowFile("path".into())),
+            "missing workflow file: path"
+        );
+        assert_eq!(
+            format!("{}", SympheoError::WorkflowParseError("bad".into())),
+            "workflow parse error: bad"
+        );
+        assert_eq!(
+            format!("{}", SympheoError::WorkflowFrontMatterNotAMap),
+            "workflow front matter is not a map"
+        );
+        assert_eq!(
+            format!("{}", SympheoError::TemplateParseError("tpl".into())),
+            "template parse error: tpl"
+        );
+        assert_eq!(
+            format!("{}", SympheoError::TemplateRenderError("rend".into())),
+            "template render error: rend"
+        );
+        assert_eq!(
+            format!("{}", SympheoError::UnsupportedTrackerKind("linear".into())),
+            "unsupported tracker kind: linear"
+        );
+        assert_eq!(
+            format!("{}", SympheoError::MissingTrackerApiKey),
+            "missing tracker api key"
+        );
+        assert_eq!(
+            format!("{}", SympheoError::MissingTrackerProjectSlug),
+            "missing tracker project slug"
+        );
+        assert_eq!(
+            format!("{}", SympheoError::TrackerApiRequest("fail".into())),
+            "tracker api request failed: fail"
+        );
+        assert_eq!(
+            format!("{}", SympheoError::TrackerApiStatus("404".into())),
+            "tracker api status: 404"
+        );
+        assert_eq!(
+            format!("{}", SympheoError::TrackerMalformedPayload("bad".into())),
+            "tracker api returned malformed payload: bad"
+        );
+        assert_eq!(
+            format!("{}", SympheoError::WorkspaceError("err".into())),
+            "workspace error: err"
+        );
+        assert_eq!(
+            format!("{}", SympheoError::HookFailed("hook".into())),
+            "hook failed: hook"
+        );
+        assert_eq!(
+            format!("{}", SympheoError::AgentRunnerError("run".into())),
+            "agent runner error: run"
+        );
+        assert_eq!(
+            format!("{}", SympheoError::AgentProcessExit),
+            "agent process exited unexpectedly"
+        );
+        assert_eq!(
+            format!("{}", SympheoError::AgentTurnTimeout),
+            "agent turn timeout"
+        );
+        assert_eq!(
+            format!("{}", SympheoError::AgentStallDetected),
+            "agent stall detected"
+        );
+        assert_eq!(
+            format!("{}", SympheoError::InvalidConfiguration("cfg".into())),
+            "invalid configuration: cfg"
+        );
+        assert_eq!(
+            format!("{}", SympheoError::Io("io".into())),
+            "io error: io"
+        );
+        assert_eq!(
+            format!("{}", SympheoError::DaytonaApiError("api".into())),
+            "daytona api error: api"
+        );
+    }
+
+    #[test]
+    fn test_error_from_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file missing");
+        let err: SympheoError = io_err.into();
+        assert!(matches!(err, SympheoError::Io(_)));
+        assert!(format!("{err}").contains("file missing"));
     }
 }

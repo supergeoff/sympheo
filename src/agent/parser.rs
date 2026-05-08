@@ -52,7 +52,7 @@ pub struct TextPart {
     pub time: Option<TextTime>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct TextTime {
     pub start: i64,
     pub end: i64,
@@ -98,4 +98,115 @@ pub struct TurnResult {
 
 pub fn parse_line(line: &str) -> Option<OpencodeEvent> {
     serde_json::from_str(line).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_line_step_start() {
+        let json = r#"{"type":"step_start","timestamp":123,"sessionID":"sess-1","part":{"id":"p1","messageID":"msg-1","sessionID":"sess-1","type":"step"}}"#;
+        let event = parse_line(json).unwrap();
+        match event {
+            OpencodeEvent::StepStart { session_id, part, .. } => {
+                assert_eq!(session_id, "sess-1");
+                assert_eq!(part.id, "p1");
+                assert_eq!(part.message_id, "msg-1");
+            }
+            _ => panic!("expected StepStart"),
+        }
+    }
+
+    #[test]
+    fn test_parse_line_text() {
+        let json = r#"{"type":"text","timestamp":456,"sessionID":"sess-1","part":{"id":"p2","messageID":"msg-2","sessionID":"sess-1","type":"text","text":"hello world","time":{"start":100,"end":200}}}"#;
+        let event = parse_line(json).unwrap();
+        match event {
+            OpencodeEvent::Text { part, .. } => {
+                assert_eq!(part.text, "hello world");
+                assert_eq!(part.time, Some(TextTime { start: 100, end: 200 }));
+            }
+            _ => panic!("expected Text"),
+        }
+    }
+
+    #[test]
+    fn test_parse_line_step_finish() {
+        let json = r#"{"type":"step_finish","timestamp":789,"sessionID":"sess-1","part":{"id":"p3","reason":"stop","messageID":"msg-3","sessionID":"sess-1","type":"finish","tokens":{"total":100,"input":50,"output":40,"reasoning":10,"cache":{"write":5,"read":3}},"cost":0.01}}"#;
+        let event = parse_line(json).unwrap();
+        match event {
+            OpencodeEvent::StepFinish { part, .. } => {
+                assert_eq!(part.reason, "stop");
+                let tokens = part.tokens.unwrap();
+                assert_eq!(tokens.total, 100);
+                assert_eq!(tokens.input, 50);
+                assert_eq!(tokens.output, 40);
+                assert_eq!(tokens.reasoning, 10);
+                let cache = tokens.cache.unwrap();
+                assert_eq!(cache.write, 5);
+                assert_eq!(cache.read, 3);
+            }
+            _ => panic!("expected StepFinish"),
+        }
+    }
+
+    #[test]
+    fn test_parse_line_other() {
+        let json = r#"{"type":"unknown_event","timestamp":0}"#;
+        let event = parse_line(json).unwrap();
+        assert!(matches!(event, OpencodeEvent::Other));
+    }
+
+    #[test]
+    fn test_parse_line_invalid_json() {
+        assert!(parse_line("not json").is_none());
+    }
+
+    #[test]
+    fn test_parse_line_empty() {
+        assert!(parse_line("").is_none());
+    }
+
+    #[test]
+    fn test_parse_line_step_finish_no_tokens() {
+        let json = r#"{"type":"step_finish","timestamp":789,"sessionID":"sess-1","part":{"id":"p3","reason":"tool-calls","messageID":"msg-3","sessionID":"sess-1","type":"finish"}}"#;
+        let event = parse_line(json).unwrap();
+        match event {
+            OpencodeEvent::StepFinish { part, .. } => {
+                assert_eq!(part.reason, "tool-calls");
+                assert!(part.tokens.is_none());
+                assert!(part.cost.is_none());
+            }
+            _ => panic!("expected StepFinish"),
+        }
+    }
+
+    #[test]
+    fn test_parse_line_text_no_time() {
+        let json = r#"{"type":"text","timestamp":456,"sessionID":"sess-1","part":{"id":"p2","messageID":"msg-2","sessionID":"sess-1","type":"text","text":"hello world"}}"#;
+        let event = parse_line(json).unwrap();
+        match event {
+            OpencodeEvent::Text { part, .. } => {
+                assert_eq!(part.text, "hello world");
+                assert!(part.time.is_none());
+            }
+            _ => panic!("expected Text"),
+        }
+    }
+
+    #[test]
+    fn test_parse_line_step_finish_tokens_no_cache() {
+        let json = r#"{"type":"step_finish","timestamp":789,"sessionID":"sess-1","part":{"id":"p3","reason":"stop","messageID":"msg-3","sessionID":"sess-1","type":"finish","tokens":{"total":100,"input":50,"output":40,"reasoning":10}}}"#;
+        let event = parse_line(json).unwrap();
+        match event {
+            OpencodeEvent::StepFinish { part, .. } => {
+                assert_eq!(part.reason, "stop");
+                let tokens = part.tokens.unwrap();
+                assert_eq!(tokens.total, 100);
+                assert!(tokens.cache.is_none());
+            }
+            _ => panic!("expected StepFinish"),
+        }
+    }
 }

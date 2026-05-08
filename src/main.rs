@@ -1,15 +1,15 @@
 use clap::Parser;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use symphonie::config::typed::ServiceConfig;
-use symphonie::orchestrator::tick::Orchestrator;
-use symphonie::tracker::github::GithubTracker;
-use symphonie::tracker::IssueTracker;
-use symphonie::workflow::loader::WorkflowLoader;
+use sympheo::config::typed::ServiceConfig;
+use sympheo::orchestrator::tick::Orchestrator;
+use sympheo::tracker::github::GithubTracker;
+use sympheo::tracker::IssueTracker;
+use sympheo::workflow::loader::WorkflowLoader;
 use tracing::{error, info, warn};
 
 #[derive(Parser, Debug)]
-#[command(name = "symphonie")]
+#[command(name = "sympheo")]
 #[command(about = "Orchestrates coding agents to get project work done")]
 struct Cli {
     /// Path to WORKFLOW.md
@@ -20,10 +20,46 @@ struct Cli {
     port: Option<u16>,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_cli_default() {
+        let cli = Cli::parse_from(["sympheo"]);
+        assert_eq!(cli.workflow_path, None);
+        assert_eq!(cli.port, None);
+    }
+
+    #[test]
+    fn test_cli_with_workflow_path() {
+        let cli = Cli::parse_from(["sympheo", "/path/to/WORKFLOW.md"]);
+        assert_eq!(cli.workflow_path, Some(PathBuf::from("/path/to/WORKFLOW.md")));
+    }
+
+    #[test]
+    fn test_cli_with_port() {
+        let cli = Cli::parse_from(["sympheo", "--port", "8080"]);
+        assert_eq!(cli.port, Some(8080));
+    }
+
+    #[test]
+    fn test_cli_with_both() {
+        let cli = Cli::parse_from(["sympheo", "--port", "9090", "/path/to/wf.md"]);
+        assert_eq!(cli.workflow_path, Some(PathBuf::from("/path/to/wf.md")));
+        assert_eq!(cli.port, Some(9090));
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::builder()
+                .with_default_directive(tracing::Level::INFO.into())
+                .from_env_lossy(),
+        )
         .init();
 
     let cli = Cli::parse();
@@ -58,7 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let terminal_states = config.terminal_states();
     match tracker.fetch_issues_by_states(&terminal_states).await {
         Ok(issues) => {
-            use symphonie::workspace::manager::WorkspaceManager;
+            use sympheo::workspace::manager::WorkspaceManager;
             let wm = WorkspaceManager::new(&config)?;
             for issue in issues {
                 wm.remove_workspace(&issue.identifier, config.hook_script("before_remove").as_deref())
@@ -77,7 +113,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(port) = cli.port {
         let state_clone = state.clone();
         tokio::spawn(async move {
-            if let Err(e) = symphonie::server::start_server(port, state_clone).await {
+            if let Err(e) = sympheo::server::start_server(port, state_clone).await {
                 warn!(error = %e, "http server error");
             }
         });

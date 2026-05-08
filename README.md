@@ -4,7 +4,7 @@ A Rust-based orchestrator for running OpenCode agents in parallel on Daytona san
 
 ## Overview
 
-Symphonie dispatches coding agents to handle GitHub issues. It supports:
+Sympheo dispatches coding agents to handle GitHub issues. It supports:
 - **Local execution**: Run agents directly on the host machine
 - **Daytona execution**: Run agents in isolated Daytona sandboxes  
 - **Hybrid mode**: Mix local and Daytona execution based on labels or round-robin

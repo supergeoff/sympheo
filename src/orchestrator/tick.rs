@@ -451,7 +451,7 @@ async fn run_worker(
             "Continue working on the current task. Review the conversation history and proceed with the next step.".to_string()
         };
 
-        let turn_result = runner
+        let (turn_result, _event_rx) = runner
             .run_turn(&issue, &prompt, current_session.as_deref(), &workspace.path)
             .await?;
 

@@ -19,7 +19,6 @@ impl RunningEntry {
     }
 }
 
-#[derive(Debug, Clone)]
 pub struct OrchestratorState {
     pub poll_interval_ms: u64,
     pub max_concurrent_agents: usize,
@@ -29,6 +28,42 @@ pub struct OrchestratorState {
     pub completed: HashSet<String>,
     pub codex_totals: TokenTotals,
     pub codex_rate_limits: Option<serde_json::Value>,
+    pub last_tick_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub refresh_notify: Arc<tokio::sync::Notify>,
+}
+
+impl std::fmt::Debug for OrchestratorState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OrchestratorState")
+            .field("poll_interval_ms", &self.poll_interval_ms)
+            .field("max_concurrent_agents", &self.max_concurrent_agents)
+            .field("running", &self.running)
+            .field("claimed", &self.claimed)
+            .field("retry_attempts", &self.retry_attempts)
+            .field("completed", &self.completed)
+            .field("codex_totals", &self.codex_totals)
+            .field("codex_rate_limits", &self.codex_rate_limits)
+            .field("last_tick_at", &self.last_tick_at)
+            .field("refresh_notify", &"<Notify>")
+            .finish()
+    }
+}
+
+impl Clone for OrchestratorState {
+    fn clone(&self) -> Self {
+        Self {
+            poll_interval_ms: self.poll_interval_ms,
+            max_concurrent_agents: self.max_concurrent_agents,
+            running: self.running.clone(),
+            claimed: self.claimed.clone(),
+            retry_attempts: self.retry_attempts.clone(),
+            completed: self.completed.clone(),
+            codex_totals: self.codex_totals.clone(),
+            codex_rate_limits: self.codex_rate_limits.clone(),
+            last_tick_at: self.last_tick_at,
+            refresh_notify: self.refresh_notify.clone(),
+        }
+    }
 }
 
 impl OrchestratorState {
@@ -42,14 +77,13 @@ impl OrchestratorState {
             completed: HashSet::new(),
             codex_totals: TokenTotals::default(),
             codex_rate_limits: None,
+            last_tick_at: None,
+            refresh_notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
     pub fn available_slots(&self, _per_state: &HashMap<String, usize>) -> usize {
-        let global = self.max_concurrent_agents.saturating_sub(self.running.len());
-        // For simplicity, global limit is the primary constraint.
-        // Per-state limits would require counting running issues by state.
-        global
+        self.max_concurrent_agents.saturating_sub(self.running.len())
     }
 
     pub fn count_running_by_state(&self, state: &str) -> usize {
@@ -76,6 +110,7 @@ mod tests {
         assert!(state.completed.is_empty());
         assert_eq!(state.codex_totals.input_tokens, 0);
         assert!(state.codex_rate_limits.is_none());
+        assert!(state.last_tick_at.is_none());
     }
 
     #[test]

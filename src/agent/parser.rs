@@ -96,6 +96,91 @@ pub struct TurnResult {
     pub tokens: Option<TokenInfo>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type")]
+pub enum AgentEvent {
+    #[serde(rename = "session_started")]
+    SessionStarted {
+        #[serde(rename = "sessionID")]
+        session_id: String,
+        #[serde(rename = "threadID")]
+        thread_id: String,
+    },
+    #[serde(rename = "turn_completed")]
+    TurnCompleted {
+        #[serde(rename = "sessionID")]
+        session_id: String,
+        #[serde(rename = "turnID")]
+        turn_id: String,
+        tokens: Option<TokenInfo>,
+    },
+    #[serde(rename = "turn_failed")]
+    TurnFailed {
+        #[serde(rename = "sessionID")]
+        session_id: String,
+        reason: String,
+    },
+    #[serde(rename = "turn_cancelled")]
+    TurnCancelled {
+        #[serde(rename = "sessionID")]
+        session_id: String,
+    },
+    #[serde(rename = "turn_input_required")]
+    TurnInputRequired {
+        #[serde(rename = "sessionID")]
+        session_id: String,
+    },
+    #[serde(rename = "approval_auto_approved")]
+    ApprovalAutoApproved {
+        #[serde(rename = "sessionID")]
+        session_id: String,
+        kind: String,
+    },
+    #[serde(rename = "notification")]
+    Notification {
+        #[serde(rename = "sessionID")]
+        session_id: String,
+        message: String,
+    },
+    #[serde(rename = "rate_limit")]
+    RateLimit {
+        payload: serde_json::Value,
+    },
+    #[serde(rename = "token_usage")]
+    TokenUsage {
+        input: u64,
+        output: u64,
+        total: u64,
+    },
+    #[serde(rename = "step_start")]
+    StepStart {
+        timestamp: i64,
+        #[serde(rename = "sessionID")]
+        session_id: String,
+        part: StepStartPart,
+    },
+    #[serde(rename = "text")]
+    Text {
+        timestamp: i64,
+        #[serde(rename = "sessionID")]
+        session_id: String,
+        part: TextPart,
+    },
+    #[serde(rename = "step_finish")]
+    StepFinish {
+        timestamp: i64,
+        #[serde(rename = "sessionID")]
+        session_id: String,
+        part: StepFinishPart,
+    },
+    #[serde(other)]
+    Other,
+}
+
+pub fn parse_event_line(line: &str) -> Option<AgentEvent> {
+    serde_json::from_str(line).ok()
+}
+
 pub fn parse_line(line: &str) -> Option<OpencodeEvent> {
     serde_json::from_str(line).ok()
 }
@@ -208,5 +293,61 @@ mod tests {
             }
             _ => panic!("expected StepFinish"),
         }
+    }
+
+    #[test]
+    fn test_parse_event_line_rate_limit() {
+        let json = r#"{"type":"rate_limit","payload":{"limit":100,"remaining":50}}"#;
+        let event = parse_event_line(json).unwrap();
+        match event {
+            AgentEvent::RateLimit { payload } => {
+                assert_eq!(payload["limit"], 100);
+            }
+            _ => panic!("expected RateLimit"),
+        }
+    }
+
+    #[test]
+    fn test_parse_event_line_turn_failed() {
+        let json = r#"{"type":"turn_failed","sessionID":"sess-1","reason":"timeout"}"#;
+        let event = parse_event_line(json).unwrap();
+        match event {
+            AgentEvent::TurnFailed { session_id, reason } => {
+                assert_eq!(session_id, "sess-1");
+                assert_eq!(reason, "timeout");
+            }
+            _ => panic!("expected TurnFailed"),
+        }
+    }
+
+    #[test]
+    fn test_parse_event_line_token_usage() {
+        let json = r#"{"type":"token_usage","input":100,"output":50,"total":150}"#;
+        let event = parse_event_line(json).unwrap();
+        match event {
+            AgentEvent::TokenUsage { input, output, total } => {
+                assert_eq!(input, 100);
+                assert_eq!(output, 50);
+                assert_eq!(total, 150);
+            }
+            _ => panic!("expected TokenUsage"),
+        }
+    }
+
+    #[test]
+    fn test_parse_event_line_notification() {
+        let json = r#"{"type":"notification","sessionID":"sess-1","message":"hello"}"#;
+        let event = parse_event_line(json).unwrap();
+        match event {
+            AgentEvent::Notification { message, .. } => {
+                assert_eq!(message, "hello");
+            }
+            _ => panic!("expected Notification"),
+        }
+    }
+
+    #[test]
+    fn test_parse_event_line_malformed_ignored() {
+        assert!(parse_event_line("not json").is_none());
     }
 }

@@ -203,9 +203,14 @@ impl Orchestrator {
                 }
                 if let Some(entry) = state.running.remove(&issue.id) {
                     state.claimed.remove(&issue.id);
+                    let identifier = entry.issue.identifier.clone();
                     drop(state);
+                    let ws_path = self.workspace_manager.workspace_path(&identifier);
+                    if let Err(e) = self.runner.cleanup_workspace(&ws_path).await {
+                        warn!(error = %e, "daytona cleanup failed during reconcile");
+                    }
                     self.workspace_manager
-                        .remove_workspace(&entry.issue.identifier, config.hook_script("before_remove").as_deref())
+                        .remove_workspace(&identifier, config.hook_script("before_remove").as_deref())
                         .await;
                     state = self.state.write().await;
                 }
@@ -518,6 +523,21 @@ async fn run_worker(
         }
     }
 
+    // Cleanup Daytona sandbox if issue is now terminal
+    let refreshed = tracker
+        .fetch_issue_states_by_ids(std::slice::from_ref(&issue.id))
+        .await?;
+    let active_states = config.active_states();
+    let terminal_states = config.terminal_states();
+    if let Some(refreshed_issue) = refreshed.into_iter().next() {
+        let state_lc = refreshed_issue.state.to_lowercase();
+        if terminal_states.contains(&state_lc) || !active_states.contains(&state_lc) {
+            if let Err(e) = runner.cleanup_workspace(&workspace.path).await {
+                warn!(error = %e, "daytona cleanup failed after terminal issue");
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -668,8 +688,8 @@ mod tests {
     #[test]
     fn test_serde_json_to_liquid_number_float() {
         assert_eq!(
-            serde_json_to_liquid(&serde_json::Value::Number(serde_json::Number::from_f64(3.14).unwrap())),
-            liquid::model::Value::Scalar(3.14f64.into())
+            serde_json_to_liquid(&serde_json::Value::Number(serde_json::Number::from_f64(2.71).unwrap())),
+            liquid::model::Value::Scalar(2.71f64.into())
         );
     }
 

@@ -30,6 +30,10 @@ impl AgentRunner {
     ) -> Result<TurnResult, SympheoError> {
         self.backend.run_turn(issue, prompt, session_id, workspace_path).await
     }
+
+    pub async fn cleanup_workspace(&self, workspace_path: &Path) -> Result<(), SympheoError> {
+        self.backend.cleanup_workspace(workspace_path).await
+    }
 }
 
 #[cfg(test)]

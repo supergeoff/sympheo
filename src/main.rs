@@ -96,7 +96,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(issues) => {
             use sympheo::workspace::manager::WorkspaceManager;
             let wm = WorkspaceManager::new(&config)?;
+            let runner = sympheo::agent::runner::AgentRunner::new(&config);
             for issue in issues {
+                if let Ok(ref r) = runner {
+                    let ws_path = wm.workspace_path(&issue.identifier);
+                    if let Err(e) = r.cleanup_workspace(&ws_path).await {
+                        warn!(error = %e, issue_identifier = %issue.identifier, "startup cleanup daytona sandbox failed");
+                    }
+                }
                 wm.remove_workspace(&issue.identifier, config.hook_script("before_remove").as_deref())
                     .await;
             }

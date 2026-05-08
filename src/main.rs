@@ -170,7 +170,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     interval.tick().await; // first tick immediate-ish
 
     loop {
-        interval.tick().await;
+        let notify = {
+            let st = orchestrator.state.read().await;
+            st.refresh_notify.clone()
+        };
+        tokio::select! {
+            _ = interval.tick() => {},
+            _ = notify.notified() => {
+                info!("manual refresh triggered");
+            },
+        }
         let cfg = orchestrator.config.read().await.clone();
         interval = tokio::time::interval(tokio::time::Duration::from_millis(cfg.poll_interval_ms()));
         orchestrator.tick().await;

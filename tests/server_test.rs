@@ -25,9 +25,11 @@ async fn test_server_dashboard() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body = resp.text().await.unwrap();
-    assert!(body.contains("Symphony"));
-    assert!(body.contains("Running: 0"));
-    assert!(body.contains("Retrying: 0"));
+    assert!(body.contains("Sympheo Orchestrator"));
+    assert!(body.contains("Running"));
+    assert!(body.contains("Retrying"));
+    assert!(body.contains("picocss"));
+    assert!(body.contains("setInterval"));
 }
 
 #[tokio::test]
@@ -124,6 +126,11 @@ async fn test_server_api_state_with_data() {
     let running = body["running"].as_array().unwrap();
     assert_eq!(running[0]["session_id"], "sess-1");
     assert_eq!(running[0]["turn_count"], 2);
+    assert_eq!(running[0]["last_event"], "event");
+    assert_eq!(running[0]["last_message"], "msg");
+    assert!(running[0]["last_event_at"].as_str().is_some());
+    assert_eq!(running[0]["tokens"]["input_tokens"], 100);
+    assert_eq!(running[0]["tokens"]["output_tokens"], 50);
     let retrying = body["retrying"].as_array().unwrap();
     assert_eq!(retrying[0]["error"], "retry err");
 }
@@ -198,6 +205,33 @@ async fn test_server_api_issue_found() {
     assert_eq!(body["issue_identifier"], "TEST-1");
     assert_eq!(body["status"], "running");
     assert_eq!(body["turn_count"], 3);
+    assert_eq!(body["retry_attempt"], serde_json::Value::Null);
+}
+
+#[tokio::test]
+async fn test_server_api_refresh_triggers_notify() {
+    let orch_state = sympheo::orchestrator::state::OrchestratorState::new(30000, 10);
+    let notify = orch_state.refresh_notify.clone();
+    let state = Arc::new(RwLock::new(orch_state));
+    let port = find_free_port();
+
+    tokio::spawn(async move {
+        sympheo::server::start_server(port, state).await.unwrap();
+    });
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://127.0.0.1:{}/api/v1/refresh", port))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let timeout = tokio::time::Duration::from_secs(2);
+    let notified = tokio::time::timeout(timeout, notify.notified()).await;
+    assert!(notified.is_ok(), "refresh_notify was not triggered within 2s");
 }
 
 #[tokio::test]

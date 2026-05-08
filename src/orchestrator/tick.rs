@@ -50,6 +50,10 @@ impl Orchestrator {
 
     pub async fn tick(&self) {
         info!("orchestrator tick start");
+        {
+            let mut state = self.state.write().await;
+            state.last_tick_at = Some(chrono::Utc::now());
+        }
 
         // Part A: Reconcile
         if let Err(e) = self.reconcile().await {
@@ -769,8 +773,8 @@ mod tests {
     #[test]
     fn test_serde_json_to_liquid_number_float() {
         assert_eq!(
-            serde_json_to_liquid(&serde_json::Value::Number(serde_json::Number::from_f64(2.71).unwrap())),
-            liquid::model::Value::Scalar(2.71f64.into())
+            serde_json_to_liquid(&serde_json::Value::Number(serde_json::Number::from_f64(std::f64::consts::PI).unwrap())),
+            liquid::model::Value::Scalar(std::f64::consts::PI.into())
         );
     }
 

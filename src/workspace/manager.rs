@@ -3,12 +3,15 @@ use crate::error::SympheoError;
 use crate::tracker::model::WorkspaceInfo;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 
 pub struct WorkspaceManager {
     root: PathBuf,
     hook_timeout: Duration,
+    git_adapter: Option<Arc<dyn crate::git::GitAdapter>>,
+    repo_url: Option<String>,
 }
 
 impl WorkspaceManager {
@@ -17,7 +20,17 @@ impl WorkspaceManager {
         Ok(Self {
             root,
             hook_timeout: Duration::from_millis(config.hook_timeout_ms()),
+            git_adapter: None,
+            repo_url: config.workspace_repo_url(),
         })
+    }
+
+    pub fn set_git_adapter(&mut self, adapter: Arc<dyn crate::git::GitAdapter>) {
+        self.git_adapter = Some(adapter);
+    }
+
+    pub fn git_adapter(&self) -> &Option<Arc<dyn crate::git::GitAdapter>> {
+        &self.git_adapter
     }
 
     pub fn sanitize_identifier(identifier: &str) -> String {
@@ -54,7 +67,11 @@ impl WorkspaceManager {
         };
 
         if created_now {
-            if let Some(script) = after_create_hook {
+            if let (Some(ref adapter), Some(ref url)) = (&self.git_adapter, &self.repo_url) {
+                crate::git::GitAdapter::clone(&**adapter, url, &path).await.map_err(|e| {
+                    SympheoError::WorkspaceError(format!("git clone failed: {e}"))
+                })?;
+            } else if let Some(script) = after_create_hook {
                 self.run_hook("after_create", script, &path).await?;
             }
         }

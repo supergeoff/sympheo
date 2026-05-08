@@ -70,8 +70,7 @@ async fn test_server_api_state_with_data() {
         url: None,
         labels: vec![],
         blocked_by: vec![],
-        created_at: None,
-        updated_at: None,
+        ..Default::default()
     };
     let running_entry = sympheo::orchestrator::state::RunningEntry {
         issue: issue.clone(),
@@ -90,11 +89,14 @@ async fn test_server_api_state_with_data() {
             last_reported_output_tokens: 50,
             last_reported_total_tokens: 150,
             turn_count: 2,
+            pr_url: None,
         }),
         started_at: chrono::Utc::now(),
         retry_attempt: Some(1),
         turn_count: 2,
         cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                stagnation_counter: 0,
+                last_state_change_at: chrono::Utc::now(),
     };
     orch_state.running.insert("1".into(), running_entry);
     orch_state.retry_attempts.insert(
@@ -178,14 +180,15 @@ async fn test_server_api_issue_found() {
                 url: None,
                 labels: vec![],
                 blocked_by: vec![],
-                created_at: None,
-                updated_at: None,
+                ..Default::default()
             },
             session: None,
             started_at: chrono::Utc::now(),
             retry_attempt: None,
             turn_count: 3,
             cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                stagnation_counter: 0,
+                last_state_change_at: chrono::Utc::now(),
         },
     );
     let state = Arc::new(RwLock::new(orch_state));

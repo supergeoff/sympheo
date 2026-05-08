@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -394,6 +396,7 @@ impl AgentBackend for DaytonaBackend {
         prompt: &str,
         session_id: Option<&str>,
         workspace_path: &Path,
+        _cancelled: Arc<AtomicBool>,
     ) -> Result<(TurnResult, tokio::sync::mpsc::Receiver<AgentEvent>), SympheoError> {
         self.workspace_manager
             .validate_inside_root(workspace_path)?;

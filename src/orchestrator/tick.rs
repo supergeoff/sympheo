@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
+use crate::git::adapter::GitStatus;
 
 pub struct Orchestrator {
     pub state: Arc<RwLock<OrchestratorState>>,
@@ -28,13 +29,17 @@ impl Orchestrator {
         config: ServiceConfig,
         tracker: Arc<dyn IssueTracker>,
         skills: HashMap<String, Skill>,
+        git_adapter: Option<Arc<dyn crate::git::GitAdapter>>,
     ) -> Result<Self, SympheoError> {
         let mut state = OrchestratorState::new(
             config.poll_interval_ms(),
             config.max_concurrent_agents(),
         );
         state.skills = skills;
-        let workspace_manager = WorkspaceManager::new(&config)?;
+        let mut workspace_manager = WorkspaceManager::new(&config)?;
+        if let Some(adapter) = git_adapter {
+            workspace_manager.set_git_adapter(adapter);
+        }
         let runner = AgentRunner::new(&config)?;
         Ok(Self {
             state: Arc::new(RwLock::new(state)),
@@ -141,6 +146,8 @@ impl Orchestrator {
                     retry_attempt: None,
                     turn_count: 0,
                     cancelled: cancelled.clone(),
+                    stagnation_counter: 0,
+                    last_state_change_at: Utc::now(),
                 },
             );
             drop(state); // release lock before spawning
@@ -441,6 +448,8 @@ impl Orchestrator {
                         retry_attempt: Some(retry.attempt),
                         turn_count: 0,
                         cancelled: cancelled.clone(),
+                        stagnation_counter: 0,
+                        last_state_change_at: Utc::now(),
                     },
                 );
                 drop(st);
@@ -455,9 +464,130 @@ impl Orchestrator {
 
 use std::time::Instant;
 
+async fn apply_agent_event(
+    state: &Arc<RwLock<OrchestratorState>>,
+    issue_id: &str,
+    event: AgentEvent,
+) {
+    match event {
+        AgentEvent::StepStart { session_id, part, .. } => {
+            let mut st = state.write().await;
+            if let Some(entry) = st.running.get_mut(issue_id) {
+                let new_session_id = format!("{}-{}", session_id, part.message_id);
+                if let Some(ref mut sess) = entry.session {
+                    sess.session_id = new_session_id;
+                    sess.thread_id = session_id.clone();
+                    sess.turn_id = part.message_id.clone();
+                    sess.last_reported_input_tokens = 0;
+                    sess.last_reported_output_tokens = 0;
+                    sess.last_reported_total_tokens = 0;
+                    sess.last_event = Some("step_start".into());
+                    sess.last_timestamp = Some(Utc::now());
+                } else {
+                    entry.session = Some(LiveSession {
+                        session_id: new_session_id,
+                        thread_id: session_id.clone(),
+                        turn_id: part.message_id.clone(),
+                        agent_pid: None,
+                        last_event: Some("step_start".into()),
+                        last_timestamp: Some(Utc::now()),
+                        last_message: None,
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        total_tokens: 0,
+                        last_reported_input_tokens: 0,
+                        last_reported_output_tokens: 0,
+                        last_reported_total_tokens: 0,
+                        turn_count: entry.turn_count,
+                        pr_url: None,
+                    });
+                }
+            }
+        }
+        AgentEvent::TokenUsage { input, output, total } => {
+            let (last_input, last_output, last_total) = {
+                let st = state.read().await;
+                st.running
+                    .get(issue_id)
+                    .and_then(|e| e.session.as_ref())
+                    .map(|s| {
+                        (
+                            s.last_reported_input_tokens,
+                            s.last_reported_output_tokens,
+                            s.last_reported_total_tokens,
+                        )
+                    })
+                    .unwrap_or((0, 0, 0))
+            };
+
+            let delta_input = input.saturating_sub(last_input);
+            let delta_output = output.saturating_sub(last_output);
+            let delta_total = total.saturating_sub(last_total);
+
+            let mut st = state.write().await;
+            st.codex_totals.input_tokens += delta_input;
+            st.codex_totals.output_tokens += delta_output;
+            st.codex_totals.total_tokens += delta_total;
+
+            if let Some(entry) = st.running.get_mut(issue_id) {
+                if let Some(ref mut sess) = entry.session {
+                    sess.last_reported_input_tokens = input;
+                    sess.last_reported_output_tokens = output;
+                    sess.last_reported_total_tokens = total;
+                    sess.input_tokens = input;
+                    sess.output_tokens = output;
+                    sess.total_tokens = total;
+                }
+            }
+        }
+        AgentEvent::RateLimit { payload } => {
+            let mut st = state.write().await;
+            st.codex_rate_limits = Some(payload);
+        }
+        AgentEvent::Notification { message, .. }
+        | AgentEvent::TurnFailed { reason: message, .. } => {
+            let mut st = state.write().await;
+            if let Some(entry) = st.running.get_mut(issue_id) {
+                if let Some(ref mut sess) = entry.session {
+                    sess.last_event = Some("notification_or_turn_failed".into());
+                    sess.last_message = Some(message);
+                    sess.last_timestamp = Some(Utc::now());
+                }
+            }
+        }
+        AgentEvent::Text { part, .. } => {
+            let mut st = state.write().await;
+            if let Some(entry) = st.running.get_mut(issue_id) {
+                if let Some(ref mut sess) = entry.session {
+                    if let Some(ref mut msg) = sess.last_message {
+                        msg.push_str(&part.text);
+                    } else {
+                        sess.last_message = Some(part.text.clone());
+                    }
+                }
+            }
+        }
+        AgentEvent::StepFinish { part, .. } => {
+            let mut st = state.write().await;
+            if let Some(entry) = st.running.get_mut(issue_id) {
+                if let Some(ref mut sess) = entry.session {
+                    sess.last_event = Some("step_finish".into());
+                    sess.last_timestamp = Some(Utc::now());
+                    if let Some(ref t) = part.tokens {
+                        sess.input_tokens = t.input;
+                        sess.output_tokens = t.output;
+                        sess.total_tokens = t.total;
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_worker(
-    issue: Issue,
+    mut issue: Issue,
     attempt: Option<u32>,
     max_turns: u32,
     config: &ServiceConfig,
@@ -474,6 +604,29 @@ async fn run_worker(
         )
         .await?;
 
+    // Auto-create branch when entering in progress
+    if issue.state.to_lowercase() == "in progress" && issue.branch_name.is_none() {
+        if let Some(ref adapter) = workspace_manager.git_adapter() {
+            let sanitized: String = issue.title.to_lowercase()
+                .replace(|c: char| !c.is_alphanumeric() && c != '-', "-")
+                .replace("--", "-")
+                .trim_matches('-')
+                .chars()
+                .take(40)
+                .collect();
+            let branch = format!("sympheo/{}-{}", issue.id, sanitized);
+            let branch = branch.trim_end_matches('-').to_string();
+            if let Err(e) = adapter.checkout_branch(&workspace.path, &branch, true).await {
+                warn!(issue_id = %issue.id, error = %e, "failed to create branch");
+            } else {
+                if let Err(e) = adapter.push(&workspace.path, "origin", &branch).await {
+                    warn!(issue_id = %issue.id, error = %e, "failed to push branch");
+                }
+                issue.branch_name = Some(branch);
+            }
+        }
+    }
+
     let mut attempt_record = RunAttempt::new(
         issue.id.clone(),
         issue.identifier.clone(),
@@ -489,7 +642,7 @@ async fn run_worker(
     }
 
     let mut current_session: Option<String> = None;
-    let mut turn_number = 1;
+    let mut turn_number = 0;
 
     let skills = {
         let st = state.read().await;
@@ -500,6 +653,36 @@ async fn run_worker(
         if cancelled.load(Ordering::Relaxed) {
             info!(issue_id = %issue.id, "worker cancelled by orchestrator, stopping");
             break;
+        }
+
+        // Git state verification before each turn
+        if let Some(ref adapter) = workspace_manager.git_adapter() {
+            if let Err(e) = adapter.fetch(&workspace.path, "origin").await {
+                warn!(issue_id = %issue.id, error = %e, "git fetch failed");
+            }
+            match adapter.status(&workspace.path).await {
+                Ok(GitStatus::Clean) => {}
+                Ok(GitStatus::DetachedHead) | Ok(GitStatus::Dirty(_)) => {
+                    let target = issue.branch_name.as_deref().unwrap_or("origin/main");
+                    if let Err(e) = adapter.reset_hard(&workspace.path, target).await {
+                        warn!(issue_id = %issue.id, error = %e, target = %target, "git reset failed");
+                    } else {
+                        info!(issue_id = %issue.id, target = %target, "reset workspace to clean state");
+                    }
+                }
+                Err(e) => {
+                    warn!(issue_id = %issue.id, error = %e, "git status failed");
+                }
+            }
+        }
+
+        turn_number += 1;
+
+        {
+            let mut st = state.write().await;
+            if let Some(entry) = st.running.get_mut(&issue.id) {
+                entry.turn_count = turn_number;
+            }
         }
 
         attempt_record.transition(AttemptStatus::BuildingPrompt);
@@ -515,74 +698,36 @@ async fn run_worker(
         };
 
         attempt_record.transition(AttemptStatus::LaunchingAgentProcess);
-        let (turn_result, mut event_rx) = runner
-            .run_turn(&issue, &prompt, current_session.as_deref(), &workspace.path)
+        let (turn_result, event_rx) = runner
+            .run_turn(&issue, &prompt, current_session.as_deref(), &workspace.path, cancelled.clone())
             .await?;
 
         attempt_record.transition(AttemptStatus::StreamingTurn);
 
-        // Consume streamed events and update state
-        let mut token_usage_received = false;
-        while let Some(event) = event_rx.recv().await {
-            match &event {
-                AgentEvent::RateLimit { payload } => {
-                    let mut st = state.write().await;
-                    st.codex_rate_limits = Some(payload.clone());
-                }
-                AgentEvent::TokenUsage { input, output, total } => {
-                    token_usage_received = true;
-                    let (last_input, last_output, last_total) = {
-                        let st = state.read().await;
-                        if let Some(entry) = st.running.get(&issue.id) {
-                            if let Some(ref sess) = entry.session {
-                                (
-                                    sess.last_reported_input_tokens,
-                                    sess.last_reported_output_tokens,
-                                    sess.last_reported_total_tokens,
-                                )
-                            } else {
-                                (0, 0, 0)
-                            }
-                        } else {
-                            (0, 0, 0)
-                        }
-                    };
-                    let delta_input = input.saturating_sub(last_input);
-                    let delta_output = output.saturating_sub(last_output);
-                    let delta_total = total.saturating_sub(last_total);
-
-                    let mut st = state.write().await;
-                    st.codex_totals.input_tokens += delta_input;
-                    st.codex_totals.output_tokens += delta_output;
-                    st.codex_totals.total_tokens += delta_total;
-                    if let Some(entry) = st.running.get_mut(&issue.id) {
-                        if let Some(ref mut sess) = entry.session {
-                            sess.last_reported_input_tokens = *input;
-                            sess.last_reported_output_tokens = *output;
-                            sess.last_reported_total_tokens = *total;
-                            sess.input_tokens = *input;
-                            sess.output_tokens = *output;
-                            sess.total_tokens = *total;
-                        }
-                    }
-                }
-                AgentEvent::Notification { message, .. }
-                | AgentEvent::TurnFailed { reason: message, .. } => {
-                    let mut st = state.write().await;
-                    if let Some(entry) = st.running.get_mut(&issue.id) {
-                        if let Some(ref mut sess) = entry.session {
-                            sess.last_event = Some(format!("{:?}", std::mem::discriminant(&event)));
-                            sess.last_message = Some(message.clone());
-                            sess.last_timestamp = Some(Utc::now());
-                        }
-                    }
-                }
-                _ => {}
+        // Spawn concurrent event consumer for real-time state updates
+        let state_for_events = state.clone();
+        let issue_id_for_events = issue.id.clone();
+        let event_consumer = tokio::spawn(async move {
+            let mut rx = event_rx;
+            while let Some(event) = rx.recv().await {
+                apply_agent_event(&state_for_events, &issue_id_for_events, event).await;
             }
-        }
+        });
+
+        // Wait for the turn to complete and the event consumer to drain
+        let _ = event_consumer.await;
 
         // Fallback: if no TokenUsage event was received, use tokens from turn_result
-        if !token_usage_received {
+        let already_counted = {
+            let st = state.read().await;
+            st.running
+                .get(&issue.id)
+                .and_then(|e| e.session.as_ref())
+                .map(|s| s.last_reported_total_tokens > 0)
+                .unwrap_or(false)
+        };
+
+        if !already_counted {
             if let Some(ref token_info) = turn_result.tokens {
                 let mut st = state.write().await;
                 st.codex_totals.input_tokens += token_info.input;
@@ -605,23 +750,38 @@ async fn run_worker(
         {
             let mut st = state.write().await;
             if let Some(entry) = st.running.get_mut(&issue.id) {
-                entry.turn_count += 1;
-                entry.session = Some(LiveSession {
-                    session_id: format!("{}-{}", turn_result.session_id, turn_result.turn_id),
-                    thread_id: turn_result.session_id.clone(),
-                    turn_id: turn_result.turn_id.clone(),
-                    agent_pid: None,
-                    last_event: Some("turn_completed".into()),
-                    last_timestamp: Some(Utc::now()),
-                    last_message: Some(turn_result.text.clone()),
-                    input_tokens: turn_result.tokens.as_ref().map(|t| t.input).unwrap_or(0),
-                    output_tokens: turn_result.tokens.as_ref().map(|t| t.output).unwrap_or(0),
-                    total_tokens: turn_result.tokens.as_ref().map(|t| t.total).unwrap_or(0),
-                    last_reported_input_tokens: turn_result.tokens.as_ref().map(|t| t.input).unwrap_or(0),
-                    last_reported_output_tokens: turn_result.tokens.as_ref().map(|t| t.output).unwrap_or(0),
-                    last_reported_total_tokens: turn_result.tokens.as_ref().map(|t| t.total).unwrap_or(0),
-                    turn_count: entry.turn_count,
-                });
+                if let Some(ref mut sess) = entry.session {
+                    sess.session_id = format!("{}-{}", turn_result.session_id, turn_result.turn_id);
+                    sess.thread_id = turn_result.session_id.clone();
+                    sess.turn_id = turn_result.turn_id.clone();
+                    sess.last_event = Some("turn_completed".into());
+                    sess.last_timestamp = Some(Utc::now());
+                    sess.last_message = Some(turn_result.text.clone());
+                    if let Some(ref t) = turn_result.tokens {
+                        sess.input_tokens = t.input;
+                        sess.output_tokens = t.output;
+                        sess.total_tokens = t.total;
+                    }
+                    sess.turn_count = entry.turn_count;
+                } else {
+                    entry.session = Some(LiveSession {
+                        session_id: format!("{}-{}", turn_result.session_id, turn_result.turn_id),
+                        thread_id: turn_result.session_id.clone(),
+                        turn_id: turn_result.turn_id.clone(),
+                        agent_pid: None,
+                        last_event: Some("turn_completed".into()),
+                        last_timestamp: Some(Utc::now()),
+                        last_message: Some(turn_result.text.clone()),
+                        input_tokens: turn_result.tokens.as_ref().map(|t| t.input).unwrap_or(0),
+                        output_tokens: turn_result.tokens.as_ref().map(|t| t.output).unwrap_or(0),
+                        total_tokens: turn_result.tokens.as_ref().map(|t| t.total).unwrap_or(0),
+                        last_reported_input_tokens: turn_result.tokens.as_ref().map(|t| t.input).unwrap_or(0),
+                        last_reported_output_tokens: turn_result.tokens.as_ref().map(|t| t.output).unwrap_or(0),
+                        last_reported_total_tokens: turn_result.tokens.as_ref().map(|t| t.total).unwrap_or(0),
+                        turn_count: entry.turn_count,
+                        pr_url: None,
+                    });
+                }
             }
         }
 
@@ -646,12 +806,37 @@ async fn run_worker(
             if terminal_states.contains(&state_lc) || !active_states.contains(&state_lc) {
                 break;
             }
+
+            let prev_state = issue.state.to_lowercase();
+            {
+                let mut st = state.write().await;
+                if let Some(entry) = st.running.get_mut(&issue.id) {
+                    if state_lc == prev_state {
+                        entry.stagnation_counter += 1;
+                        if entry.stagnation_counter >= 3 {
+                            warn!(issue_id = %issue.id, "issue stagnant for 3 turns, forcing stop");
+                            return Err(SympheoError::AgentRunnerError("stagnation guardrail triggered".into()));
+                        }
+                    } else {
+                        entry.stagnation_counter = 0;
+                        entry.last_state_change_at = Utc::now();
+                        issue.state = refreshed_issue.state.clone();
+                    }
+                }
+            }
+
+            let max_per_state = config.max_turns_per_state().get(&state_lc).copied();
+            if let Some(max_state_turns) = max_per_state {
+                if turn_number >= max_state_turns {
+                    info!(issue_id = %issue.id, state = %state_lc, max = %max_state_turns, "max turns for state reached");
+                    break;
+                }
+            }
         }
 
         if turn_number >= max_turns {
             break;
         }
-        turn_number += 1;
     }
 
     attempt_record.transition(AttemptStatus::Finishing);
@@ -762,8 +947,7 @@ mod tests {
             url: None,
             labels: vec![],
             blocked_by: vec![],
-            created_at: None,
-            updated_at: None,
+            ..Default::default()
         };
         let prompt = build_prompt_strict(&config, &issue, None, None).unwrap();
         assert_eq!(prompt, "Fix the bug");
@@ -788,8 +972,7 @@ mod tests {
             url: None,
             labels: vec![],
             blocked_by: vec![],
-            created_at: None,
-            updated_at: None,
+            ..Default::default()
         };
         let prompt = build_prompt_strict(&config, &issue, None, None).unwrap();
         assert_eq!(prompt, "You are working on an issue from the tracker.");
@@ -814,8 +997,7 @@ mod tests {
             url: None,
             labels: vec![],
             blocked_by: vec![],
-            created_at: None,
-            updated_at: None,
+            ..Default::default()
         };
         let prompt = build_prompt_strict(&config, &issue, Some(2), None).unwrap();
         assert_eq!(prompt, "Attempt 2");
@@ -904,8 +1086,7 @@ mod tests {
             url: None,
             labels: vec![],
             blocked_by: vec![],
-            created_at: None,
-            updated_at: None,
+            ..Default::default()
         };
         let result = build_prompt_strict(&config, &issue, None, None);
         assert!(matches!(result, Err(SympheoError::TemplateRenderError(_))));
@@ -930,8 +1111,7 @@ mod tests {
             url: None,
             labels: vec![],
             blocked_by: vec![],
-            created_at: None,
-            updated_at: None,
+            ..Default::default()
         };
         let result = build_prompt_strict(&config, &issue, None, None);
         assert!(matches!(result, Err(SympheoError::TemplateRenderError(_))));
@@ -956,8 +1136,7 @@ mod tests {
             url: None,
             labels: vec![],
             blocked_by: vec![],
-            created_at: None,
-            updated_at: None,
+            ..Default::default()
         };
         let result = build_prompt_strict(&config, &issue, None, None);
         assert!(matches!(result, Err(SympheoError::TemplateParseError(_))));
@@ -982,8 +1161,7 @@ mod tests {
             url: None,
             labels: vec![],
             blocked_by: vec![],
-            created_at: None,
-            updated_at: None,
+            ..Default::default()
         };
         let prompt = build_prompt_strict(&config, &issue, None, Some("Analyze the issue first.")).unwrap();
         assert!(prompt.contains("Analyze the issue first."));

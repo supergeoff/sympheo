@@ -49,6 +49,7 @@ server:
 
 skills:
   mapping:
+    todo: ./skills/todo/SKILL.md
     spec: ./skills/spec/SKILL.md
     in progress: ./skills/build/SKILL.md
     review: ./skills/review/SKILL.md
@@ -60,10 +61,23 @@ You are working on issue {{ issue.identifier }}: {{ issue.title }}.
 
 Description: {{ issue.description }}
 
-The repository has been cloned into this workspace. Please analyze the issue, implement the necessary changes, and ensure tests pass.
+{% case issue.state %}
+{% when "todo" %}
+Your task is to verify and advance this ticket to the Spec stage. Do NOT write code, run tests, or modify source files.
+{% when "spec" %}
+Your task is to produce a complete Low-Level Design (LLD) for this issue. Do NOT write implementation code yet.
+{% when "in progress" %}
+Your task is to implement the LLD with TDD discipline. Work in a dedicated branch from now on.
+{% when "review" %}
+Your task is to perform a thorough code review of the implementation. Check for bugs, consistency, and test coverage.
+{% when "test" %}
+Your task is to run all tests, validate the implementation, and ensure everything passes.
+{% when "doc" %}
+Your task is to write or update documentation. When complete, open a PR and move this issue to Done.
+{% endcase %}
 
 The project board has the following columns and workflow:
-- **Todo**: Issues waiting to be picked up. No specific skill is applied here.
+- **Todo**: Issues waiting to be picked up. Verify and move to Spec.
 - **Spec**: Technical specification and design phase. When ready to implement, move to "In Progress".
 - **In Progress**: Active development and implementation phase. Work in a dedicated branch from now on. When done, move to "Review".
 - **Review**: Code review phase. When review passes, move to "Test".
@@ -71,9 +85,9 @@ The project board has the following columns and workflow:
 - **Doc**: Documentation phase. When documentation is complete, open a PR and move to "Done".
 - **Done**: Completed and verified. This is the terminal state.
 
-When you finish the work for the current column, move this issue to the next appropriate column in the GitHub project using `gh` or the GitHub API with the `GITHUB_TOKEN` environment variable.
+When you finish the work for the current column, move this issue to the next appropriate column in the GitHub project using the GitHub API with the `GITHUB_TOKEN` environment variable.
 The project number is 2 for repository supergeoff/sympheo.
 
-**IMPORTANT:** Do NOT run `sympheo`, `cargo run`, or any orchestrator commands. Do NOT start long-running background processes or servers. Focus only on implementing the requested changes.
+**IMPORTANT:** Do NOT run `sympheo`, `cargo run`, or any orchestrator commands. Do NOT start long-running background processes or servers. Focus only on the task for the current column.
 
 {% if attempt %}This is retry/continuation attempt {{ attempt }}.{% endif %}

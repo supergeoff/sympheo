@@ -7,6 +7,7 @@ use crate::error::SympheoError;
 use crate::tracker::model::Issue;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 pub struct AgentRunner {
     backend: Arc<dyn AgentBackend>,
@@ -28,8 +29,9 @@ impl AgentRunner {
         prompt: &str,
         session_id: Option<&str>,
         workspace_path: &Path,
+        cancelled: Arc<AtomicBool>,
     ) -> Result<(TurnResult, Receiver<AgentEvent>), SympheoError> {
-        self.backend.run_turn(issue, prompt, session_id, workspace_path).await
+        self.backend.run_turn(issue, prompt, session_id, workspace_path, cancelled).await
     }
 
     pub async fn cleanup_workspace(&self, workspace_path: &Path) -> Result<(), SympheoError> {

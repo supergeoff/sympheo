@@ -64,8 +64,7 @@ fn test_issue_is_blocked() {
                 state: Some("in progress".into()),
             },
         ],
-        created_at: None,
-        updated_at: None,
+        ..Default::default()
     };
     let terminal = vec!["closed".into(), "done".into()];
     assert!(issue.is_blocked(&terminal));
@@ -146,7 +145,7 @@ mod workstream0_tests {
             labels: vec![],
             blocked_by: vec![],
             created_at,
-            updated_at: None,
+            ..Default::default()
         }
     }
 
@@ -173,11 +172,14 @@ mod workstream0_tests {
                     last_reported_output_tokens: 50,
                     last_reported_total_tokens: 150,
                     turn_count: 1,
+                    pr_url: None,
                 }),
                 started_at: Utc::now(),
                 retry_attempt: None,
                 turn_count: 1,
                 cancelled: Arc::new(AtomicBool::new(false)),
+                stagnation_counter: 0,
+                last_state_change_at: Utc::now(),
             },
         );
 
@@ -227,11 +229,14 @@ mod workstream0_tests {
                     last_reported_output_tokens: 50,
                     last_reported_total_tokens: 150,
                     turn_count: 1,
+                    pr_url: None,
                 }),
                 started_at: Utc::now(),
                 retry_attempt: None,
                 turn_count: 1,
                 cancelled: Arc::new(AtomicBool::new(false)),
+                stagnation_counter: 0,
+                last_state_change_at: Utc::now(),
             },
         );
 

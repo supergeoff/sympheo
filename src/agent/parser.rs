@@ -24,6 +24,15 @@ pub enum OpencodeEvent {
         session_id: String,
         part: StepFinishPart,
     },
+    #[serde(rename = "create_pull_request")]
+    CreatePullRequest {
+        #[serde(rename = "sessionID")]
+        session_id: String,
+        title: String,
+        head: String,
+        base: String,
+        body: Option<String>,
+    },
     #[serde(other)]
     Other,
 }

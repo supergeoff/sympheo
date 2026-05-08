@@ -611,7 +611,7 @@ fn build_prompt_strict(
         let var_name = cap.get(1).unwrap().as_str();
         if !available_vars.contains(&var_name) {
             return Err(SympheoError::TemplateRenderError(
-                format!("Unknown variable: {}", var_name).into()
+                format!("Unknown variable: {}", var_name)
             ));
         }
     }
@@ -749,8 +749,8 @@ mod tests {
     #[test]
     fn test_serde_json_to_liquid_number_float() {
         assert_eq!(
-            serde_json_to_liquid(&serde_json::Value::Number(serde_json::Number::from_f64(3.14).unwrap())),
-            liquid::model::Value::Scalar(3.14f64.into())
+            serde_json_to_liquid(&serde_json::Value::Number(serde_json::Number::from_f64(2.71).unwrap())),
+            liquid::model::Value::Scalar(2.71f64.into())
         );
     }
 

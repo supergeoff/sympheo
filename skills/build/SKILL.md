@@ -69,10 +69,67 @@ Repeat steps 2-4 for every component in the LLD:
 ### 6. Final Verification
 
 - `cargo test` — all tests pass.
-- `cargo clippy` — zero warnings.
-- `cargo fmt` — code is formatted.
-- `cargo build` — release build succeeds.
+- `cargo clippy --all-targets -- -D warnings` — zero warnings.
+- `cargo fmt --check` — code is formatted.
+- `cargo build --release` — release build succeeds.
 - Review against LLD checklist — every requirement is met.
+
+### 7. Persist Work and Open the Pull Request
+
+Local edits are not real work until they exist on the remote and a Pull
+Request points to them. You MUST complete every step below before moving
+the issue to the "Review" column. Do NOT skip steps. Do NOT advance the
+column on the basis of local files alone.
+
+Procedure (run these commands in order; abort on any failure):
+
+1. Confirm you are NOT on `main`. Create a feature branch named after the
+   issue identifier and a short slug derived from the title:
+   ```
+   git checkout -b {{ branch_name }}
+   ```
+   Suggested format: `feat/<issue-id>-<kebab-slug>` for features,
+   `fix/<issue-id>-<slug>` for bug fixes, `chore/<issue-id>-<slug>` for
+   tooling. Use the issue identifier (e.g. `129`), not the project ID.
+
+2. Stage and commit every change required by the LLD. Group logically;
+   one commit is acceptable for a small ticket. Commit message format:
+   ```
+   <type>(#<issue-id>): <short imperative summary>
+
+   <optional longer explanation>
+   ```
+   Example: `feat(#129): per-process opencode XDG_DATA_HOME`.
+
+3. Push the branch with upstream tracking:
+   ```
+   git push -u origin {{ branch_name }}
+   ```
+
+4. Open the Pull Request against `main`:
+   ```
+   gh pr create --repo <owner>/<repo> --base main --head {{ branch_name }} \
+     --title "<type>(#<issue-id>): <short summary>" \
+     --body-file /tmp/pr-body-{{ issue.identifier }}.md
+   ```
+   The body file must include a `Closes #<issue-id>` line so GitHub links
+   the PR to the issue. Capture the returned PR URL.
+
+5. Verify the PR exists and references this issue:
+   ```
+   gh pr view <pr-number> --repo <owner>/<repo> --json number,headRefName,body \
+     --jq '.body' | grep -q "Closes #{{ issue.id }}"
+   ```
+   This command MUST exit 0. If it does not, fix the body and retry. Do
+   NOT proceed to the column transition until verification succeeds.
+
+6. Only after step 5 exits 0 may you move the issue to the "Review"
+   column. The PR URL is the artifact reviewers will inspect; the local
+   workspace is not visible to them.
+
+If any of steps 1-5 fail, STOP. Do not move the column. Do not pretend
+the work is done. Report the exact command, exit code, and stderr so the
+operator can diagnose.
 
 ## Rules
 

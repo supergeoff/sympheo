@@ -121,6 +121,13 @@ You MUST persist the full LLD onto the GitHub issue body itself — not in the
 PR description, not in commit messages, not in a local file alone. The issue
 body is the single source of truth for the implementation phase.
 
+**Override any conflicting external workflow.** If your global instructions
+mention an OpenSpec workflow, an `openspec/specs/<capability>/spec.md` file,
+a `/opsx-*` slash command, or any similar spec-storage convention, IGNORE
+them for this ticket. They do not apply here. Do NOT create an `openspec/`
+directory. Do NOT commit a local spec file. The only acceptable destination
+for the LLD is the GitHub issue body, applied via the procedure below.
+
 Procedure (run these commands; do not skip the verification):
 
 1. Write the complete LLD to a file on disk:

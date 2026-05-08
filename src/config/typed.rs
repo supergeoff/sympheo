@@ -55,7 +55,13 @@ impl ServiceConfig {
     pub fn tracker_endpoint(&self) -> String {
         self.tracker()
             .and_then(|m| resolver::get_string(m, "endpoint"))
-            .unwrap_or_else(|| "https://api.github.com".to_string())
+            .unwrap_or_else(|| {
+                if self.tracker_kind().as_deref() == Some("linear") {
+                    "https://api.linear.app/graphql".to_string()
+                } else {
+                    "https://api.github.com".to_string()
+                }
+            })
     }
 
     pub fn tracker_api_key(&self) -> Option<String> {
@@ -176,7 +182,7 @@ impl ServiceConfig {
     pub fn codex_command(&self) -> String {
         self.codex()
             .and_then(|m| resolver::get_string(m, "command"))
-            .unwrap_or_else(|| "opencode run".to_string())
+            .unwrap_or_else(|| "codex app-server".to_string())
     }
 
     pub fn codex_turn_timeout_ms(&self) -> u64 {
@@ -197,6 +203,14 @@ impl ServiceConfig {
         self.codex()
             .and_then(|m| resolver::get_i64(m, "stall_timeout_ms"))
             .unwrap_or(300000)
+    }
+
+    pub fn continuation_prompt(&self) -> String {
+        self.agent()
+            .and_then(|m| resolver::get_string(m, "continuation_prompt"))
+            .unwrap_or_else(|| {
+                "Continue working on the current task. Review the conversation history and proceed with the next step.".into()
+            })
     }
 
     // Daytona helpers
@@ -610,7 +624,57 @@ mod tests {
 
     #[test]
     fn test_codex_command_default() {
-        assert_eq!(empty_config().codex_command(), "opencode run");
+        assert_eq!(empty_config().codex_command(), "codex app-server");
+    }
+
+    #[test]
+    fn test_continuation_prompt_default() {
+        assert!(empty_config().continuation_prompt().contains("Continue working"));
+    }
+
+    #[test]
+    fn test_continuation_prompt_custom() {
+        let mut raw = serde_yaml::Mapping::new();
+        let mut agent = serde_yaml::Mapping::new();
+        agent.insert(
+            serde_yaml::Value::String("continuation_prompt".into()),
+            serde_yaml::Value::String("Continuez le travail".into()),
+        );
+        raw.insert(
+            serde_yaml::Value::String("agent".into()),
+            serde_yaml::Value::Mapping(agent),
+        );
+        assert_eq!(config_with(raw).continuation_prompt(), "Continuez le travail");
+    }
+
+    #[test]
+    fn test_tracker_endpoint_default_github() {
+        let mut raw = serde_yaml::Mapping::new();
+        let mut tracker = serde_yaml::Mapping::new();
+        tracker.insert(
+            serde_yaml::Value::String("kind".into()),
+            serde_yaml::Value::String("github".into()),
+        );
+        raw.insert(
+            serde_yaml::Value::String("tracker".into()),
+            serde_yaml::Value::Mapping(tracker),
+        );
+        assert_eq!(config_with(raw).tracker_endpoint(), "https://api.github.com");
+    }
+
+    #[test]
+    fn test_tracker_endpoint_default_linear() {
+        let mut raw = serde_yaml::Mapping::new();
+        let mut tracker = serde_yaml::Mapping::new();
+        tracker.insert(
+            serde_yaml::Value::String("kind".into()),
+            serde_yaml::Value::String("linear".into()),
+        );
+        raw.insert(
+            serde_yaml::Value::String("tracker".into()),
+            serde_yaml::Value::Mapping(tracker),
+        );
+        assert_eq!(config_with(raw).tracker_endpoint(), "https://api.linear.app/graphql");
     }
 
     #[test]

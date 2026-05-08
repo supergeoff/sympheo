@@ -32,6 +32,23 @@ open http://localhost:9090
 
 Move an issue on your GitHub board. Sympheo picks it up within seconds.
 
+## Local Development Setup
+
+After cloning:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+This activates local pre-commit and commit-msg hooks enforcing:
+- Conventional commit messages
+- `cargo fmt --check`, `cargo clippy`, `cargo check`, `cargo test`
+- Quality patterns (no unjustified `#[ignore]`/`#[allow]`, no `todo!()` in `src/`, tests with real assertions)
+
+**Bypass locally**: `git commit --no-verify` (CI will still enforce everything).
+
+See `SANITY.md` for full details and rules.
+
 ## Documentation
 
 All user documentation lives in the [`docs/`](docs/) directory:

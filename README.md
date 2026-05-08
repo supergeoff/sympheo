@@ -41,13 +41,8 @@ git config core.hooksPath .githooks
 ```
 
 This activates local pre-commit and commit-msg hooks enforcing:
-- Conventional commit messages
-- `cargo fmt --check`, `cargo clippy`, `cargo check`, `cargo test`
-- Quality patterns (no unjustified `#[ignore]`/`#[allow]`, no `todo!()` in `src/`, tests with real assertions)
 
-**Bypass locally**: `git commit --no-verify` (CI will still enforce everything).
-
-See `SANITY.md` for full details and rules.
+**Bypass locally**: `git commit --no-verify`
 
 ## Documentation
 

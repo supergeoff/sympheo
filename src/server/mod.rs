@@ -3,7 +3,7 @@ use axum::{
     Router,
     extract::{Path as AxumPath, State},
     http::StatusCode,
-    response::Json,
+    response::{Html, Json},
     routing::{get, post},
 };
 use serde_json::json;
@@ -31,7 +31,7 @@ pub async fn start_server(port: u16, state: SharedState) -> Result<(), crate::er
     Ok(())
 }
 
-async fn dashboard(State(state): State<SharedState>) -> (StatusCode, String) {
+async fn dashboard(State(state): State<SharedState>) -> (StatusCode, Html<String>) {
     let st = state.read().await;
     let now = chrono::Utc::now();
 
@@ -329,7 +329,7 @@ async fn dashboard(State(state): State<SharedState>) -> (StatusCode, String) {
             retry_rows
         }
     );
-    (StatusCode::OK, html)
+    (StatusCode::OK, Html(html))
 }
 
 fn html_escape(s: &str) -> String {
@@ -571,7 +571,7 @@ mod tests {
         );
 
         let shared = Arc::new(RwLock::new(state));
-        let (status, body) = dashboard(State(shared)).await;
+        let (status, Html(body)) = dashboard(State(shared)).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("TEST-1"));
         assert!(body.contains("in progress"));
@@ -591,7 +591,7 @@ mod tests {
     async fn test_dashboard_empty() {
         let state = OrchestratorState::new(5000, 5);
         let shared = Arc::new(RwLock::new(state));
-        let (status, body) = dashboard(State(shared)).await;
+        let (status, Html(body)) = dashboard(State(shared)).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("No active sessions"));
         assert!(body.contains("No retries queued"));
@@ -612,7 +612,7 @@ mod tests {
             },
         );
         let shared = Arc::new(RwLock::new(state));
-        let (status, body) = dashboard(State(shared)).await;
+        let (status, Html(body)) = dashboard(State(shared)).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("never"));
         assert!(body.contains("TEST-1"));
@@ -663,7 +663,7 @@ mod tests {
             },
         );
         let shared = Arc::new(RwLock::new(state));
-        let (status, body) = dashboard(State(shared)).await;
+        let (status, Html(body)) = dashboard(State(shared)).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("..."));
     }
@@ -683,7 +683,7 @@ mod tests {
             },
         );
         let shared = Arc::new(RwLock::new(state));
-        let (status, body) = dashboard(State(shared)).await;
+        let (status, Html(body)) = dashboard(State(shared)).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("..."));
         assert!(body.contains("2m ago"));
@@ -813,7 +813,7 @@ mod tests {
         );
 
         let shared = Arc::new(RwLock::new(state));
-        let (status, body) = dashboard(State(shared)).await;
+        let (status, Html(body)) = dashboard(State(shared)).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("Ticket Summary"));
         assert!(body.contains("Recent Movements"));

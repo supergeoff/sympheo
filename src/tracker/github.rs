@@ -155,15 +155,6 @@ impl GithubTracker {
                           }
                         }
                       }
-                      linkedItems(first: 20) {
-                        nodes {
-                          ... on Issue {
-                            id
-                            number
-                            state
-                          }
-                        }
-                      }
                     }
                     pageInfo { hasNextPage endCursor }
                   }
@@ -198,15 +189,6 @@ impl GithubTracker {
                           ... on ProjectV2ItemFieldSingleSelectValue {
                             field { ... on ProjectV2FieldCommon { name } }
                             name
-                          }
-                        }
-                      }
-                      linkedItems(first: 20) {
-                        nodes {
-                          ... on Issue {
-                            id
-                            number
-                            state
                           }
                         }
                       }

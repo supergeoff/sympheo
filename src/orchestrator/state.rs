@@ -29,8 +29,8 @@ pub struct OrchestratorState {
     pub claimed: HashSet<String>,
     pub retry_attempts: HashMap<String, RetryEntry>,
     pub completed: HashSet<String>,
-    pub codex_totals: TokenTotals,
-    pub codex_rate_limits: Option<serde_json::Value>,
+    pub cli_totals: TokenTotals,
+    pub cli_rate_limits: Option<serde_json::Value>,
     pub last_tick_at: Option<chrono::DateTime<chrono::Utc>>,
     pub refresh_notify: Arc<tokio::sync::Notify>,
     pub skills: HashMap<String, Skill>,
@@ -45,8 +45,8 @@ impl std::fmt::Debug for OrchestratorState {
             .field("claimed", &self.claimed)
             .field("retry_attempts", &self.retry_attempts)
             .field("completed", &self.completed)
-            .field("codex_totals", &self.codex_totals)
-            .field("codex_rate_limits", &self.codex_rate_limits)
+            .field("cli_totals", &self.cli_totals)
+            .field("cli_rate_limits", &self.cli_rate_limits)
             .field("last_tick_at", &self.last_tick_at)
             .field("refresh_notify", &"<Notify>")
             .field("skills", &self.skills)
@@ -63,8 +63,8 @@ impl Clone for OrchestratorState {
             claimed: self.claimed.clone(),
             retry_attempts: self.retry_attempts.clone(),
             completed: self.completed.clone(),
-            codex_totals: self.codex_totals.clone(),
-            codex_rate_limits: self.codex_rate_limits.clone(),
+            cli_totals: self.cli_totals.clone(),
+            cli_rate_limits: self.cli_rate_limits.clone(),
             last_tick_at: self.last_tick_at,
             refresh_notify: self.refresh_notify.clone(),
             skills: self.skills.clone(),
@@ -81,8 +81,8 @@ impl OrchestratorState {
             claimed: HashSet::new(),
             retry_attempts: HashMap::new(),
             completed: HashSet::new(),
-            codex_totals: TokenTotals::default(),
-            codex_rate_limits: None,
+            cli_totals: TokenTotals::default(),
+            cli_rate_limits: None,
             last_tick_at: None,
             refresh_notify: Arc::new(tokio::sync::Notify::new()),
             skills: HashMap::new(),
@@ -116,8 +116,8 @@ mod tests {
         assert!(state.claimed.is_empty());
         assert!(state.retry_attempts.is_empty());
         assert!(state.completed.is_empty());
-        assert_eq!(state.codex_totals.input_tokens, 0);
-        assert!(state.codex_rate_limits.is_none());
+        assert_eq!(state.cli_totals.input_tokens, 0);
+        assert!(state.cli_rate_limits.is_none());
         assert!(state.last_tick_at.is_none());
     }
 

@@ -169,7 +169,7 @@ impl Orchestrator {
         }
 
         let config = self.config.read().await.clone();
-        let stall_timeout_ms = config.codex_stall_timeout_ms();
+        let stall_timeout_ms = config.cli_stall_timeout_ms();
 
         // Stall detection
         let now = Utc::now();
@@ -292,7 +292,7 @@ impl Orchestrator {
             // Accumulate runtime for the finished session
             if let Some(entry) = st.running.get(&issue.id) {
                 let elapsed = (Utc::now() - entry.started_at).num_seconds() as f64;
-                st.codex_totals.seconds_running += elapsed;
+                st.cli_totals.seconds_running += elapsed;
             }
             match result {
                 Ok(()) => {
@@ -339,7 +339,7 @@ impl Orchestrator {
         let cfg = self.config.read().await.clone();
         if let Some(entry) = state.running.remove(issue_id) {
             let elapsed = (Utc::now() - entry.started_at).num_seconds() as f64;
-            state.codex_totals.seconds_running += elapsed;
+            state.cli_totals.seconds_running += elapsed;
             if normal {
                 state.completed.insert(issue_id.to_string());
                 let retry = schedule_retry(
@@ -531,9 +531,9 @@ async fn apply_agent_event(
             let delta_total = total.saturating_sub(last_total);
 
             let mut st = state.write().await;
-            st.codex_totals.input_tokens += delta_input;
-            st.codex_totals.output_tokens += delta_output;
-            st.codex_totals.total_tokens += delta_total;
+            st.cli_totals.input_tokens += delta_input;
+            st.cli_totals.output_tokens += delta_output;
+            st.cli_totals.total_tokens += delta_total;
 
             if let Some(entry) = st.running.get_mut(issue_id)
                 && let Some(ref mut sess) = entry.session
@@ -548,7 +548,7 @@ async fn apply_agent_event(
         }
         AgentEvent::RateLimit { payload } => {
             let mut st = state.write().await;
-            st.codex_rate_limits = Some(payload);
+            st.cli_rate_limits = Some(payload);
         }
         AgentEvent::Notification { message, .. }
         | AgentEvent::TurnFailed {
@@ -712,19 +712,13 @@ async fn run_worker(
         };
 
         attempt_record.transition(AttemptStatus::LaunchingAgentProcess);
-        let (turn_result, event_rx) = runner
-            .run_turn(
-                &issue,
-                &prompt,
-                current_session.as_deref(),
-                &workspace.path,
-                cancelled.clone(),
-            )
-            .await?;
 
-        attempt_record.transition(AttemptStatus::StreamingTurn);
+        // Channel + consumer must exist BEFORE the turn starts so events
+        // update orchestrator state in real time. Sized for chatty turns
+        // (text deltas, tool calls) without back-pressuring the backend
+        // stdout reader during normal operation.
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(1024);
 
-        // Spawn concurrent event consumer for real-time state updates
         let state_for_events = state.clone();
         let issue_id_for_events = issue.id.clone();
         let event_consumer = tokio::spawn(async move {
@@ -734,7 +728,20 @@ async fn run_worker(
             }
         });
 
-        // Wait for the turn to complete and the event consumer to drain
+        attempt_record.transition(AttemptStatus::StreamingTurn);
+        let turn_result = runner
+            .run_turn(
+                &issue,
+                &prompt,
+                current_session.as_deref(),
+                &workspace.path,
+                cancelled.clone(),
+                event_tx,
+            )
+            .await?;
+
+        // run_turn dropped its sender on return — let the consumer drain
+        // the remaining events queued in the channel before we proceed.
         let _ = event_consumer.await;
 
         // Fallback: if no TokenUsage event was received, use tokens from turn_result
@@ -749,9 +756,9 @@ async fn run_worker(
 
         if !already_counted && let Some(ref token_info) = turn_result.tokens {
             let mut st = state.write().await;
-            st.codex_totals.input_tokens += token_info.input;
-            st.codex_totals.output_tokens += token_info.output;
-            st.codex_totals.total_tokens += token_info.total;
+            st.cli_totals.input_tokens += token_info.input;
+            st.cli_totals.output_tokens += token_info.output;
+            st.cli_totals.total_tokens += token_info.total;
             if let Some(entry) = st.running.get_mut(&issue.id)
                 && let Some(ref mut sess) = entry.session
             {
@@ -1412,9 +1419,9 @@ mod tests {
         apply_agent_event(&state, "1", event).await;
 
         let st = state.read().await;
-        assert_eq!(st.codex_totals.input_tokens, 40); // 50 - 10
-        assert_eq!(st.codex_totals.output_tokens, 60); // 80 - 20
-        assert_eq!(st.codex_totals.total_tokens, 100); // 130 - 30
+        assert_eq!(st.cli_totals.input_tokens, 40); // 50 - 10
+        assert_eq!(st.cli_totals.output_tokens, 60); // 80 - 20
+        assert_eq!(st.cli_totals.total_tokens, 100); // 130 - 30
         let sess = st.running.get("1").unwrap().session.as_ref().unwrap();
         assert_eq!(sess.input_tokens, 50);
         assert_eq!(sess.output_tokens, 80);
@@ -1433,10 +1440,7 @@ mod tests {
         apply_agent_event(&state, "1", event).await;
 
         let st = state.read().await;
-        assert_eq!(
-            st.codex_rate_limits,
-            Some(serde_json::json!({"limit": 100}))
-        );
+        assert_eq!(st.cli_rate_limits, Some(serde_json::json!({"limit": 100})));
     }
 
     #[tokio::test]

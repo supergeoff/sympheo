@@ -37,8 +37,13 @@ async fn dashboard(State(state): State<SharedState>) -> (StatusCode, Html<String
 
     let running_count = st.running.len();
     let retrying_count = st.retry_attempts.len();
-    let total_tokens = st.codex_totals.total_tokens;
-    let runtime_secs = st.codex_totals.seconds_running as u64;
+    let total_tokens = st.cli_totals.total_tokens;
+    let live_running_secs: i64 = st
+        .running
+        .values()
+        .map(|e| (now - e.started_at).num_seconds().max(0))
+        .sum();
+    let runtime_secs = (st.cli_totals.seconds_running as i64 + live_running_secs).max(0) as u64;
 
     let running_rows: String = st
         .running
@@ -417,13 +422,13 @@ async fn api_state(State(state): State<SharedState>) -> Json<serde_json::Value> 
         "running": running,
         "retrying": retrying,
         "summary": summary,
-        "codex_totals": {
-            "input_tokens": st.codex_totals.input_tokens,
-            "output_tokens": st.codex_totals.output_tokens,
-            "total_tokens": st.codex_totals.total_tokens,
-            "seconds_running": st.codex_totals.seconds_running,
+        "cli_totals": {
+            "input_tokens": st.cli_totals.input_tokens,
+            "output_tokens": st.cli_totals.output_tokens,
+            "total_tokens": st.cli_totals.total_tokens,
+            "seconds_running": st.cli_totals.seconds_running,
         },
-        "rate_limits": st.codex_rate_limits,
+        "rate_limits": st.cli_rate_limits,
     }))
 }
 
@@ -507,7 +512,7 @@ mod tests {
     #[tokio::test]
     async fn test_dashboard_with_running_and_retries() {
         let mut state = OrchestratorState::new(5000, 5);
-        state.codex_totals = TokenTotals {
+        state.cli_totals = TokenTotals {
             input_tokens: 100,
             output_tokens: 200,
             total_tokens: 300,

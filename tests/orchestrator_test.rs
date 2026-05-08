@@ -333,9 +333,9 @@ async fn test_orchestrator_tick_dispatches_non_todo() {
 #[tokio::test]
 async fn test_orchestrator_tick_worker_completes() {
     let mut raw = valid_config().raw().clone();
-    let mut codex = serde_json::Map::<String, serde_json::Value>::new();
-    codex.insert("command".into(), serde_json::Value::String("false".into()));
-    raw.insert("codex".into(), serde_json::Value::Object(codex));
+    let mut cli = serde_json::Map::<String, serde_json::Value>::new();
+    cli.insert("command".into(), serde_json::Value::String("false".into()));
+    raw.insert("cli".into(), serde_json::Value::Object(cli));
     let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "prompt".into());
     let issue = make_issue("1", "TEST-1", "todo");
     let tracker = Arc::new(MockTracker {
@@ -359,12 +359,12 @@ async fn test_orchestrator_tick_worker_completes() {
 #[tokio::test]
 async fn test_orchestrator_tick_reconcile_stall_with_session() {
     let mut raw = valid_config().raw().clone();
-    let mut codex = serde_json::Map::<String, serde_json::Value>::new();
-    codex.insert(
+    let mut cli = serde_json::Map::<String, serde_json::Value>::new();
+    cli.insert(
         "stall_timeout_ms".into(),
         serde_json::Value::Number(1.into()),
     );
-    raw.insert("codex".into(), serde_json::Value::Object(codex));
+    raw.insert("cli".into(), serde_json::Value::Object(cli));
     let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "prompt".into());
     let tracker = Arc::new(MockTracker {
         candidates: vec![],
@@ -727,9 +727,9 @@ async fn test_orchestrator_tick_reconcile_unknown_state() {
 #[tokio::test]
 async fn test_orchestrator_process_retries_max_attempts_reached() {
     let mut raw = valid_config().raw().clone();
-    let mut codex = serde_json::Map::<String, serde_json::Value>::new();
-    codex.insert("command".into(), serde_json::Value::String("false".into()));
-    raw.insert("codex".into(), serde_json::Value::Object(codex));
+    let mut cli = serde_json::Map::<String, serde_json::Value>::new();
+    cli.insert("command".into(), serde_json::Value::String("false".into()));
+    raw.insert("cli".into(), serde_json::Value::Object(cli));
     let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "prompt".into());
     let issue = make_issue("1", "TEST-1", "todo");
     let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {

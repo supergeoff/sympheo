@@ -25,8 +25,8 @@ fn test_service_config_defaults() {
     assert_eq!(config.poll_interval_ms(), 30000);
     assert_eq!(config.max_concurrent_agents(), 10);
     assert_eq!(config.max_turns(), 20);
-    assert_eq!(config.codex_command(), "codex app-server");
-    assert_eq!(config.codex_stall_timeout_ms(), 300000);
+    assert_eq!(config.cli_command(), "opencode run");
+    assert_eq!(config.cli_stall_timeout_ms(), 1800000);
 }
 
 #[test]
@@ -180,17 +180,17 @@ mod workstream0_tests {
             let delta_input = new_input.saturating_sub(sess.last_reported_input_tokens);
             let delta_output = new_output.saturating_sub(sess.last_reported_output_tokens);
             let delta_total = new_total.saturating_sub(sess.last_reported_total_tokens);
-            state.codex_totals.input_tokens += delta_input;
-            state.codex_totals.output_tokens += delta_output;
-            state.codex_totals.total_tokens += delta_total;
+            state.cli_totals.input_tokens += delta_input;
+            state.cli_totals.output_tokens += delta_output;
+            state.cli_totals.total_tokens += delta_total;
             sess.last_reported_input_tokens = new_input;
             sess.last_reported_output_tokens = new_output;
             sess.last_reported_total_tokens = new_total;
         }
 
-        assert_eq!(state.codex_totals.input_tokens, 0);
-        assert_eq!(state.codex_totals.output_tokens, 0);
-        assert_eq!(state.codex_totals.total_tokens, 0);
+        assert_eq!(state.cli_totals.input_tokens, 0);
+        assert_eq!(state.cli_totals.output_tokens, 0);
+        assert_eq!(state.cli_totals.total_tokens, 0);
     }
 
     #[test]
@@ -237,17 +237,17 @@ mod workstream0_tests {
             let delta_input = new_input.saturating_sub(sess.last_reported_input_tokens);
             let delta_output = new_output.saturating_sub(sess.last_reported_output_tokens);
             let delta_total = new_total.saturating_sub(sess.last_reported_total_tokens);
-            state.codex_totals.input_tokens += delta_input;
-            state.codex_totals.output_tokens += delta_output;
-            state.codex_totals.total_tokens += delta_total;
+            state.cli_totals.input_tokens += delta_input;
+            state.cli_totals.output_tokens += delta_output;
+            state.cli_totals.total_tokens += delta_total;
             sess.last_reported_input_tokens = new_input;
             sess.last_reported_output_tokens = new_output;
             sess.last_reported_total_tokens = new_total;
         }
 
-        assert_eq!(state.codex_totals.input_tokens, 100);
-        assert_eq!(state.codex_totals.output_tokens, 50);
-        assert_eq!(state.codex_totals.total_tokens, 150);
+        assert_eq!(state.cli_totals.input_tokens, 100);
+        assert_eq!(state.cli_totals.output_tokens, 50);
+        assert_eq!(state.cli_totals.total_tokens, 150);
     }
 
     #[test]

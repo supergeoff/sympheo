@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
+use tokio::sync::mpsc::Sender;
 use tokio::time::timeout;
 
 use crate::agent::backend::AgentBackend;
@@ -48,8 +49,8 @@ impl DaytonaConfig {
             image: config.daytona_image(),
             timeout_sec: config.daytona_timeout_sec(),
             env: config.daytona_env(),
-            command: config.codex_command(),
-            turn_timeout_ms: config.codex_turn_timeout_ms(),
+            command: config.cli_command(),
+            turn_timeout_ms: config.cli_turn_timeout_ms(),
             mode: config.daytona_mode(),
             repo_url: config.daytona_repo_url(),
         })
@@ -417,7 +418,8 @@ impl AgentBackend for DaytonaBackend {
         session_id: Option<&str>,
         workspace_path: &Path,
         _cancelled: Arc<AtomicBool>,
-    ) -> Result<(TurnResult, tokio::sync::mpsc::Receiver<AgentEvent>), SympheoError> {
+        event_tx: Sender<AgentEvent>,
+    ) -> Result<TurnResult, SympheoError> {
         self.workspace_manager
             .validate_inside_root(workspace_path)?;
 
@@ -466,8 +468,6 @@ impl AgentBackend for DaytonaBackend {
             )));
         }
 
-        let (event_tx, event_rx) = tokio::sync::mpsc::channel(100);
-
         let mut current_session: Option<String> = None;
         let mut current_turn: Option<String> = None;
         let mut accumulated_text = String::new();
@@ -502,16 +502,13 @@ impl AgentBackend for DaytonaBackend {
         let sid = current_session.unwrap_or_else(|| issue.id.clone());
         let tid = current_turn.unwrap_or_else(|| "turn-1".into());
 
-        Ok((
-            TurnResult {
-                session_id: sid.clone(),
-                turn_id: tid,
-                success,
-                text: accumulated_text,
-                tokens,
-            },
-            event_rx,
-        ))
+        Ok(TurnResult {
+            session_id: sid.clone(),
+            turn_id: tid,
+            success,
+            text: accumulated_text,
+            tokens,
+        })
     }
 
     async fn cleanup_workspace(&self, workspace_path: &Path) -> Result<(), SympheoError> {
@@ -560,12 +557,12 @@ mod tests {
         env.insert("FOO".into(), serde_json::Value::String("bar".into()));
         daytona.insert("env".into(), serde_json::Value::Object(env));
         raw.insert("daytona".into(), serde_json::Value::Object(daytona));
-        let mut codex = serde_json::Map::<String, serde_json::Value>::new();
-        codex.insert(
+        let mut cli = serde_json::Map::<String, serde_json::Value>::new();
+        cli.insert(
             "command".into(),
             serde_json::Value::String("opencode run".into()),
         );
-        raw.insert("codex".into(), serde_json::Value::Object(codex));
+        raw.insert("cli".into(), serde_json::Value::Object(cli));
         ServiceConfig::new(raw, PathBuf::from("/tmp"), "prompt".into())
     }
 

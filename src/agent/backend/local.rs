@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::mpsc::Sender;
 use tokio::time::{Duration, timeout};
 use tracing::Instrument;
 
@@ -23,8 +24,8 @@ pub struct LocalBackend {
 impl LocalBackend {
     pub fn new(config: &ServiceConfig) -> Result<Self, SympheoError> {
         Ok(Self {
-            command: config.codex_command(),
-            turn_timeout: Duration::from_millis(config.codex_turn_timeout_ms()),
+            command: config.cli_command(),
+            turn_timeout: Duration::from_millis(config.cli_turn_timeout_ms()),
             workspace_manager: WorkspaceManager::new(config)?,
         })
     }
@@ -98,7 +99,8 @@ impl AgentBackend for LocalBackend {
         session_id: Option<&str>,
         workspace_path: &Path,
         cancelled: Arc<AtomicBool>,
-    ) -> Result<(TurnResult, tokio::sync::mpsc::Receiver<AgentEvent>), SympheoError> {
+        event_tx: Sender<AgentEvent>,
+    ) -> Result<TurnResult, SympheoError> {
         let sid = session_id.unwrap_or("new");
         let span = tracing::info_span!(
             "opencode_turn",
@@ -201,8 +203,6 @@ impl AgentBackend for LocalBackend {
             let reader = BufReader::new(stdout);
             let mut lines = reader.lines();
 
-            let (event_tx, event_rx) = tokio::sync::mpsc::channel(100);
-
             let mut current_session: Option<String> = None;
             let mut current_turn: Option<String> = None;
             let mut accumulated_text = String::new();
@@ -247,7 +247,6 @@ impl AgentBackend for LocalBackend {
             .await;
 
             if read_result.is_err() {
-                drop(event_tx);
                 kill_process_group(&mut child);
                 let _ = stderr_handle.abort();
                 let _ = tokio::fs::remove_file(&prompt_file).await;
@@ -265,16 +264,13 @@ impl AgentBackend for LocalBackend {
             let sid = current_session.unwrap_or_else(|| issue.id.clone());
             let tid = current_turn.unwrap_or_else(|| "turn-1".into());
 
-            Ok((
-                TurnResult {
-                    session_id: sid.clone(),
-                    turn_id: tid,
-                    success,
-                    text: accumulated_text,
-                    tokens,
-                },
-                event_rx,
-            ))
+            Ok(TurnResult {
+                session_id: sid.clone(),
+                turn_id: tid,
+                success,
+                text: accumulated_text,
+                tokens,
+            })
         }.instrument(span).await
     }
 }
@@ -358,16 +354,16 @@ mod tests {
             serde_json::Value::String(tmp.to_string_lossy().to_string()),
         );
         raw.insert("workspace".into(), serde_json::Value::Object(workspace));
-        let mut codex = serde_json::Map::<String, serde_json::Value>::new();
-        codex.insert(
+        let mut cli = serde_json::Map::<String, serde_json::Value>::new();
+        cli.insert(
             "command".into(),
             serde_json::Value::String(r#"bash -c "sleep 1000""#.into()),
         );
-        codex.insert(
+        cli.insert(
             "turn_timeout_ms".into(),
             serde_json::Value::Number(200.into()),
         );
-        raw.insert("codex".into(), serde_json::Value::Object(codex));
+        raw.insert("cli".into(), serde_json::Value::Object(cli));
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
         let backend = LocalBackend::new(&config).unwrap();
         let issue = crate::tracker::model::Issue {
@@ -383,6 +379,7 @@ mod tests {
             blocked_by: vec![],
             ..Default::default()
         };
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(64);
         let result = backend
             .run_turn(
                 &issue,
@@ -390,9 +387,9 @@ mod tests {
                 None,
                 &tmp,
                 std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                event_tx,
             )
-            .await
-            .map(|(tr, _rx)| tr);
+            .await;
         assert!(
             matches!(result, Err(SympheoError::AgentTurnTimeout)),
             "expected AgentTurnTimeout, got {:?}",
@@ -413,17 +410,17 @@ mod tests {
             serde_json::Value::String(tmp.to_string_lossy().to_string()),
         );
         raw.insert("workspace".into(), serde_json::Value::Object(workspace));
-        let mut codex = serde_json::Map::<String, serde_json::Value>::new();
+        let mut cli = serde_json::Map::<String, serde_json::Value>::new();
         // Print valid opencode events and exit
-        codex.insert(
+        cli.insert(
             "command".into(),
             serde_json::Value::String(r#"bash -c 'echo "{\"type\":\"step_start\",\"timestamp\":1,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p1\",\"messageID\":\"msg-1\",\"sessionID\":\"sess-1\",\"type\":\"step\"}}"; echo "{\"type\":\"text\",\"timestamp\":2,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p2\",\"messageID\":\"msg-2\",\"sessionID\":\"sess-1\",\"type\":\"text\",\"text\":\"hello\"}}"; echo "{\"type\":\"step_finish\",\"timestamp\":3,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p3\",\"reason\":\"stop\",\"messageID\":\"msg-3\",\"sessionID\":\"sess-1\",\"type\":\"finish\",\"tokens\":{\"total\":100,\"input\":50,\"output\":40,\"reasoning\":10,\"cache\":{\"write\":5,\"read\":3}}}}"'"#.into()),
         );
-        codex.insert(
+        cli.insert(
             "turn_timeout_ms".into(),
             serde_json::Value::Number(5000.into()),
         );
-        raw.insert("codex".into(), serde_json::Value::Object(codex));
+        raw.insert("cli".into(), serde_json::Value::Object(cli));
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
         let backend = LocalBackend::new(&config).unwrap();
         let issue = crate::tracker::model::Issue {
@@ -439,6 +436,7 @@ mod tests {
             blocked_by: vec![],
             ..Default::default()
         };
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(64);
         let result = backend
             .run_turn(
                 &issue,
@@ -446,10 +444,10 @@ mod tests {
                 None,
                 &tmp,
                 std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                event_tx,
             )
             .await
-            .unwrap()
-            .0;
+            .unwrap();
         assert!(result.success);
         assert_eq!(result.text, "hello");
         assert_eq!(result.session_id, "sess-1");
@@ -474,17 +472,17 @@ mod tests {
             serde_json::Value::String(tmp.to_string_lossy().to_string()),
         );
         raw.insert("workspace".into(), serde_json::Value::Object(workspace));
-        let mut codex = serde_json::Map::<String, serde_json::Value>::new();
+        let mut cli = serde_json::Map::<String, serde_json::Value>::new();
         // Print step_start and text but no step_finish
-        codex.insert(
+        cli.insert(
             "command".into(),
             serde_json::Value::String(r#"bash -c 'echo "{\"type\":\"step_start\",\"timestamp\":1,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p1\",\"messageID\":\"msg-1\",\"sessionID\":\"sess-1\",\"type\":\"step\"}}"; echo "{\"type\":\"text\",\"timestamp\":2,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p2\",\"messageID\":\"msg-2\",\"sessionID\":\"sess-1\",\"type\":\"text\",\"text\":\"hello\"}}"'"#.into()),
         );
-        codex.insert(
+        cli.insert(
             "turn_timeout_ms".into(),
             serde_json::Value::Number(5000.into()),
         );
-        raw.insert("codex".into(), serde_json::Value::Object(codex));
+        raw.insert("cli".into(), serde_json::Value::Object(cli));
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
         let backend = LocalBackend::new(&config).unwrap();
         let issue = crate::tracker::model::Issue {
@@ -500,6 +498,7 @@ mod tests {
             blocked_by: vec![],
             ..Default::default()
         };
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(64);
         let result = backend
             .run_turn(
                 &issue,
@@ -507,10 +506,10 @@ mod tests {
                 None,
                 &tmp,
                 std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                event_tx,
             )
             .await
-            .unwrap()
-            .0;
+            .unwrap();
         assert!(!result.success);
         assert_eq!(result.text, "hello");
         let _ = std::fs::remove_dir_all(&tmp);
@@ -528,17 +527,17 @@ mod tests {
             serde_json::Value::String(tmp.to_string_lossy().to_string()),
         );
         raw.insert("workspace".into(), serde_json::Value::Object(workspace));
-        let mut codex = serde_json::Map::<String, serde_json::Value>::new();
+        let mut cli = serde_json::Map::<String, serde_json::Value>::new();
         // Print valid opencode events to stdout and something to stderr
-        codex.insert(
+        cli.insert(
             "command".into(),
             serde_json::Value::String(r#"bash -c 'echo "stderr msg" >&2; sleep 0.2; echo "{\"type\":\"step_start\",\"timestamp\":1,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p1\",\"messageID\":\"msg-1\",\"sessionID\":\"sess-1\",\"type\":\"step\"}}"; echo "{\"type\":\"text\",\"timestamp\":2,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p2\",\"messageID\":\"msg-2\",\"sessionID\":\"sess-1\",\"type\":\"text\",\"text\":\"hello\"}}"; echo "{\"type\":\"step_finish\",\"timestamp\":3,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p3\",\"reason\":\"stop\",\"messageID\":\"msg-3\",\"sessionID\":\"sess-1\",\"type\":\"finish\",\"tokens\":{\"total\":100,\"input\":50,\"output\":40,\"reasoning\":10,\"cache\":{\"write\":5,\"read\":3}}}}"'"#.into()),
         );
-        codex.insert(
+        cli.insert(
             "turn_timeout_ms".into(),
             serde_json::Value::Number(5000.into()),
         );
-        raw.insert("codex".into(), serde_json::Value::Object(codex));
+        raw.insert("cli".into(), serde_json::Value::Object(cli));
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
         let backend = LocalBackend::new(&config).unwrap();
         let issue = crate::tracker::model::Issue {
@@ -554,6 +553,7 @@ mod tests {
             blocked_by: vec![],
             ..Default::default()
         };
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(64);
         let result = backend
             .run_turn(
                 &issue,
@@ -561,10 +561,10 @@ mod tests {
                 Some("existing-session"),
                 &tmp,
                 std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                event_tx,
             )
             .await
-            .unwrap()
-            .0;
+            .unwrap();
         assert!(result.success);
         assert_eq!(result.text, "hello");
         let _ = std::fs::remove_dir_all(&tmp);
@@ -596,6 +596,7 @@ mod tests {
             blocked_by: vec![],
             ..Default::default()
         };
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(64);
         let result = backend
             .run_turn(
                 &issue,
@@ -603,9 +604,97 @@ mod tests {
                 None,
                 Path::new("/etc"),
                 std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                event_tx,
             )
             .await;
         assert!(matches!(result, Err(SympheoError::WorkspaceError(_))));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Regression for the bug fixed by issue #130: events must arrive at the
+    /// consumer in real time, not as a batch at turn end. We assert the gap
+    /// between the first and last received timestamp is consistent with the
+    /// 0.2s sleeps in the fake CLI command — i.e. events were streamed.
+    #[tokio::test]
+    async fn test_local_backend_events_streamed_during_turn() {
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut workspace = serde_json::Map::<String, serde_json::Value>::new();
+        let tmp = std::env::temp_dir().join(format!("local_stream_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        workspace.insert(
+            "root".into(),
+            serde_json::Value::String(tmp.to_string_lossy().to_string()),
+        );
+        raw.insert("workspace".into(), serde_json::Value::Object(workspace));
+        let mut cli = serde_json::Map::<String, serde_json::Value>::new();
+        cli.insert(
+            "command".into(),
+            serde_json::Value::String(r#"bash -c 'echo "{\"type\":\"step_start\",\"timestamp\":1,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p1\",\"messageID\":\"msg-1\",\"sessionID\":\"sess-1\",\"type\":\"step\"}}"; sleep 0.2; echo "{\"type\":\"text\",\"timestamp\":2,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p2\",\"messageID\":\"msg-2\",\"sessionID\":\"sess-1\",\"type\":\"text\",\"text\":\"hello\"}}"; sleep 0.2; echo "{\"type\":\"step_finish\",\"timestamp\":3,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p3\",\"reason\":\"stop\",\"messageID\":\"msg-3\",\"sessionID\":\"sess-1\",\"type\":\"finish\"}}"'"#.into()),
+        );
+        cli.insert(
+            "turn_timeout_ms".into(),
+            serde_json::Value::Number(5000.into()),
+        );
+        raw.insert("cli".into(), serde_json::Value::Object(cli));
+        let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
+        let backend = LocalBackend::new(&config).unwrap();
+        let issue = crate::tracker::model::Issue {
+            id: "1".into(),
+            identifier: "TEST-1".into(),
+            title: "test".into(),
+            description: None,
+            priority: None,
+            state: "todo".into(),
+            branch_name: None,
+            url: None,
+            labels: vec![],
+            blocked_by: vec![],
+            ..Default::default()
+        };
+
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(64);
+        let arrival_log: std::sync::Arc<tokio::sync::Mutex<Vec<std::time::Instant>>> =
+            std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let arrival_for_consumer = arrival_log.clone();
+        let consumer = tokio::spawn(async move {
+            while let Some(_evt) = event_rx.recv().await {
+                arrival_for_consumer
+                    .lock()
+                    .await
+                    .push(std::time::Instant::now());
+            }
+        });
+
+        let result = backend
+            .run_turn(
+                &issue,
+                "prompt",
+                None,
+                &tmp,
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                event_tx,
+            )
+            .await
+            .unwrap();
+        let _ = consumer.await;
+        assert!(result.success);
+
+        let arrivals = arrival_log.lock().await;
+        assert!(
+            arrivals.len() >= 3,
+            "expected at least 3 events, got {}",
+            arrivals.len()
+        );
+        let first = arrivals.first().unwrap();
+        let last = arrivals.last().unwrap();
+        let spread = last.duration_since(*first);
+        assert!(
+            spread.as_millis() >= 200,
+            "events arrived as a batch (spread = {} ms); expected >= 200 ms because the fake CLI sleeps between events",
+            spread.as_millis()
+        );
+
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

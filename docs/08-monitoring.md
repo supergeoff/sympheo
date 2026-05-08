@@ -124,7 +124,7 @@ Returns the full orchestrator state.
       }
     ]
   },
-  "codex_totals": {
+  "cli_totals": {
     "input_tokens": 45000,
     "output_tokens": 12000,
     "total_tokens": 57000,
@@ -226,4 +226,4 @@ RUST_LOG=info cargo run -- --port 9090 2>&1 | jq .
 
 ## Metrics
 
-While there is no dedicated metrics endpoint yet, the dashboard exposes aggregate token usage and runtime counters since startup. For external monitoring, you can poll `/api/v1/state` periodically and forward the `codex_totals` object to your metrics stack.
+While there is no dedicated metrics endpoint yet, the dashboard exposes aggregate token usage and runtime counters since startup. For external monitoring, you can poll `/api/v1/state` periodically and forward the `cli_totals` object to your metrics stack.

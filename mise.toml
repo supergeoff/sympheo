@@ -1,2 +1,3 @@
 [tools]
 "pipx:kimi-cli" = "latest"
+rust = "latest"

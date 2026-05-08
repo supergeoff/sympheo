@@ -83,17 +83,31 @@ pub struct StepFinishPart {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct TokenInfo {
+    #[serde(deserialize_with = "deser_clamped_u64")]
     pub total: u64,
+    #[serde(deserialize_with = "deser_clamped_u64")]
     pub input: u64,
+    #[serde(deserialize_with = "deser_clamped_u64")]
     pub output: u64,
+    #[serde(deserialize_with = "deser_clamped_u64")]
     pub reasoning: u64,
     pub cache: Option<CacheInfo>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CacheInfo {
+    #[serde(deserialize_with = "deser_clamped_u64")]
     pub write: u64,
+    #[serde(deserialize_with = "deser_clamped_u64")]
     pub read: u64,
+}
+
+fn deser_clamped_u64<'de, D>(d: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = i64::deserialize(d)?;
+    Ok(v.max(0) as u64)
 }
 
 #[derive(Debug, Clone)]

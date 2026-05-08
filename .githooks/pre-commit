@@ -1,0 +1,19 @@
+#/usr/bin/env bash
+set -euo pipefail
+
+echo "[pre-commit][format] Running cargo fmt --check..."
+cargo fmt --all -- --check
+
+echo "[pre-commit][lint] Running cargo clippy..."
+cargo clippy --all-targets --all-features -- -D warnings
+
+echo "[pre-commit][check] Running cargo check..."
+cargo check --all-targets --all-features
+
+echo "[pre-commit][test] Running cargo test..."
+cargo test --all-features
+
+echo "[pre-commit][enforce-patterns] Running quality patterns check..."
+bash .githooks/lib/enforce-patterns.sh
+
+echo "✅ All pre-commit checks passed!"

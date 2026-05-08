@@ -8,10 +8,10 @@ impl SkillMapping {
         let mut default = None;
 
         if let Some(skills_map) = config.skills() {
-            if let Some(mapping) = skills_map.get("mapping").and_then(|v| v.as_mapping()) {
+            if let Some(mapping) = skills_map.get("mapping").and_then(|v| v.as_object()) {
                 for (k, v) in mapping {
-                    if let (Some(key), Some(val)) = (k.as_str(), v.as_str()) {
-                        by_state.insert(key.to_lowercase(), val.to_string());
+                    if let Some(val) = v.as_str() {
+                        by_state.insert(k.to_lowercase(), val.to_string());
                     }
                 }
             }

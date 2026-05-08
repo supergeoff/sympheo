@@ -520,53 +520,53 @@ mod tests {
     use std::path::PathBuf;
 
     fn service_config_with_daytona(api_url: &str) -> ServiceConfig {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut daytona = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut daytona = serde_json::Map::<String, serde_json::Value>::new();
         daytona.insert(
-            serde_yaml::Value::String("enabled".into()),
-            serde_yaml::Value::Bool(true),
+            "enabled".into(),
+            serde_json::Value::Bool(true),
         );
         daytona.insert(
-            serde_yaml::Value::String("api_key".into()),
-            serde_yaml::Value::String("test-key".into()),
+            "api_key".into(),
+            serde_json::Value::String("test-key".into()),
         );
         daytona.insert(
-            serde_yaml::Value::String("api_url".into()),
-            serde_yaml::Value::String(api_url.into()),
+            "api_url".into(),
+            serde_json::Value::String(api_url.into()),
         );
         daytona.insert(
-            serde_yaml::Value::String("target".into()),
-            serde_yaml::Value::String("eu".into()),
+            "target".into(),
+            serde_json::Value::String("eu".into()),
         );
         daytona.insert(
-            serde_yaml::Value::String("image".into()),
-            serde_yaml::Value::String("custom-image".into()),
+            "image".into(),
+            serde_json::Value::String("custom-image".into()),
         );
         daytona.insert(
-            serde_yaml::Value::String("timeout_sec".into()),
-            serde_yaml::Value::Number(7200.into()),
+            "timeout_sec".into(),
+            serde_json::Value::Number(7200.into()),
         );
-        let mut env = serde_yaml::Mapping::new();
+        let mut env = serde_json::Map::<String, serde_json::Value>::new();
         env.insert(
-            serde_yaml::Value::String("FOO".into()),
-            serde_yaml::Value::String("bar".into()),
+            "FOO".into(),
+            serde_json::Value::String("bar".into()),
         );
         daytona.insert(
-            serde_yaml::Value::String("env".into()),
-            serde_yaml::Value::Mapping(env),
+            "env".into(),
+            serde_json::Value::Object(env),
         );
         raw.insert(
-            serde_yaml::Value::String("daytona".into()),
-            serde_yaml::Value::Mapping(daytona),
+            "daytona".into(),
+            serde_json::Value::Object(daytona),
         );
-        let mut codex = serde_yaml::Mapping::new();
+        let mut codex = serde_json::Map::<String, serde_json::Value>::new();
         codex.insert(
-            serde_yaml::Value::String("command".into()),
-            serde_yaml::Value::String("opencode run".into()),
+            "command".into(),
+            serde_json::Value::String("opencode run".into()),
         );
         raw.insert(
-            serde_yaml::Value::String("codex".into()),
-            serde_yaml::Value::Mapping(codex),
+            "codex".into(),
+            serde_json::Value::Object(codex),
         );
         ServiceConfig::new(raw, PathBuf::from("/tmp"), "prompt".into())
     }
@@ -588,27 +588,27 @@ mod tests {
 
     #[test]
     fn test_daytona_config_mode_and_repo_url() {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut daytona = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut daytona = serde_json::Map::<String, serde_json::Value>::new();
         daytona.insert(
-            serde_yaml::Value::String("enabled".into()),
-            serde_yaml::Value::Bool(true),
+            "enabled".into(),
+            serde_json::Value::Bool(true),
         );
         daytona.insert(
-            serde_yaml::Value::String("api_key".into()),
-            serde_yaml::Value::String("test-key".into()),
+            "api_key".into(),
+            serde_json::Value::String("test-key".into()),
         );
         daytona.insert(
-            serde_yaml::Value::String("mode".into()),
-            serde_yaml::Value::String("AppServer".into()),
+            "mode".into(),
+            serde_json::Value::String("AppServer".into()),
         );
         daytona.insert(
-            serde_yaml::Value::String("repo_url".into()),
-            serde_yaml::Value::String("https://github.com/test/repo.git".into()),
+            "repo_url".into(),
+            serde_json::Value::String("https://github.com/test/repo.git".into()),
         );
         raw.insert(
-            serde_yaml::Value::String("daytona".into()),
-            serde_yaml::Value::Mapping(daytona),
+            "daytona".into(),
+            serde_json::Value::Object(daytona),
         );
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "prompt".into());
         let dc = DaytonaConfig::from_service(&config).unwrap();
@@ -618,22 +618,22 @@ mod tests {
 
     #[test]
     fn test_daytona_config_missing_section() {
-        let config = ServiceConfig::new(serde_yaml::Mapping::new(), PathBuf::from("/tmp"), "".into());
+        let config = ServiceConfig::new(serde_json::Map::<String, serde_json::Value>::new(), PathBuf::from("/tmp"), "".into());
         let result = DaytonaConfig::from_service(&config);
         assert!(matches!(result, Err(SympheoError::InvalidConfiguration(_))));
     }
 
     #[test]
     fn test_daytona_config_missing_api_key() {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut daytona = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut daytona = serde_json::Map::<String, serde_json::Value>::new();
         daytona.insert(
-            serde_yaml::Value::String("enabled".into()),
-            serde_yaml::Value::Bool(true),
+            "enabled".into(),
+            serde_json::Value::Bool(true),
         );
         raw.insert(
-            serde_yaml::Value::String("daytona".into()),
-            serde_yaml::Value::Mapping(daytona),
+            "daytona".into(),
+            serde_json::Value::Object(daytona),
         );
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
         let result = DaytonaConfig::from_service(&config);

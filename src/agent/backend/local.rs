@@ -340,31 +340,31 @@ mod tests {
 
     #[tokio::test]
     async fn test_local_backend_run_turn_timeout() {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut workspace = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut workspace = serde_json::Map::<String, serde_json::Value>::new();
         let tmp = std::env::temp_dir().join(format!("local_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         workspace.insert(
-            serde_yaml::Value::String("root".into()),
-            serde_yaml::Value::String(tmp.to_string_lossy().to_string()),
+            "root".into(),
+            serde_json::Value::String(tmp.to_string_lossy().to_string()),
         );
         raw.insert(
-            serde_yaml::Value::String("workspace".into()),
-            serde_yaml::Value::Mapping(workspace),
+            "workspace".into(),
+            serde_json::Value::Object(workspace),
         );
-        let mut codex = serde_yaml::Mapping::new();
+        let mut codex = serde_json::Map::<String, serde_json::Value>::new();
         codex.insert(
-            serde_yaml::Value::String("command".into()),
-            serde_yaml::Value::String(r#"bash -c "sleep 1000""#.into()),
+            "command".into(),
+            serde_json::Value::String(r#"bash -c "sleep 1000""#.into()),
         );
         codex.insert(
-            serde_yaml::Value::String("turn_timeout_ms".into()),
-            serde_yaml::Value::Number(200.into()),
+            "turn_timeout_ms".into(),
+            serde_json::Value::Number(200.into()),
         );
         raw.insert(
-            serde_yaml::Value::String("codex".into()),
-            serde_yaml::Value::Mapping(codex),
+            "codex".into(),
+            serde_json::Value::Object(codex),
         );
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
         let backend = LocalBackend::new(&config).unwrap();
@@ -392,32 +392,32 @@ mod tests {
 
     #[tokio::test]
     async fn test_local_backend_run_turn_success() {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut workspace = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut workspace = serde_json::Map::<String, serde_json::Value>::new();
         let tmp = std::env::temp_dir().join(format!("local_test3_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         workspace.insert(
-            serde_yaml::Value::String("root".into()),
-            serde_yaml::Value::String(tmp.to_string_lossy().to_string()),
+            "root".into(),
+            serde_json::Value::String(tmp.to_string_lossy().to_string()),
         );
         raw.insert(
-            serde_yaml::Value::String("workspace".into()),
-            serde_yaml::Value::Mapping(workspace),
+            "workspace".into(),
+            serde_json::Value::Object(workspace),
         );
-        let mut codex = serde_yaml::Mapping::new();
+        let mut codex = serde_json::Map::<String, serde_json::Value>::new();
         // Print valid opencode events and exit
         codex.insert(
-            serde_yaml::Value::String("command".into()),
-            serde_yaml::Value::String(r#"bash -c 'echo "{\"type\":\"step_start\",\"timestamp\":1,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p1\",\"messageID\":\"msg-1\",\"sessionID\":\"sess-1\",\"type\":\"step\"}}"; echo "{\"type\":\"text\",\"timestamp\":2,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p2\",\"messageID\":\"msg-2\",\"sessionID\":\"sess-1\",\"type\":\"text\",\"text\":\"hello\"}}"; echo "{\"type\":\"step_finish\",\"timestamp\":3,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p3\",\"reason\":\"stop\",\"messageID\":\"msg-3\",\"sessionID\":\"sess-1\",\"type\":\"finish\",\"tokens\":{\"total\":100,\"input\":50,\"output\":40,\"reasoning\":10,\"cache\":{\"write\":5,\"read\":3}}}}"'"#.into()),
+            "command".into(),
+            serde_json::Value::String(r#"bash -c 'echo "{\"type\":\"step_start\",\"timestamp\":1,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p1\",\"messageID\":\"msg-1\",\"sessionID\":\"sess-1\",\"type\":\"step\"}}"; echo "{\"type\":\"text\",\"timestamp\":2,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p2\",\"messageID\":\"msg-2\",\"sessionID\":\"sess-1\",\"type\":\"text\",\"text\":\"hello\"}}"; echo "{\"type\":\"step_finish\",\"timestamp\":3,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p3\",\"reason\":\"stop\",\"messageID\":\"msg-3\",\"sessionID\":\"sess-1\",\"type\":\"finish\",\"tokens\":{\"total\":100,\"input\":50,\"output\":40,\"reasoning\":10,\"cache\":{\"write\":5,\"read\":3}}}}"'"#.into()),
         );
         codex.insert(
-            serde_yaml::Value::String("turn_timeout_ms".into()),
-            serde_yaml::Value::Number(5000.into()),
+            "turn_timeout_ms".into(),
+            serde_json::Value::Number(5000.into()),
         );
         raw.insert(
-            serde_yaml::Value::String("codex".into()),
-            serde_yaml::Value::Mapping(codex),
+            "codex".into(),
+            serde_json::Value::Object(codex),
         );
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
         let backend = LocalBackend::new(&config).unwrap();
@@ -449,32 +449,32 @@ mod tests {
 
     #[tokio::test]
     async fn test_local_backend_run_turn_no_finish() {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut workspace = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut workspace = serde_json::Map::<String, serde_json::Value>::new();
         let tmp = std::env::temp_dir().join(format!("local_test4_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         workspace.insert(
-            serde_yaml::Value::String("root".into()),
-            serde_yaml::Value::String(tmp.to_string_lossy().to_string()),
+            "root".into(),
+            serde_json::Value::String(tmp.to_string_lossy().to_string()),
         );
         raw.insert(
-            serde_yaml::Value::String("workspace".into()),
-            serde_yaml::Value::Mapping(workspace),
+            "workspace".into(),
+            serde_json::Value::Object(workspace),
         );
-        let mut codex = serde_yaml::Mapping::new();
+        let mut codex = serde_json::Map::<String, serde_json::Value>::new();
         // Print step_start and text but no step_finish
         codex.insert(
-            serde_yaml::Value::String("command".into()),
-            serde_yaml::Value::String(r#"bash -c 'echo "{\"type\":\"step_start\",\"timestamp\":1,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p1\",\"messageID\":\"msg-1\",\"sessionID\":\"sess-1\",\"type\":\"step\"}}"; echo "{\"type\":\"text\",\"timestamp\":2,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p2\",\"messageID\":\"msg-2\",\"sessionID\":\"sess-1\",\"type\":\"text\",\"text\":\"hello\"}}"'"#.into()),
+            "command".into(),
+            serde_json::Value::String(r#"bash -c 'echo "{\"type\":\"step_start\",\"timestamp\":1,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p1\",\"messageID\":\"msg-1\",\"sessionID\":\"sess-1\",\"type\":\"step\"}}"; echo "{\"type\":\"text\",\"timestamp\":2,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p2\",\"messageID\":\"msg-2\",\"sessionID\":\"sess-1\",\"type\":\"text\",\"text\":\"hello\"}}"'"#.into()),
         );
         codex.insert(
-            serde_yaml::Value::String("turn_timeout_ms".into()),
-            serde_yaml::Value::Number(5000.into()),
+            "turn_timeout_ms".into(),
+            serde_json::Value::Number(5000.into()),
         );
         raw.insert(
-            serde_yaml::Value::String("codex".into()),
-            serde_yaml::Value::Mapping(codex),
+            "codex".into(),
+            serde_json::Value::Object(codex),
         );
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
         let backend = LocalBackend::new(&config).unwrap();
@@ -499,32 +499,32 @@ mod tests {
 
     #[tokio::test]
     async fn test_local_backend_run_turn_with_session_and_stderr() {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut workspace = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut workspace = serde_json::Map::<String, serde_json::Value>::new();
         let tmp = std::env::temp_dir().join(format!("local_test5_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         workspace.insert(
-            serde_yaml::Value::String("root".into()),
-            serde_yaml::Value::String(tmp.to_string_lossy().to_string()),
+            "root".into(),
+            serde_json::Value::String(tmp.to_string_lossy().to_string()),
         );
         raw.insert(
-            serde_yaml::Value::String("workspace".into()),
-            serde_yaml::Value::Mapping(workspace),
+            "workspace".into(),
+            serde_json::Value::Object(workspace),
         );
-        let mut codex = serde_yaml::Mapping::new();
+        let mut codex = serde_json::Map::<String, serde_json::Value>::new();
         // Print valid opencode events to stdout and something to stderr
         codex.insert(
-            serde_yaml::Value::String("command".into()),
-            serde_yaml::Value::String(r#"bash -c 'echo "stderr msg" >&2; sleep 0.2; echo "{\"type\":\"step_start\",\"timestamp\":1,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p1\",\"messageID\":\"msg-1\",\"sessionID\":\"sess-1\",\"type\":\"step\"}}"; echo "{\"type\":\"text\",\"timestamp\":2,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p2\",\"messageID\":\"msg-2\",\"sessionID\":\"sess-1\",\"type\":\"text\",\"text\":\"hello\"}}"; echo "{\"type\":\"step_finish\",\"timestamp\":3,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p3\",\"reason\":\"stop\",\"messageID\":\"msg-3\",\"sessionID\":\"sess-1\",\"type\":\"finish\",\"tokens\":{\"total\":100,\"input\":50,\"output\":40,\"reasoning\":10,\"cache\":{\"write\":5,\"read\":3}}}}"'"#.into()),
+            "command".into(),
+            serde_json::Value::String(r#"bash -c 'echo "stderr msg" >&2; sleep 0.2; echo "{\"type\":\"step_start\",\"timestamp\":1,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p1\",\"messageID\":\"msg-1\",\"sessionID\":\"sess-1\",\"type\":\"step\"}}"; echo "{\"type\":\"text\",\"timestamp\":2,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p2\",\"messageID\":\"msg-2\",\"sessionID\":\"sess-1\",\"type\":\"text\",\"text\":\"hello\"}}"; echo "{\"type\":\"step_finish\",\"timestamp\":3,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p3\",\"reason\":\"stop\",\"messageID\":\"msg-3\",\"sessionID\":\"sess-1\",\"type\":\"finish\",\"tokens\":{\"total\":100,\"input\":50,\"output\":40,\"reasoning\":10,\"cache\":{\"write\":5,\"read\":3}}}}"'"#.into()),
         );
         codex.insert(
-            serde_yaml::Value::String("turn_timeout_ms".into()),
-            serde_yaml::Value::Number(5000.into()),
+            "turn_timeout_ms".into(),
+            serde_json::Value::Number(5000.into()),
         );
         raw.insert(
-            serde_yaml::Value::String("codex".into()),
-            serde_yaml::Value::Mapping(codex),
+            "codex".into(),
+            serde_json::Value::Object(codex),
         );
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
         let backend = LocalBackend::new(&config).unwrap();
@@ -549,17 +549,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_local_backend_validate_outside_root() {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut workspace = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut workspace = serde_json::Map::<String, serde_json::Value>::new();
         let tmp = std::env::temp_dir().join(format!("local_test2_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         workspace.insert(
-            serde_yaml::Value::String("root".into()),
-            serde_yaml::Value::String(tmp.to_string_lossy().to_string()),
+            "root".into(),
+            serde_json::Value::String(tmp.to_string_lossy().to_string()),
         );
         raw.insert(
-            serde_yaml::Value::String("workspace".into()),
-            serde_yaml::Value::Mapping(workspace),
+            "workspace".into(),
+            serde_json::Value::Object(workspace),
         );
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
         let backend = LocalBackend::new(&config).unwrap();

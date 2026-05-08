@@ -39,7 +39,7 @@ impl Issue {
 
 #[derive(Debug, Clone)]
 pub struct WorkflowDefinition {
-    pub config: serde_yaml::Mapping,
+    pub config: serde_json::Map<String, serde_json::Value>,
     pub prompt_template: String,
 }
 

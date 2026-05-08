@@ -325,3 +325,260 @@ async fn api_issue(
         Err(StatusCode::NOT_FOUND)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::orchestrator::state::{OrchestratorState, RunningEntry};
+    use crate::tracker::model::{Issue, LiveSession, RetryEntry, TokenTotals};
+    use std::collections::{HashMap, HashSet};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    #[test]
+    fn test_html_escape() {
+        assert_eq!(html_escape("<script>alert('xss')</script>"), "&lt;script&gt;alert('xss')&lt;/script&gt;");
+        assert_eq!(html_escape("foo & bar"), "foo &amp; bar");
+        assert_eq!(html_escape("\"quoted\""), "&quot;quoted&quot;");
+        assert_eq!(html_escape("<div>"), "&lt;div&gt;");
+    }
+
+    #[tokio::test]
+    async fn test_dashboard_with_running_and_retries() {
+        let mut state = OrchestratorState::new(5000, 5);
+        state.codex_totals = TokenTotals {
+            input_tokens: 100,
+            output_tokens: 200,
+            total_tokens: 300,
+            seconds_running: 42.0,
+        };
+        state.last_tick_at = Some(chrono::Utc::now());
+
+        let session = LiveSession {
+            session_id: "sess-1".into(),
+            thread_id: "thread-1".into(),
+            turn_id: "turn-1".into(),
+            agent_pid: None,
+            last_event: Some("StepFinish".into()),
+            last_message: Some("Build <complete>".into()),
+            last_timestamp: Some(chrono::Utc::now()),
+            input_tokens: 50,
+            output_tokens: 100,
+            total_tokens: 150,
+            last_reported_input_tokens: 0,
+            last_reported_output_tokens: 0,
+            last_reported_total_tokens: 0,
+            turn_count: 1,
+            pr_url: None,
+        };
+
+        state.running.insert(
+            "1".into(),
+            RunningEntry {
+                issue: Issue {
+                    id: "1".into(),
+                    identifier: "TEST-1".into(),
+                    title: "a".into(),
+                    description: None,
+                    priority: None,
+                    state: "in progress".into(),
+                    branch_name: None,
+                    url: None,
+                    labels: vec![],
+                    blocked_by: vec![],
+                    ..Default::default()
+                },
+                session: Some(session),
+                started_at: chrono::Utc::now(),
+                retry_attempt: None,
+                turn_count: 3,
+                stagnation_counter: 0,
+                last_state_change_at: chrono::Utc::now(),
+                cancelled: Arc::new(AtomicBool::new(false)),
+            },
+        );
+
+        state.retry_attempts.insert(
+            "2".into(),
+            RetryEntry {
+                issue_id: "2".into(),
+                identifier: "TEST-2".into(),
+                attempt: 2,
+                error: Some("connection refused".into()),
+                due_at: std::time::Instant::now() + std::time::Duration::from_secs(60),
+            },
+        );
+
+        let shared = Arc::new(RwLock::new(state));
+        let (status, body) = dashboard(State(shared)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("TEST-1"));
+        assert!(body.contains("in progress"));
+        assert!(body.contains("sess-1"));
+        assert!(body.contains("StepFinish"));
+        assert!(body.contains("Build &lt;complete&gt;"));
+        assert!(body.contains("50 / 100"));
+        assert!(body.contains("TEST-2"));
+        assert!(body.contains("connection refused"));
+        assert!(body.contains("Running"));
+        assert!(body.contains("Retrying"));
+        assert!(body.contains("Tokens"));
+        assert!(body.contains("Runtime"));
+    }
+
+    #[tokio::test]
+    async fn test_dashboard_empty() {
+        let state = OrchestratorState::new(5000, 5);
+        let shared = Arc::new(RwLock::new(state));
+        let (status, body) = dashboard(State(shared)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("No active sessions"));
+        assert!(body.contains("No retries queued"));
+    }
+
+    #[tokio::test]
+    async fn test_dashboard_no_last_tick() {
+        let mut state = OrchestratorState::new(5000, 5);
+        state.last_tick_at = None;
+        state.retry_attempts.insert(
+            "1".into(),
+            RetryEntry {
+                issue_id: "1".into(),
+                identifier: "TEST-1".into(),
+                attempt: 1,
+                error: None,
+                due_at: std::time::Instant::now(),
+            },
+        );
+        let shared = Arc::new(RwLock::new(state));
+        let (status, body) = dashboard(State(shared)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("never"));
+        assert!(body.contains("TEST-1"));
+    }
+
+    #[tokio::test]
+    async fn test_dashboard_long_message_truncate() {
+        let mut state = OrchestratorState::new(5000, 5);
+        state.running.insert(
+            "1".into(),
+            RunningEntry {
+                issue: Issue {
+                    id: "1".into(),
+                    identifier: "TEST-1".into(),
+                    title: "a".into(),
+                    description: None,
+                    priority: None,
+                    state: "todo".into(),
+                    branch_name: None,
+                    url: None,
+                    labels: vec![],
+                    blocked_by: vec![],
+                    ..Default::default()
+                },
+                session: Some(LiveSession {
+                    session_id: "s1".into(),
+                    thread_id: "t1".into(),
+                    turn_id: "u1".into(),
+                    agent_pid: None,
+                    last_event: Some("Text".into()),
+                    last_message: Some("a".repeat(100)),
+                    last_timestamp: Some(chrono::Utc::now()),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    total_tokens: 0,
+                    last_reported_input_tokens: 0,
+                    last_reported_output_tokens: 0,
+                    last_reported_total_tokens: 0,
+                    turn_count: 0,
+                    pr_url: None,
+                }),
+                started_at: chrono::Utc::now(),
+                retry_attempt: None,
+                turn_count: 0,
+                stagnation_counter: 0,
+                last_state_change_at: chrono::Utc::now(),
+                cancelled: Arc::new(AtomicBool::new(false)),
+            },
+        );
+        let shared = Arc::new(RwLock::new(state));
+        let (status, body) = dashboard(State(shared)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("..."));
+    }
+
+    #[tokio::test]
+    async fn test_dashboard_retry_long_error_and_old_tick() {
+        let mut state = OrchestratorState::new(5000, 5);
+        state.last_tick_at = Some(chrono::Utc::now() - chrono::Duration::seconds(120));
+        state.retry_attempts.insert(
+            "1".into(),
+            RetryEntry {
+                issue_id: "1".into(),
+                identifier: "TEST-1".into(),
+                attempt: 1,
+                error: Some("a".repeat(100)),
+                due_at: std::time::Instant::now(),
+            },
+        );
+        let shared = Arc::new(RwLock::new(state));
+        let (status, body) = dashboard(State(shared)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("..."));
+        assert!(body.contains("2m ago"));
+    }
+
+    #[tokio::test]
+    async fn test_api_issue_with_session_data() {
+        let mut state = OrchestratorState::new(5000, 5);
+        let ts = chrono::Utc::now();
+        state.running.insert(
+            "1".into(),
+            RunningEntry {
+                issue: Issue {
+                    id: "1".into(),
+                    identifier: "TEST-1".into(),
+                    title: "a".into(),
+                    description: None,
+                    priority: None,
+                    state: "todo".into(),
+                    branch_name: None,
+                    url: None,
+                    labels: vec![],
+                    blocked_by: vec![],
+                    ..Default::default()
+                },
+                session: Some(LiveSession {
+                    session_id: "s1".into(),
+                    thread_id: "t1".into(),
+                    turn_id: "u1".into(),
+                    agent_pid: None,
+                    last_event: Some("StepFinish".into()),
+                    last_message: Some("done".into()),
+                    last_timestamp: Some(ts),
+                    input_tokens: 10,
+                    output_tokens: 20,
+                    total_tokens: 30,
+                    last_reported_input_tokens: 0,
+                    last_reported_output_tokens: 0,
+                    last_reported_total_tokens: 0,
+                    turn_count: 1,
+                    pr_url: None,
+                }),
+                started_at: ts,
+                retry_attempt: None,
+                turn_count: 1,
+                stagnation_counter: 0,
+                last_state_change_at: ts,
+                cancelled: Arc::new(AtomicBool::new(false)),
+            },
+        );
+        let shared = Arc::new(RwLock::new(state));
+        let result = api_issue(State(shared), AxumPath("TEST-1".into())).await;
+        assert!(result.is_ok());
+        let json = result.unwrap().0;
+        assert_eq!(json["issue_identifier"], "TEST-1");
+        assert!(json["session"].is_object());
+        assert!(json["recent_events"].as_array().unwrap().len() > 0);
+    }
+}

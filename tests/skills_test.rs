@@ -44,24 +44,24 @@ fn test_load_skills_missing_file_warns_not_fails() {
 
 #[test]
 fn test_skill_mapping_from_config() {
-    let mut raw = serde_yaml::Mapping::new();
-    let mut skills = serde_yaml::Mapping::new();
-    let mut mapping = serde_yaml::Mapping::new();
+    let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+    let mut skills = serde_json::Map::<String, serde_json::Value>::new();
+    let mut mapping = serde_json::Map::<String, serde_json::Value>::new();
     mapping.insert(
-        serde_yaml::Value::String("todo".into()),
-        serde_yaml::Value::String("./skills/todo.md".into()),
+        "todo".into(),
+        serde_json::Value::String("./skills/todo.md".into()),
     );
     skills.insert(
-        serde_yaml::Value::String("mapping".into()),
-        serde_yaml::Value::Mapping(mapping),
+        "mapping".into(),
+        serde_json::Value::Object(mapping),
     );
     skills.insert(
-        serde_yaml::Value::String("default".into()),
-        serde_yaml::Value::String("./skills/default.md".into()),
+        "default".into(),
+        serde_json::Value::String("./skills/default.md".into()),
     );
     raw.insert(
-        serde_yaml::Value::String("skills".into()),
-        serde_yaml::Value::Mapping(skills),
+        "skills".into(),
+        serde_json::Value::Object(skills),
     );
 
     let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());

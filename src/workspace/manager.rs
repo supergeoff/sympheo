@@ -67,7 +67,7 @@ impl WorkspaceManager {
         };
 
         if created_now {
-            if let (Some(ref adapter), Some(ref url)) = (&self.git_adapter, &self.repo_url) {
+            if let (Some(adapter), Some(url)) = (&self.git_adapter, &self.repo_url) {
                 crate::git::GitAdapter::clone(&**adapter, url, &path).await.map_err(|e| {
                     SympheoError::WorkspaceError(format!("git clone failed: {e}"))
                 })?;
@@ -155,15 +155,15 @@ mod tests {
     use std::path::PathBuf;
 
     fn test_config_with_root(root: PathBuf) -> ServiceConfig {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut workspace = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut workspace = serde_json::Map::<String, serde_json::Value>::new();
         workspace.insert(
-            serde_yaml::Value::String("root".into()),
-            serde_yaml::Value::String(root.to_string_lossy().to_string()),
+            "root".into(),
+            serde_json::Value::String(root.to_string_lossy().to_string()),
         );
         raw.insert(
-            serde_yaml::Value::String("workspace".into()),
-            serde_yaml::Value::Mapping(workspace),
+            "workspace".into(),
+            serde_json::Value::Object(workspace),
         );
         ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into())
     }
@@ -268,24 +268,24 @@ mod tests {
         let tmp = unique_tmp("hook_timeout");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        let mut raw = serde_yaml::Mapping::new();
-        let mut workspace = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut workspace = serde_json::Map::<String, serde_json::Value>::new();
         workspace.insert(
-            serde_yaml::Value::String("root".into()),
-            serde_yaml::Value::String(tmp.to_string_lossy().to_string()),
+            "root".into(),
+            serde_json::Value::String(tmp.to_string_lossy().to_string()),
         );
         raw.insert(
-            serde_yaml::Value::String("workspace".into()),
-            serde_yaml::Value::Mapping(workspace),
+            "workspace".into(),
+            serde_json::Value::Object(workspace),
         );
-        let mut hooks = serde_yaml::Mapping::new();
+        let mut hooks = serde_json::Map::<String, serde_json::Value>::new();
         hooks.insert(
-            serde_yaml::Value::String("timeout_ms".into()),
-            serde_yaml::Value::Number(100.into()),
+            "timeout_ms".into(),
+            serde_json::Value::Number(100.into()),
         );
         raw.insert(
-            serde_yaml::Value::String("hooks".into()),
-            serde_yaml::Value::Mapping(hooks),
+            "hooks".into(),
+            serde_json::Value::Object(hooks),
         );
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
         let mgr = WorkspaceManager::new(&config).unwrap();

@@ -385,27 +385,27 @@ mod tests {
     use std::path::PathBuf;
 
     fn make_config(slug: &str, number: i64, api_key: &str) -> ServiceConfig {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut tracker = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut tracker = serde_json::Map::<String, serde_json::Value>::new();
         tracker.insert(
-            serde_yaml::Value::String("kind".into()),
-            serde_yaml::Value::String("github".into()),
+            "kind".into(),
+            serde_json::Value::String("github".into()),
         );
         tracker.insert(
-            serde_yaml::Value::String("api_key".into()),
-            serde_yaml::Value::String(api_key.into()),
+            "api_key".into(),
+            serde_json::Value::String(api_key.into()),
         );
         tracker.insert(
-            serde_yaml::Value::String("project_slug".into()),
-            serde_yaml::Value::String(slug.into()),
+            "project_slug".into(),
+            serde_json::Value::String(slug.into()),
         );
         tracker.insert(
-            serde_yaml::Value::String("project_number".into()),
-            serde_yaml::Value::Number(number.into()),
+            "project_number".into(),
+            serde_json::Value::Number(number.into()),
         );
         raw.insert(
-            serde_yaml::Value::String("tracker".into()),
-            serde_yaml::Value::Mapping(tracker),
+            "tracker".into(),
+            serde_json::Value::Object(tracker),
         );
         ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into())
     }
@@ -428,15 +428,15 @@ mod tests {
 
     #[test]
     fn test_github_tracker_new_missing_api_key() {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut tracker = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut tracker = serde_json::Map::<String, serde_json::Value>::new();
         tracker.insert(
-            serde_yaml::Value::String("kind".into()),
-            serde_yaml::Value::String("github".into()),
+            "kind".into(),
+            serde_json::Value::String("github".into()),
         );
         raw.insert(
-            serde_yaml::Value::String("tracker".into()),
-            serde_yaml::Value::Mapping(tracker),
+            "tracker".into(),
+            serde_json::Value::Object(tracker),
         );
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
         let result = GithubTracker::new(&config);
@@ -601,23 +601,23 @@ mod tests {
 
     #[test]
     fn test_github_tracker_new_missing_project_slug() {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut tracker = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut tracker = serde_json::Map::<String, serde_json::Value>::new();
         tracker.insert(
-            serde_yaml::Value::String("kind".into()),
-            serde_yaml::Value::String("github".into()),
+            "kind".into(),
+            serde_json::Value::String("github".into()),
         );
         tracker.insert(
-            serde_yaml::Value::String("api_key".into()),
-            serde_yaml::Value::String("key".into()),
+            "api_key".into(),
+            serde_json::Value::String("key".into()),
         );
         tracker.insert(
-            serde_yaml::Value::String("project_number".into()),
-            serde_yaml::Value::Number(1.into()),
+            "project_number".into(),
+            serde_json::Value::Number(1.into()),
         );
         raw.insert(
-            serde_yaml::Value::String("tracker".into()),
-            serde_yaml::Value::Mapping(tracker),
+            "tracker".into(),
+            serde_json::Value::Object(tracker),
         );
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
         let result = GithubTracker::new(&config);
@@ -626,23 +626,23 @@ mod tests {
 
     #[test]
     fn test_github_tracker_new_missing_project_number() {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut tracker = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut tracker = serde_json::Map::<String, serde_json::Value>::new();
         tracker.insert(
-            serde_yaml::Value::String("kind".into()),
-            serde_yaml::Value::String("github".into()),
+            "kind".into(),
+            serde_json::Value::String("github".into()),
         );
         tracker.insert(
-            serde_yaml::Value::String("api_key".into()),
-            serde_yaml::Value::String("key".into()),
+            "api_key".into(),
+            serde_json::Value::String("key".into()),
         );
         tracker.insert(
-            serde_yaml::Value::String("project_slug".into()),
-            serde_yaml::Value::String("owner/repo".into()),
+            "project_slug".into(),
+            serde_json::Value::String("owner/repo".into()),
         );
         raw.insert(
-            serde_yaml::Value::String("tracker".into()),
-            serde_yaml::Value::Mapping(tracker),
+            "tracker".into(),
+            serde_json::Value::Object(tracker),
         );
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
         let result = GithubTracker::new(&config);

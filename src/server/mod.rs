@@ -132,7 +132,7 @@ async fn dashboard(State(state): State<SharedState>) -> (StatusCode, String) {
         }
     }
 
-    recent_changes.sort_by(|a, b| b.last_state_change_at.cmp(&a.last_state_change_at));
+    recent_changes.sort_by_key(|b| std::cmp::Reverse(b.last_state_change_at));
 
     let state_summary_cards: String = state_counts
         .iter()
@@ -389,7 +389,7 @@ async fn api_state(State(state): State<SharedState>) -> Json<serde_json::Value> 
             blocked_entries.push(entry);
         }
     }
-    recent_changes.sort_by(|a, b| b.last_state_change_at.cmp(&a.last_state_change_at));
+    recent_changes.sort_by_key(|b| std::cmp::Reverse(b.last_state_change_at));
     let summary = json!({
         "by_state": state_counts,
         "recent_changes": recent_changes.iter().take(10).map(|e| json!({

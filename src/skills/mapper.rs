@@ -28,6 +28,6 @@ impl SkillMapping {
         self.by_state
             .get(&state_lc)
             .map(|s| s.as_str())
-            .or_else(|| self.default.as_deref())
+            .or(self.default.as_deref())
     }
 }

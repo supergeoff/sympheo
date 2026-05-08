@@ -17,4 +17,8 @@ pub trait AgentBackend: Send + Sync {
         session_id: Option<&str>,
         workspace_path: &Path,
     ) -> Result<(TurnResult, Receiver<AgentEvent>), SympheoError>;
+
+    async fn cleanup_workspace(&self, _workspace_path: &Path) -> Result<(), SympheoError> {
+        Ok(())
+    }
 }

@@ -39,13 +39,18 @@ impl AgentBackend for LocalBackend {
         self.workspace_manager
             .validate_inside_root(workspace_path)?;
 
+        // Write prompt to a temp file to avoid shell escaping and ARG_MAX issues
+        let prompt_file = workspace_path.join(format!(".sympheo_prompt_{}.txt", issue.id));
+        tokio::fs::write(&prompt_file, prompt).await
+            .map_err(|e| SympheoError::AgentRunnerError(format!("failed to write prompt file: {e}")))?;
+
         let mut cmd = Command::new("bash");
         cmd.arg("-lc");
 
         let mut opencode_cmd = format!(
-            r#"{} "{}" --format json --dir {} --dangerously-skip-permissions"#,
+            r#"PROMPT=$(cat "{}"); {} "$PROMPT" --format json --dir "{}" --dangerously-skip-permissions"#,
+            shell_escape(&prompt_file.to_string_lossy()),
             self.command,
-            shell_escape(prompt),
             shell_escape(&workspace_path.to_string_lossy())
         );
         if let Some(sid) = session_id {
@@ -56,11 +61,20 @@ impl AgentBackend for LocalBackend {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
+        // Run in a new process group so we can kill the entire tree reliably
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setpgid(0, 0);
+                Ok(())
+            });
+        }
+
         tracing::info!(
             issue_id = %issue.id,
             issue_identifier = %issue.identifier,
             "launching opencode agent (local backend)"
         );
+        tracing::debug!(command = %opencode_cmd, "local backend command");
 
         let mut child = cmd
             .spawn()
@@ -138,17 +152,19 @@ impl AgentBackend for LocalBackend {
 
         if read_result.is_err() {
             drop(event_tx);
-            let _ = child.kill().await;
+            kill_process_group(&mut child);
             let _ = stderr_handle.abort();
+            let _ = tokio::fs::remove_file(&prompt_file).await;
             return Err(SympheoError::AgentTurnTimeout);
         }
 
         // Terminate the process since the turn is complete
         // opencode run may not exit on its own after step_finish
-        let _ = child.kill().await;
+        kill_process_group(&mut child);
         let _ = stderr_handle.abort();
         // Attempt to reap the process without blocking the result
         let _ = timeout(Duration::from_secs(5), child.wait()).await;
+        let _ = tokio::fs::remove_file(&prompt_file).await;
 
         let sid = current_session.unwrap_or_else(|| issue.id.clone());
         let tid = current_turn.unwrap_or_else(|| "turn-1".into());
@@ -166,11 +182,35 @@ impl AgentBackend for LocalBackend {
     }
 }
 
+fn kill_process_group(child: &mut tokio::process::Child) {
+    if let Some(pid) = child.id() {
+        let pgid = pid as i32;
+        unsafe {
+            let _ = libc::killpg(pgid, libc::SIGKILL);
+        }
+    }
+    // Fallback: also try the standard kill
+    let _ = child.start_kill();
+}
+
 fn shell_escape(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('$', "\\$")
         .replace('`', "\\`")
+        .replace('\'', "\\'")
+        .replace(';', "\\;")
+        .replace('|', "\\|")
+        .replace('&', "\\&")
+        .replace('<', "\\<")
+        .replace('>', "\\>")
+        .replace('(', "\\(")
+        .replace(')', "\\)")
+        .replace('*', "\\*")
+        .replace('?', "\\?")
+        .replace('[', "\\[")
+        .replace(']', "\\]")
+        .replace('\n', "\\n")
 }
 
 #[cfg(test)]

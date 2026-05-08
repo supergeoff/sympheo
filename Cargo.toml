@@ -25,6 +25,7 @@ chrono = { version = "0.4", features = ["serde"] }
 regex = "1.11"
 async-trait = "0.1"
 lazy_static = "1.5"
+libc = "0.2"
 kstring = "2.0"
 home = "0.5"
 

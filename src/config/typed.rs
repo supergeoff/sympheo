@@ -164,6 +164,20 @@ impl ServiceConfig {
             .max(1000) as u64
     }
 
+    pub fn max_retry_attempts(&self) -> u32 {
+        self.agent()
+            .and_then(|m| resolver::get_i64(m, "max_retry_attempts"))
+            .unwrap_or(5)
+            .max(1) as u32
+    }
+
+    pub fn server_port(&self) -> Option<u16> {
+        self.raw.get("server")
+            .and_then(|v| v.as_mapping())
+            .and_then(|m| resolver::get_i64(m, "port"))
+            .map(|v| v.clamp(1, 65535) as u16)
+    }
+
     pub fn max_concurrent_agents_by_state(&self) -> HashMap<String, usize> {
         let mut map = HashMap::new();
         if let Some(agent_map) = self.agent() {

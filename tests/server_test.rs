@@ -57,7 +57,7 @@ async fn test_server_api_state() {
 #[tokio::test]
 async fn test_server_api_state_with_data() {
     let mut orch_state = sympheo::orchestrator::state::OrchestratorState::new(30000, 10);
-    let mut issue = sympheo::tracker::model::Issue {
+    let issue = sympheo::tracker::model::Issue {
         id: "1".into(),
         identifier: "TEST-1".into(),
         title: "Test".into(),

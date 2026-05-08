@@ -11,12 +11,11 @@ impl GithubTracker {
         new_state: &str,
     ) -> Result<(), SympheoError> {
         let project_id = self.ensure_project_id().await?;
-        let item_id = issue
-            .project_item_id
-            .as_ref()
-            .ok_or_else(|| SympheoError::InvalidConfiguration(
+        let item_id = issue.project_item_id.as_ref().ok_or_else(|| {
+            SympheoError::InvalidConfiguration(
                 "issue.project_item_id is required to move state".into(),
-            ))?;
+            )
+        })?;
 
         let status_field_name = "Status";
         let (field_id, option_id) = self
@@ -48,12 +47,9 @@ impl GithubTracker {
     }
 
     pub async fn add_comment(&self, issue: &Issue, body: &str) -> Result<(), SympheoError> {
-        let subject_id = issue
-            .node_id
-            .as_ref()
-            .ok_or_else(|| SympheoError::InvalidConfiguration(
-                "issue.node_id is required to add comment".into(),
-            ))?;
+        let subject_id = issue.node_id.as_ref().ok_or_else(|| {
+            SympheoError::InvalidConfiguration("issue.node_id is required to add comment".into())
+        })?;
 
         let mutation = r#"
             mutation AddComment($subjectId: ID!, $body: String!) {
@@ -73,12 +69,11 @@ impl GithubTracker {
     }
 
     pub async fn update_issue_body(&self, issue: &Issue, body: &str) -> Result<(), SympheoError> {
-        let issue_id = issue
-            .node_id
-            .as_ref()
-            .ok_or_else(|| SympheoError::InvalidConfiguration(
+        let issue_id = issue.node_id.as_ref().ok_or_else(|| {
+            SympheoError::InvalidConfiguration(
                 "issue.node_id is required to update issue body".into(),
-            ))?;
+            )
+        })?;
 
         let mutation = r#"
             mutation UpdateIssue($id: ID!, $body: String!) {
@@ -99,7 +94,10 @@ impl GithubTracker {
 
     async fn ensure_project_id(&self) -> Result<String, SympheoError> {
         {
-            let lock = self.project_id.lock().map_err(|e| SympheoError::TrackerApiRequest(e.to_string()))?;
+            let lock = self
+                .project_id
+                .lock()
+                .map_err(|e| SympheoError::TrackerApiRequest(e.to_string()))?;
             if let Some(ref id) = *lock {
                 return Ok(id.clone());
             }
@@ -132,13 +130,16 @@ impl GithubTracker {
                     .and_then(|p| p.get("id"))
             })
             .and_then(|v| v.as_str())
-            .ok_or_else(|| SympheoError::InvalidConfiguration(
-                "could not resolve project id".into(),
-            ))?
+            .ok_or_else(|| {
+                SympheoError::InvalidConfiguration("could not resolve project id".into())
+            })?
             .to_string();
 
         {
-            let mut lock = self.project_id.lock().map_err(|e| SympheoError::TrackerApiRequest(e.to_string()))?;
+            let mut lock = self
+                .project_id
+                .lock()
+                .map_err(|e| SympheoError::TrackerApiRequest(e.to_string()))?;
             *lock = Some(project_id.clone());
         }
         Ok(project_id)
@@ -152,11 +153,14 @@ impl GithubTracker {
     ) -> Result<(String, String), SympheoError> {
         let option_name_lc = option_name.to_lowercase();
         {
-            let cache = self.field_cache.lock().map_err(|e| SympheoError::TrackerApiRequest(e.to_string()))?;
-            if let Some((field_id, options)) = cache.get(field_name) {
-                if let Some(option_id) = options.get(&option_name_lc) {
-                    return Ok((field_id.clone(), option_id.clone()));
-                }
+            let cache = self
+                .field_cache
+                .lock()
+                .map_err(|e| SympheoError::TrackerApiRequest(e.to_string()))?;
+            if let Some((field_id, options)) = cache.get(field_name)
+                && let Some(option_id) = options.get(&option_name_lc)
+            {
+                return Ok((field_id.clone(), option_id.clone()));
             }
         }
 
@@ -189,9 +193,9 @@ impl GithubTracker {
             .and_then(|n| n.get("fields"))
             .and_then(|f| f.get("nodes"))
             .and_then(|n| n.as_array())
-            .ok_or_else(|| SympheoError::InvalidConfiguration(
-                "could not fetch project fields".into(),
-            ))?;
+            .ok_or_else(|| {
+                SympheoError::InvalidConfiguration("could not fetch project fields".into())
+            })?;
 
         for field in fields {
             let name = field.get("name").and_then(|n| n.as_str()).unwrap_or("");
@@ -199,9 +203,7 @@ impl GithubTracker {
                 let field_id = field
                     .get("id")
                     .and_then(|i| i.as_str())
-                    .ok_or_else(|| SympheoError::InvalidConfiguration(
-                        "field missing id".into(),
-                    ))?
+                    .ok_or_else(|| SympheoError::InvalidConfiguration("field missing id".into()))?
                     .to_string();
 
                 let options_arr = field
@@ -219,22 +221,29 @@ impl GithubTracker {
 
                 let option_id = options_map
                     .get(&option_name_lc)
-                    .ok_or_else(|| SympheoError::InvalidConfiguration(
-                        format!("status option '{}' not found", option_name),
-                    ))?
+                    .ok_or_else(|| {
+                        SympheoError::InvalidConfiguration(format!(
+                            "status option '{}' not found",
+                            option_name
+                        ))
+                    })?
                     .clone();
 
                 {
-                    let mut cache = self.field_cache.lock().map_err(|e| SympheoError::TrackerApiRequest(e.to_string()))?;
+                    let mut cache = self
+                        .field_cache
+                        .lock()
+                        .map_err(|e| SympheoError::TrackerApiRequest(e.to_string()))?;
                     cache.insert(field_name.to_string(), (field_id.clone(), options_map));
                 }
                 return Ok((field_id, option_id));
             }
         }
 
-        Err(SympheoError::InvalidConfiguration(
-            format!("status field '{}' not found in project", field_name),
-        ))
+        Err(SympheoError::InvalidConfiguration(format!(
+            "status field '{}' not found in project",
+            field_name
+        )))
     }
 
     async fn graphql_mutation(
@@ -274,31 +283,23 @@ impl GithubTracker {
             }
 
             // Rate limit handling
-            if let Some(remaining) = headers.get("x-ratelimit-remaining") {
-                if let Ok(rem_str) = remaining.to_str() {
-                    if let Ok(rem) = rem_str.parse::<i64>() {
-                        if rem <= 0 {
-                            if let Some(reset) = headers.get("x-ratelimit-reset") {
-                                if let Ok(reset_str) = reset.to_str() {
-                                    if let Ok(reset_ts) = reset_str.parse::<u64>() {
-                                        let now = SystemTime::now()
-                                            .duration_since(UNIX_EPOCH)
-                                            .unwrap_or_default()
-                                            .as_secs();
-                                        if reset_ts > now {
-                                            let wait = Duration::from_secs(reset_ts - now + 1);
-                                            tracing::warn!(
-                                                "GitHub rate limit hit, waiting {:?}",
-                                                wait
-                                            );
-                                            tokio::time::sleep(wait).await;
-                                            continue;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+            if let Some(remaining) = headers.get("x-ratelimit-remaining")
+                && let Ok(rem_str) = remaining.to_str()
+                && let Ok(rem) = rem_str.parse::<i64>()
+                && rem <= 0
+                && let Some(reset) = headers.get("x-ratelimit-reset")
+                && let Ok(reset_str) = reset.to_str()
+                && let Ok(reset_ts) = reset_str.parse::<u64>()
+            {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                if reset_ts > now {
+                    let wait = Duration::from_secs(reset_ts - now + 1);
+                    tracing::warn!("GitHub rate limit hit, waiting {:?}", wait);
+                    tokio::time::sleep(wait).await;
+                    continue;
                 }
             }
 
@@ -332,15 +333,12 @@ mod tests {
     use crate::tracker::github::GithubTracker;
     use crate::tracker::model::Issue;
     use std::path::PathBuf;
-    use wiremock::{matchers, Mock, MockServer, ResponseTemplate};
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers};
 
     fn make_config(endpoint: &str) -> ServiceConfig {
         let mut raw = serde_json::Map::<String, serde_json::Value>::new();
         let mut tracker = serde_json::Map::<String, serde_json::Value>::new();
-        tracker.insert(
-            "kind".into(),
-            serde_json::Value::String("github".into()),
-        );
+        tracker.insert("kind".into(), serde_json::Value::String("github".into()));
         tracker.insert(
             "api_key".into(),
             serde_json::Value::String("test-key".into()),
@@ -349,18 +347,12 @@ mod tests {
             "project_slug".into(),
             serde_json::Value::String("owner/repo".into()),
         );
-        tracker.insert(
-            "project_number".into(),
-            serde_json::Value::Number(1.into()),
-        );
+        tracker.insert("project_number".into(), serde_json::Value::Number(1.into()));
         tracker.insert(
             "endpoint".into(),
             serde_json::Value::String(endpoint.into()),
         );
-        raw.insert(
-            "tracker".into(),
-            serde_json::Value::Object(tracker),
-        );
+        raw.insert("tracker".into(), serde_json::Value::Object(tracker));
         ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into())
     }
 
@@ -475,7 +467,10 @@ mod tests {
         let issue = Issue::default();
         let result = tracker.move_issue_state(&issue, "Done").await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), SympheoError::InvalidConfiguration(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            SympheoError::InvalidConfiguration(_)
+        ));
     }
 
     #[tokio::test]
@@ -505,7 +500,10 @@ mod tests {
         let issue = Issue::default();
         let result = tracker.add_comment(&issue, "test").await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), SympheoError::InvalidConfiguration(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            SympheoError::InvalidConfiguration(_)
+        ));
     }
 
     #[tokio::test]
@@ -524,7 +522,12 @@ mod tests {
             node_id: Some("issue-123".into()),
             ..Default::default()
         };
-        assert!(tracker.update_issue_body(&issue, "Updated body").await.is_ok());
+        assert!(
+            tracker
+                .update_issue_body(&issue, "Updated body")
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -535,7 +538,10 @@ mod tests {
         let issue = Issue::default();
         let result = tracker.update_issue_body(&issue, "test").await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), SympheoError::InvalidConfiguration(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            SympheoError::InvalidConfiguration(_)
+        ));
     }
 
     #[tokio::test]
@@ -628,7 +634,10 @@ mod tests {
 
         let config = make_config(&mock_server.uri());
         let tracker = GithubTracker::new(&config).unwrap();
-        let _ = tracker.resolve_status_option("proj-123", "Status", "Done").await.unwrap();
+        let _ = tracker
+            .resolve_status_option("proj-123", "Status", "Done")
+            .await
+            .unwrap();
         let (field_id, option_id) = tracker
             .resolve_status_option("proj-123", "Status", "Done")
             .await
@@ -655,9 +664,14 @@ mod tests {
 
         let config = make_config(&mock_server.uri());
         let tracker = GithubTracker::new(&config).unwrap();
-        let result = tracker.resolve_status_option("proj-123", "Status", "Done").await;
+        let result = tracker
+            .resolve_status_option("proj-123", "Status", "Done")
+            .await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), SympheoError::InvalidConfiguration(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            SympheoError::InvalidConfiguration(_)
+        ));
     }
 
     #[tokio::test]
@@ -672,9 +686,14 @@ mod tests {
 
         let config = make_config(&mock_server.uri());
         let tracker = GithubTracker::new(&config).unwrap();
-        let result = tracker.resolve_status_option("proj-123", "Status", "NonExistent").await;
+        let result = tracker
+            .resolve_status_option("proj-123", "Status", "NonExistent")
+            .await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), SympheoError::InvalidConfiguration(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            SympheoError::InvalidConfiguration(_)
+        ));
     }
 
     #[tokio::test]
@@ -683,7 +702,8 @@ mod tests {
         let reset_ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_secs() + 2;
+            .as_secs()
+            + 2;
 
         Mock::given(matchers::method("POST"))
             .and(matchers::path("/graphql"))
@@ -717,7 +737,9 @@ mod tests {
 
         Mock::given(matchers::method("POST"))
             .and(matchers::path("/graphql"))
-            .respond_with(ResponseTemplate::new(500).set_body_json(serde_json::json!({"error": "boom"})))
+            .respond_with(
+                ResponseTemplate::new(500).set_body_json(serde_json::json!({"error": "boom"})),
+            )
             .up_to_n_times(1)
             .mount(&mock_server)
             .await;
@@ -742,7 +764,9 @@ mod tests {
 
         Mock::given(matchers::method("POST"))
             .and(matchers::path("/graphql"))
-            .respond_with(ResponseTemplate::new(500).set_body_json(serde_json::json!({"error": "boom"})))
+            .respond_with(
+                ResponseTemplate::new(500).set_body_json(serde_json::json!({"error": "boom"})),
+            )
             .mount(&mock_server)
             .await;
 
@@ -795,7 +819,10 @@ mod tests {
         let tracker = GithubTracker::new(&config).unwrap();
         let result = tracker.ensure_project_id().await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), SympheoError::InvalidConfiguration(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            SympheoError::InvalidConfiguration(_)
+        ));
     }
 
     #[tokio::test]
@@ -816,9 +843,14 @@ mod tests {
 
         let config = make_config(&mock_server.uri());
         let tracker = GithubTracker::new(&config).unwrap();
-        let result = tracker.resolve_status_option("proj-123", "Status", "Done").await;
+        let result = tracker
+            .resolve_status_option("proj-123", "Status", "Done")
+            .await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), SympheoError::InvalidConfiguration(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            SympheoError::InvalidConfiguration(_)
+        ));
     }
 
     #[tokio::test]
@@ -846,8 +878,13 @@ mod tests {
 
         let config = make_config(&mock_server.uri());
         let tracker = GithubTracker::new(&config).unwrap();
-        let result = tracker.resolve_status_option("proj-123", "Status", "Done").await;
+        let result = tracker
+            .resolve_status_option("proj-123", "Status", "Done")
+            .await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), SympheoError::InvalidConfiguration(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            SympheoError::InvalidConfiguration(_)
+        ));
     }
 }

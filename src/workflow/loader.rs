@@ -17,10 +17,9 @@ impl WorkflowLoader {
     }
 
     pub fn load(&self) -> Result<WorkflowDefinition, SympheoError> {
-        let content =
-            std::fs::read_to_string(&self.path).map_err(|e| {
-                SympheoError::MissingWorkflowFile(format!("{}: {}", self.path.display(), e))
-            })?;
+        let content = std::fs::read_to_string(&self.path).map_err(|e| {
+            SympheoError::MissingWorkflowFile(format!("{}: {}", self.path.display(), e))
+        })?;
         super::parser::parse(&content)
     }
 }

@@ -31,10 +31,7 @@ fn test_service_config_defaults() {
 
 #[test]
 fn test_workspace_sanitization() {
-    assert_eq!(
-        WorkspaceManager::sanitize_identifier("ABC-123"),
-        "ABC-123"
-    );
+    assert_eq!(WorkspaceManager::sanitize_identifier("ABC-123"), "ABC-123");
     assert_eq!(
         WorkspaceManager::sanitize_identifier("feat/new_thing"),
         "feat_new_thing"
@@ -57,26 +54,22 @@ fn test_issue_is_blocked() {
         branch_name: None,
         url: None,
         labels: vec![],
-        blocked_by: vec![
-            sympheo::tracker::model::BlockerRef {
-                id: Some("2".into()),
-                identifier: Some("TEST-2".into()),
-                state: Some("in progress".into()),
-            },
-        ],
+        blocked_by: vec![sympheo::tracker::model::BlockerRef {
+            id: Some("2".into()),
+            identifier: Some("TEST-2".into()),
+            state: Some("in progress".into()),
+        }],
         ..Default::default()
     };
     let terminal = vec!["closed".into(), "done".into()];
     assert!(issue.is_blocked(&terminal));
 
     let unblocked = Issue {
-        blocked_by: vec![
-            sympheo::tracker::model::BlockerRef {
-                id: Some("2".into()),
-                identifier: Some("TEST-2".into()),
-                state: Some("closed".into()),
-            },
-        ],
+        blocked_by: vec![sympheo::tracker::model::BlockerRef {
+            id: Some("2".into()),
+            identifier: Some("TEST-2".into()),
+            state: Some("closed".into()),
+        }],
         ..issue
     };
     assert!(!unblocked.is_blocked(&terminal));
@@ -89,10 +82,7 @@ fn test_config_var_resolution() {
         sympheo::config::resolver::resolve_value("$TEST_SYM_KEY"),
         "secret123"
     );
-    assert_eq!(
-        sympheo::config::resolver::resolve_value("plain"),
-        "plain"
-    );
+    assert_eq!(sympheo::config::resolver::resolve_value("plain"), "plain");
 }
 
 #[test]
@@ -100,10 +90,7 @@ fn test_daytona_config_parsing() {
     use std::path::PathBuf;
     let mut raw = serde_json::Map::<String, serde_json::Value>::new();
     let mut daytona = serde_json::Map::<String, serde_json::Value>::new();
-    daytona.insert(
-        "enabled".into(),
-        serde_json::Value::Bool(true),
-    );
+    daytona.insert("enabled".into(), serde_json::Value::Bool(true));
     daytona.insert(
         "api_key".into(),
         serde_json::Value::String("$DAYTONA_KEY".into()),
@@ -112,10 +99,7 @@ fn test_daytona_config_parsing() {
         "endpoint".into(),
         serde_json::Value::String("https://api.daytona.io".into()),
     );
-    raw.insert(
-        "daytona".into(),
-        serde_json::Value::Object(daytona),
-    );
+    raw.insert("daytona".into(), serde_json::Value::Object(daytona));
     unsafe { std::env::set_var("DAYTONA_KEY", "secret") };
     let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "prompt".into());
     assert!(config.daytona_enabled());
@@ -123,16 +107,19 @@ fn test_daytona_config_parsing() {
     assert_eq!(config.daytona_api_url(), "https://api.daytona.io");
 }
 
-
 #[cfg(test)]
 mod workstream0_tests {
+    use chrono::Utc;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
     use sympheo::orchestrator::state::{OrchestratorState, RunningEntry};
     use sympheo::tracker::model::{Issue, LiveSession};
-    use std::sync::atomic::AtomicBool;
-    use std::sync::Arc;
-    use chrono::Utc;
 
-    fn dummy_issue(id: &str, priority: Option<i32>, created_at: Option<chrono::DateTime<Utc>>) -> Issue {
+    fn dummy_issue(
+        id: &str,
+        priority: Option<i32>,
+        created_at: Option<chrono::DateTime<Utc>>,
+    ) -> Issue {
         Issue {
             id: id.into(),
             identifier: format!("TEST-{id}"),
@@ -184,21 +171,21 @@ mod workstream0_tests {
         );
 
         // Simulate second turn with same totals
-        if let Some(entry) = state.running.get_mut("1") {
-            if let Some(ref mut sess) = entry.session {
-                let new_input: u64 = 100;
-                let new_output: u64 = 50;
-                let new_total: u64 = 150;
-                let delta_input = new_input.saturating_sub(sess.last_reported_input_tokens);
-                let delta_output = new_output.saturating_sub(sess.last_reported_output_tokens);
-                let delta_total = new_total.saturating_sub(sess.last_reported_total_tokens);
-                state.codex_totals.input_tokens += delta_input;
-                state.codex_totals.output_tokens += delta_output;
-                state.codex_totals.total_tokens += delta_total;
-                sess.last_reported_input_tokens = new_input;
-                sess.last_reported_output_tokens = new_output;
-                sess.last_reported_total_tokens = new_total;
-            }
+        if let Some(entry) = state.running.get_mut("1")
+            && let Some(ref mut sess) = entry.session
+        {
+            let new_input: u64 = 100;
+            let new_output: u64 = 50;
+            let new_total: u64 = 150;
+            let delta_input = new_input.saturating_sub(sess.last_reported_input_tokens);
+            let delta_output = new_output.saturating_sub(sess.last_reported_output_tokens);
+            let delta_total = new_total.saturating_sub(sess.last_reported_total_tokens);
+            state.codex_totals.input_tokens += delta_input;
+            state.codex_totals.output_tokens += delta_output;
+            state.codex_totals.total_tokens += delta_total;
+            sess.last_reported_input_tokens = new_input;
+            sess.last_reported_output_tokens = new_output;
+            sess.last_reported_total_tokens = new_total;
         }
 
         assert_eq!(state.codex_totals.input_tokens, 0);
@@ -241,21 +228,21 @@ mod workstream0_tests {
         );
 
         // Simulate second turn with higher totals
-        if let Some(entry) = state.running.get_mut("1") {
-            if let Some(ref mut sess) = entry.session {
-                let new_input: u64 = 200;
-                let new_output: u64 = 100;
-                let new_total: u64 = 300;
-                let delta_input = new_input.saturating_sub(sess.last_reported_input_tokens);
-                let delta_output = new_output.saturating_sub(sess.last_reported_output_tokens);
-                let delta_total = new_total.saturating_sub(sess.last_reported_total_tokens);
-                state.codex_totals.input_tokens += delta_input;
-                state.codex_totals.output_tokens += delta_output;
-                state.codex_totals.total_tokens += delta_total;
-                sess.last_reported_input_tokens = new_input;
-                sess.last_reported_output_tokens = new_output;
-                sess.last_reported_total_tokens = new_total;
-            }
+        if let Some(entry) = state.running.get_mut("1")
+            && let Some(ref mut sess) = entry.session
+        {
+            let new_input: u64 = 200;
+            let new_output: u64 = 100;
+            let new_total: u64 = 300;
+            let delta_input = new_input.saturating_sub(sess.last_reported_input_tokens);
+            let delta_output = new_output.saturating_sub(sess.last_reported_output_tokens);
+            let delta_total = new_total.saturating_sub(sess.last_reported_total_tokens);
+            state.codex_totals.input_tokens += delta_input;
+            state.codex_totals.output_tokens += delta_output;
+            state.codex_totals.total_tokens += delta_total;
+            sess.last_reported_input_tokens = new_input;
+            sess.last_reported_output_tokens = new_output;
+            sess.last_reported_total_tokens = new_total;
         }
 
         assert_eq!(state.codex_totals.input_tokens, 100);

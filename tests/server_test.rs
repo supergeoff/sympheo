@@ -8,10 +8,9 @@ fn find_free_port() -> u16 {
 
 #[tokio::test]
 async fn test_server_dashboard() {
-    let state = Arc::new(RwLock::new(sympheo::orchestrator::state::OrchestratorState::new(
-        30000,
-        10,
-    )));
+    let state = Arc::new(RwLock::new(
+        sympheo::orchestrator::state::OrchestratorState::new(30000, 10),
+    ));
     let port = find_free_port();
 
     tokio::spawn(async move {
@@ -34,10 +33,9 @@ async fn test_server_dashboard() {
 
 #[tokio::test]
 async fn test_server_api_state() {
-    let state = Arc::new(RwLock::new(sympheo::orchestrator::state::OrchestratorState::new(
-        30000,
-        10,
-    )));
+    let state = Arc::new(RwLock::new(
+        sympheo::orchestrator::state::OrchestratorState::new(30000, 10),
+    ));
     let port = find_free_port();
 
     tokio::spawn(async move {
@@ -95,8 +93,8 @@ async fn test_server_api_state_with_data() {
         retry_attempt: Some(1),
         turn_count: 2,
         cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                stagnation_counter: 0,
-                last_state_change_at: chrono::Utc::now(),
+        stagnation_counter: 0,
+        last_state_change_at: chrono::Utc::now(),
     };
     orch_state.running.insert("1".into(), running_entry);
     orch_state.retry_attempts.insert(
@@ -139,10 +137,9 @@ async fn test_server_api_state_with_data() {
 
 #[tokio::test]
 async fn test_server_api_refresh() {
-    let state = Arc::new(RwLock::new(sympheo::orchestrator::state::OrchestratorState::new(
-        30000,
-        10,
-    )));
+    let state = Arc::new(RwLock::new(
+        sympheo::orchestrator::state::OrchestratorState::new(30000, 10),
+    ));
     let port = find_free_port();
 
     tokio::spawn(async move {
@@ -187,8 +184,8 @@ async fn test_server_api_issue_found() {
             retry_attempt: None,
             turn_count: 3,
             cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                stagnation_counter: 0,
-                last_state_change_at: chrono::Utc::now(),
+            stagnation_counter: 0,
+            last_state_change_at: chrono::Utc::now(),
         },
     );
     let state = Arc::new(RwLock::new(orch_state));
@@ -234,15 +231,17 @@ async fn test_server_api_refresh_triggers_notify() {
 
     let timeout = tokio::time::Duration::from_secs(2);
     let notified = tokio::time::timeout(timeout, notify.notified()).await;
-    assert!(notified.is_ok(), "refresh_notify was not triggered within 2s");
+    assert!(
+        notified.is_ok(),
+        "refresh_notify was not triggered within 2s"
+    );
 }
 
 #[tokio::test]
 async fn test_server_api_issue_not_found() {
-    let state = Arc::new(RwLock::new(sympheo::orchestrator::state::OrchestratorState::new(
-        30000,
-        10,
-    )));
+    let state = Arc::new(RwLock::new(
+        sympheo::orchestrator::state::OrchestratorState::new(30000, 10),
+    ));
     let port = find_free_port();
 
     tokio::spawn(async move {

@@ -1,16 +1,13 @@
 use std::path::PathBuf;
 use sympheo::config::typed::ServiceConfig;
-use sympheo::tracker::github::GithubTracker;
 use sympheo::tracker::IssueTracker;
-use wiremock::{matchers, Mock, MockServer, ResponseTemplate};
+use sympheo::tracker::github::GithubTracker;
+use wiremock::{Mock, MockServer, ResponseTemplate, matchers};
 
 fn make_config(endpoint: &str) -> ServiceConfig {
     let mut raw = serde_json::Map::<String, serde_json::Value>::new();
     let mut tracker = serde_json::Map::<String, serde_json::Value>::new();
-    tracker.insert(
-        "kind".into(),
-        serde_json::Value::String("github".into()),
-    );
+    tracker.insert("kind".into(), serde_json::Value::String("github".into()));
     tracker.insert(
         "api_key".into(),
         serde_json::Value::String("test-key".into()),
@@ -19,18 +16,12 @@ fn make_config(endpoint: &str) -> ServiceConfig {
         "project_slug".into(),
         serde_json::Value::String("owner/repo".into()),
     );
-    tracker.insert(
-        "project_number".into(),
-        serde_json::Value::Number(1.into()),
-    );
+    tracker.insert("project_number".into(), serde_json::Value::Number(1.into()));
     tracker.insert(
         "endpoint".into(),
         serde_json::Value::String(endpoint.into()),
     );
-    raw.insert(
-        "tracker".into(),
-        serde_json::Value::Object(tracker),
-    );
+    raw.insert("tracker".into(), serde_json::Value::Object(tracker));
     ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into())
 }
 
@@ -148,7 +139,10 @@ async fn test_fetch_issues_by_states() {
 
     let config = make_config(&mock_server.uri());
     let tracker = GithubTracker::new(&config).unwrap();
-    let issues = tracker.fetch_issues_by_states(&["closed".into()]).await.unwrap();
+    let issues = tracker
+        .fetch_issues_by_states(&["closed".into()])
+        .await
+        .unwrap();
 
     assert_eq!(issues.len(), 1);
     assert_eq!(issues[0].id, "2");
@@ -185,7 +179,10 @@ async fn test_fetch_issue_states_by_ids() {
 
     let config = make_config(&mock_server.uri());
     let tracker = GithubTracker::new(&config).unwrap();
-    let issues = tracker.fetch_issue_states_by_ids(&["1".into()]).await.unwrap();
+    let issues = tracker
+        .fetch_issue_states_by_ids(&["1".into()])
+        .await
+        .unwrap();
 
     assert_eq!(issues.len(), 1);
     assert_eq!(issues[0].id, "1");
@@ -319,7 +316,12 @@ async fn test_update_issue_body_e2e() {
         node_id: Some("node-123".into()),
         ..Default::default()
     };
-    assert!(tracker.update_issue_body(&issue, "Updated body text").await.is_ok());
+    assert!(
+        tracker
+            .update_issue_body(&issue, "Updated body text")
+            .await
+            .is_ok()
+    );
 }
 
 #[tokio::test]
@@ -329,7 +331,9 @@ async fn test_fetch_candidate_issues_user_path() {
     // First query: org check returns no organization at all
     Mock::given(matchers::method("POST"))
         .and(matchers::path("/graphql"))
-        .and(matchers::body_string_contains("projectV2(number: $projectNumber) { id }"))
+        .and(matchers::body_string_contains(
+            "projectV2(number: $projectNumber) { id }",
+        ))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "data": { "organization": null }
         })))
@@ -396,7 +400,9 @@ async fn test_fetch_candidate_issues_pagination() {
 
     Mock::given(matchers::method("POST"))
         .and(matchers::path("/graphql"))
-        .and(matchers::body_string_contains("projectV2(number: $projectNumber) { id }"))
+        .and(matchers::body_string_contains(
+            "projectV2(number: $projectNumber) { id }",
+        ))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "data": { "organization": { "projectV2": { "id": "proj-1" } } }
         })))

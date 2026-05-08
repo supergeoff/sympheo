@@ -1,3 +1,4 @@
 [tools]
+"npm:@anthropic-ai/claude-code" = "latest"
 "pipx:kimi-cli" = "latest"
 rust = "latest"

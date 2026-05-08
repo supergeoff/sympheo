@@ -9,7 +9,9 @@ pub fn parse(content: &str) -> Result<WorkflowDefinition, SympheoError> {
             let body = &after_first[end_idx + 3..];
             let yaml_value: serde_json::Value = serde_saphyr::from_str(front_matter)
                 .map_err(|e| SympheoError::WorkflowParseError(e.to_string()))?;
-            let mapping = yaml_value.as_object().ok_or(SympheoError::WorkflowFrontMatterNotAMap)?;
+            let mapping = yaml_value
+                .as_object()
+                .ok_or(SympheoError::WorkflowFrontMatterNotAMap)?;
             Ok(WorkflowDefinition {
                 config: mapping.clone(),
                 prompt_template: body.trim().to_string(),
@@ -51,7 +53,10 @@ mod tests {
         let text = "---\n---\nJust prompt";
         // Empty YAML front matter parses as Null, not a Mapping
         let result = parse(text);
-        assert!(matches!(result, Err(SympheoError::WorkflowFrontMatterNotAMap)));
+        assert!(matches!(
+            result,
+            Err(SympheoError::WorkflowFrontMatterNotAMap)
+        ));
     }
 
     #[test]
@@ -65,7 +70,10 @@ mod tests {
     fn test_parse_front_matter_not_a_map() {
         let text = "---\n- item1\n- item2\n---\nDo work";
         let result = parse(text);
-        assert!(matches!(result, Err(SympheoError::WorkflowFrontMatterNotAMap)));
+        assert!(matches!(
+            result,
+            Err(SympheoError::WorkflowFrontMatterNotAMap)
+        ));
     }
 
     #[test]

@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokio::time::timeout;
 
 use crate::agent::backend::AgentBackend;
-use crate::agent::parser::{parse_event_line, AgentEvent, TokenInfo, TurnResult};
+use crate::agent::parser::{AgentEvent, TokenInfo, TurnResult, parse_event_line};
 use crate::config::typed::ServiceConfig;
 use crate::error::SympheoError;
 use crate::tracker::model::Issue;
@@ -29,13 +29,14 @@ pub struct DaytonaConfig {
 
 impl DaytonaConfig {
     pub fn from_service(config: &ServiceConfig) -> Result<Self, SympheoError> {
-        let _daytona_map = config
-            .daytona()
-            .ok_or_else(|| SympheoError::InvalidConfiguration(
+        let _daytona_map = config.daytona().ok_or_else(|| {
+            SympheoError::InvalidConfiguration(
                 "daytona section required when backend is enabled".into(),
-            ))?;
+            )
+        })?;
 
-        let api_key = config.daytona_api_key()
+        let api_key = config
+            .daytona_api_key()
             .ok_or(SympheoError::InvalidConfiguration(
                 "daytona.api_key is required".into(),
             ))?;
@@ -97,7 +98,10 @@ impl DaytonaBackend {
 
     async fn read_sandbox_id(&self, workspace_path: &Path) -> Option<String> {
         let path = self.sandbox_meta_path(workspace_path);
-        tokio::fs::read_to_string(&path).await.ok().map(|s| s.trim().to_string())
+        tokio::fs::read_to_string(&path)
+            .await
+            .ok()
+            .map(|s| s.trim().to_string())
     }
 
     async fn write_sandbox_id(&self, workspace_path: &Path, id: &str) -> Result<(), SympheoError> {
@@ -145,9 +149,13 @@ impl DaytonaBackend {
         if let Some(ref img) = self.config.image {
             payload.insert("image".to_string(), serde_json::Value::String(img.clone()));
         }
-        payload.insert("target".to_string(), serde_json::Value::String(self.config.target.clone()));
+        payload.insert(
+            "target".to_string(),
+            serde_json::Value::String(self.config.target.clone()),
+        );
         if !self.config.env.is_empty() {
-            let env_map: serde_json::Map<String, serde_json::Value> = self.config
+            let env_map: serde_json::Map<String, serde_json::Value> = self
+                .config
                 .env
                 .iter()
                 .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
@@ -180,15 +188,20 @@ impl DaytonaBackend {
             )));
         }
 
-        let sandbox: DaytonaSandbox = serde_json::from_str(&body)
-            .map_err(|e| SympheoError::DaytonaApiError(format!("create sandbox json: {e} ({body})")))?;
+        let sandbox: DaytonaSandbox = serde_json::from_str(&body).map_err(|e| {
+            SympheoError::DaytonaApiError(format!("create sandbox json: {e} ({body})"))
+        })?;
 
         tracing::info!(sandbox_id = %sandbox.id, state = %sandbox.state, "daytona sandbox created");
         Ok(sandbox)
     }
 
-    pub async fn create_sandbox_with_retry(&self, max_retries: u32) -> Result<DaytonaSandbox, SympheoError> {
-        self.with_retry("create_sandbox", max_retries, || self.create_sandbox()).await
+    pub async fn create_sandbox_with_retry(
+        &self,
+        max_retries: u32,
+    ) -> Result<DaytonaSandbox, SympheoError> {
+        self.with_retry("create_sandbox", max_retries, || self.create_sandbox())
+            .await
     }
 
     pub async fn delete_sandbox(&self, sandbox_id: &str) -> Result<(), SympheoError> {
@@ -227,16 +240,18 @@ impl DaytonaBackend {
             .header("Authorization", format!("Bearer {}", self.config.api_key))
             .send()
             .await
-            .map_err(|e| SympheoError::DaytonaApiError(format!("get sandbox state request: {e}")))?;
+            .map_err(|e| {
+                SympheoError::DaytonaApiError(format!("get sandbox state request: {e}"))
+            })?;
 
         let status = resp.status();
         if status.is_success() {
-            let body = resp
-                .text()
-                .await
-                .map_err(|e| SympheoError::DaytonaApiError(format!("get sandbox state body: {e}")))?;
-            let sandbox: DaytonaSandbox = serde_json::from_str(&body)
-                .map_err(|e| SympheoError::DaytonaApiError(format!("get sandbox state json: {e}")))?;
+            let body = resp.text().await.map_err(|e| {
+                SympheoError::DaytonaApiError(format!("get sandbox state body: {e}"))
+            })?;
+            let sandbox: DaytonaSandbox = serde_json::from_str(&body).map_err(|e| {
+                SympheoError::DaytonaApiError(format!("get sandbox state json: {e}"))
+            })?;
             Ok(sandbox.state)
         } else if status.as_u16() == 404 {
             Ok("not_found".to_string())
@@ -244,8 +259,7 @@ impl DaytonaBackend {
             let body = resp.text().await.unwrap_or_default();
             Err(SympheoError::DaytonaApiError(format!(
                 "get sandbox state failed: HTTP {} - {}",
-                status,
-                body
+                status, body
             )))
         }
     }
@@ -272,8 +286,7 @@ impl DaytonaBackend {
             let body = resp.text().await.unwrap_or_default();
             return Err(SympheoError::DaytonaApiError(format!(
                 "start sandbox failed: HTTP {} - {}",
-                status,
-                body
+                status, body
             )));
         }
 
@@ -281,7 +294,10 @@ impl DaytonaBackend {
         Ok(())
     }
 
-    pub async fn ensure_sandbox_running(&self, workspace_path: &Path) -> Result<String, SympheoError> {
+    pub async fn ensure_sandbox_running(
+        &self,
+        workspace_path: &Path,
+    ) -> Result<String, SympheoError> {
         if let Some(id) = self.read_sandbox_id(workspace_path).await {
             let state = self.get_sandbox_state(&id).await?;
             match state.as_str() {
@@ -365,7 +381,9 @@ impl DaytonaBackend {
     }
 
     async fn sync_workspace_to_sandbox(&self, sandbox_id: &str) -> Result<(), SympheoError> {
-        let check = self.execute_command(sandbox_id, "ls -A /workspace", "/").await?;
+        let check = self
+            .execute_command(sandbox_id, "ls -A /workspace", "/")
+            .await?;
         if check.exit_code == 0 && !check.result.trim().is_empty() {
             tracing::info!(sandbox_id = %sandbox_id, "workspace already populated in sandbox");
             return Ok(());
@@ -373,11 +391,13 @@ impl DaytonaBackend {
 
         if let Some(ref repo_url) = self.config.repo_url {
             tracing::info!(sandbox_id = %sandbox_id, repo_url = %repo_url, "cloning repo into sandbox workspace");
-            let clone_result = self.execute_command(
-                sandbox_id,
-                &format!("git clone {} /workspace", shell_escape(repo_url)),
-                "/",
-            ).await?;
+            let clone_result = self
+                .execute_command(
+                    sandbox_id,
+                    &format!("git clone {} /workspace", shell_escape(repo_url)),
+                    "/",
+                )
+                .await?;
             if clone_result.exit_code != 0 {
                 tracing::warn!(sandbox_id = %sandbox_id, error = %clone_result.result, "git clone failed in sandbox");
             }
@@ -460,7 +480,9 @@ impl AgentBackend for DaytonaBackend {
             }
             if let Some(event) = parse_event_line(line) {
                 match &event {
-                    AgentEvent::StepStart { session_id, part, .. } => {
+                    AgentEvent::StepStart {
+                        session_id, part, ..
+                    } => {
                         current_session = Some(session_id.clone());
                         current_turn = Some(part.message_id.clone());
                     }
@@ -522,52 +544,28 @@ mod tests {
     fn service_config_with_daytona(api_url: &str) -> ServiceConfig {
         let mut raw = serde_json::Map::<String, serde_json::Value>::new();
         let mut daytona = serde_json::Map::<String, serde_json::Value>::new();
-        daytona.insert(
-            "enabled".into(),
-            serde_json::Value::Bool(true),
-        );
+        daytona.insert("enabled".into(), serde_json::Value::Bool(true));
         daytona.insert(
             "api_key".into(),
             serde_json::Value::String("test-key".into()),
         );
-        daytona.insert(
-            "api_url".into(),
-            serde_json::Value::String(api_url.into()),
-        );
-        daytona.insert(
-            "target".into(),
-            serde_json::Value::String("eu".into()),
-        );
+        daytona.insert("api_url".into(), serde_json::Value::String(api_url.into()));
+        daytona.insert("target".into(), serde_json::Value::String("eu".into()));
         daytona.insert(
             "image".into(),
             serde_json::Value::String("custom-image".into()),
         );
-        daytona.insert(
-            "timeout_sec".into(),
-            serde_json::Value::Number(7200.into()),
-        );
+        daytona.insert("timeout_sec".into(), serde_json::Value::Number(7200.into()));
         let mut env = serde_json::Map::<String, serde_json::Value>::new();
-        env.insert(
-            "FOO".into(),
-            serde_json::Value::String("bar".into()),
-        );
-        daytona.insert(
-            "env".into(),
-            serde_json::Value::Object(env),
-        );
-        raw.insert(
-            "daytona".into(),
-            serde_json::Value::Object(daytona),
-        );
+        env.insert("FOO".into(), serde_json::Value::String("bar".into()));
+        daytona.insert("env".into(), serde_json::Value::Object(env));
+        raw.insert("daytona".into(), serde_json::Value::Object(daytona));
         let mut codex = serde_json::Map::<String, serde_json::Value>::new();
         codex.insert(
             "command".into(),
             serde_json::Value::String("opencode run".into()),
         );
-        raw.insert(
-            "codex".into(),
-            serde_json::Value::Object(codex),
-        );
+        raw.insert("codex".into(), serde_json::Value::Object(codex));
         ServiceConfig::new(raw, PathBuf::from("/tmp"), "prompt".into())
     }
 
@@ -590,35 +588,33 @@ mod tests {
     fn test_daytona_config_mode_and_repo_url() {
         let mut raw = serde_json::Map::<String, serde_json::Value>::new();
         let mut daytona = serde_json::Map::<String, serde_json::Value>::new();
-        daytona.insert(
-            "enabled".into(),
-            serde_json::Value::Bool(true),
-        );
+        daytona.insert("enabled".into(), serde_json::Value::Bool(true));
         daytona.insert(
             "api_key".into(),
             serde_json::Value::String("test-key".into()),
         );
-        daytona.insert(
-            "mode".into(),
-            serde_json::Value::String("AppServer".into()),
-        );
+        daytona.insert("mode".into(), serde_json::Value::String("AppServer".into()));
         daytona.insert(
             "repo_url".into(),
             serde_json::Value::String("https://github.com/test/repo.git".into()),
         );
-        raw.insert(
-            "daytona".into(),
-            serde_json::Value::Object(daytona),
-        );
+        raw.insert("daytona".into(), serde_json::Value::Object(daytona));
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "prompt".into());
         let dc = DaytonaConfig::from_service(&config).unwrap();
         assert_eq!(dc.mode, "appserver");
-        assert_eq!(dc.repo_url, Some("https://github.com/test/repo.git".to_string()));
+        assert_eq!(
+            dc.repo_url,
+            Some("https://github.com/test/repo.git".to_string())
+        );
     }
 
     #[test]
     fn test_daytona_config_missing_section() {
-        let config = ServiceConfig::new(serde_json::Map::<String, serde_json::Value>::new(), PathBuf::from("/tmp"), "".into());
+        let config = ServiceConfig::new(
+            serde_json::Map::<String, serde_json::Value>::new(),
+            PathBuf::from("/tmp"),
+            "".into(),
+        );
         let result = DaytonaConfig::from_service(&config);
         assert!(matches!(result, Err(SympheoError::InvalidConfiguration(_))));
     }
@@ -627,14 +623,8 @@ mod tests {
     fn test_daytona_config_missing_api_key() {
         let mut raw = serde_json::Map::<String, serde_json::Value>::new();
         let mut daytona = serde_json::Map::<String, serde_json::Value>::new();
-        daytona.insert(
-            "enabled".into(),
-            serde_json::Value::Bool(true),
-        );
-        raw.insert(
-            "daytona".into(),
-            serde_json::Value::Object(daytona),
-        );
+        daytona.insert("enabled".into(), serde_json::Value::Bool(true));
+        raw.insert("daytona".into(), serde_json::Value::Object(daytona));
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
         let result = DaytonaConfig::from_service(&config);
         assert!(matches!(result, Err(SympheoError::InvalidConfiguration(_))));
@@ -668,10 +658,12 @@ mod tests {
         let mock_server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("POST"))
             .and(wiremock::matchers::path("/api/sandbox"))
-            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "sandbox-123",
-                "state": "running"
-            })))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": "sandbox-123",
+                    "state": "running"
+                })),
+            )
             .mount(&mock_server)
             .await;
 
@@ -717,10 +709,12 @@ mod tests {
         let mock_server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .and(wiremock::matchers::path("/api/sandbox/sb-1"))
-            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "sb-1",
-                "state": "running"
-            })))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": "sb-1",
+                    "state": "running"
+                })),
+            )
             .mount(&mock_server)
             .await;
 
@@ -765,10 +759,12 @@ mod tests {
         let mock_server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("POST"))
             .and(wiremock::matchers::path("/api/sandbox"))
-            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "sandbox-new",
-                "state": "running"
-            })))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": "sandbox-new",
+                    "state": "running"
+                })),
+            )
             .mount(&mock_server)
             .await;
 
@@ -778,7 +774,9 @@ mod tests {
         let _ = tokio::fs::create_dir_all(&tmp).await;
         let id = backend.ensure_sandbox_running(&tmp).await.unwrap();
         assert_eq!(id, "sandbox-new");
-        let meta = tokio::fs::read_to_string(tmp.join(".daytona_sandbox_id")).await.unwrap();
+        let meta = tokio::fs::read_to_string(tmp.join(".daytona_sandbox_id"))
+            .await
+            .unwrap();
         assert_eq!(meta.trim(), "sandbox-new");
         let _ = tokio::fs::remove_dir_all(&tmp).await;
     }
@@ -788,10 +786,12 @@ mod tests {
         let mock_server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .and(wiremock::matchers::path("/api/sandbox/sandbox-existing"))
-            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "sandbox-existing",
-                "state": "running"
-            })))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": "sandbox-existing",
+                    "state": "running"
+                })),
+            )
             .mount(&mock_server)
             .await;
 
@@ -799,7 +799,9 @@ mod tests {
         let backend = DaytonaBackend::new(&config).unwrap();
         let tmp = std::env::temp_dir().join(format!("sympheo_test_reuse_{}", std::process::id()));
         let _ = tokio::fs::create_dir_all(&tmp).await;
-        tokio::fs::write(tmp.join(".daytona_sandbox_id"), "sandbox-existing").await.unwrap();
+        tokio::fs::write(tmp.join(".daytona_sandbox_id"), "sandbox-existing")
+            .await
+            .unwrap();
         let id = backend.ensure_sandbox_running(&tmp).await.unwrap();
         assert_eq!(id, "sandbox-existing");
         let _ = tokio::fs::remove_dir_all(&tmp).await;
@@ -810,14 +812,18 @@ mod tests {
         let mock_server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .and(wiremock::matchers::path("/api/sandbox/sandbox-stopped"))
-            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "sandbox-stopped",
-                "state": "stopped"
-            })))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": "sandbox-stopped",
+                    "state": "stopped"
+                })),
+            )
             .mount(&mock_server)
             .await;
         wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path("/api/sandbox/sandbox-stopped/start"))
+            .and(wiremock::matchers::path(
+                "/api/sandbox/sandbox-stopped/start",
+            ))
             .respond_with(wiremock::ResponseTemplate::new(200))
             .mount(&mock_server)
             .await;
@@ -826,7 +832,9 @@ mod tests {
         let backend = DaytonaBackend::new(&config).unwrap();
         let tmp = std::env::temp_dir().join(format!("sympheo_test_start_{}", std::process::id()));
         let _ = tokio::fs::create_dir_all(&tmp).await;
-        tokio::fs::write(tmp.join(".daytona_sandbox_id"), "sandbox-stopped").await.unwrap();
+        tokio::fs::write(tmp.join(".daytona_sandbox_id"), "sandbox-stopped")
+            .await
+            .unwrap();
         let id = backend.ensure_sandbox_running(&tmp).await.unwrap();
         assert_eq!(id, "sandbox-stopped");
         let _ = tokio::fs::remove_dir_all(&tmp).await;
@@ -837,29 +845,38 @@ mod tests {
         let mock_server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .and(wiremock::matchers::path("/api/sandbox/sandbox-error"))
-            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "sandbox-error",
-                "state": "error"
-            })))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": "sandbox-error",
+                    "state": "error"
+                })),
+            )
             .mount(&mock_server)
             .await;
         wiremock::Mock::given(wiremock::matchers::method("POST"))
             .and(wiremock::matchers::path("/api/sandbox"))
-            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "sandbox-recreated",
-                "state": "running"
-            })))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": "sandbox-recreated",
+                    "state": "running"
+                })),
+            )
             .mount(&mock_server)
             .await;
 
         let config = service_config_with_daytona(&mock_server.uri());
         let backend = DaytonaBackend::new(&config).unwrap();
-        let tmp = std::env::temp_dir().join(format!("sympheo_test_recreate_{}", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("sympheo_test_recreate_{}", std::process::id()));
         let _ = tokio::fs::create_dir_all(&tmp).await;
-        tokio::fs::write(tmp.join(".daytona_sandbox_id"), "sandbox-error").await.unwrap();
+        tokio::fs::write(tmp.join(".daytona_sandbox_id"), "sandbox-error")
+            .await
+            .unwrap();
         let id = backend.ensure_sandbox_running(&tmp).await.unwrap();
         assert_eq!(id, "sandbox-recreated");
-        let meta = tokio::fs::read_to_string(tmp.join(".daytona_sandbox_id")).await.unwrap();
+        let meta = tokio::fs::read_to_string(tmp.join(".daytona_sandbox_id"))
+            .await
+            .unwrap();
         assert_eq!(meta.trim(), "sandbox-recreated");
         let _ = tokio::fs::remove_dir_all(&tmp).await;
     }
@@ -877,7 +894,9 @@ mod tests {
         let backend = DaytonaBackend::new(&config).unwrap();
         let tmp = std::env::temp_dir().join(format!("sympheo_test_cleanup_{}", std::process::id()));
         let _ = tokio::fs::create_dir_all(&tmp).await;
-        tokio::fs::write(tmp.join(".daytona_sandbox_id"), "sandbox-to-clean").await.unwrap();
+        tokio::fs::write(tmp.join(".daytona_sandbox_id"), "sandbox-to-clean")
+            .await
+            .unwrap();
         backend.cleanup_workspace(&tmp).await.unwrap();
         assert!(!tmp.join(".daytona_sandbox_id").exists());
         let _ = tokio::fs::remove_dir_all(&tmp).await;

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use tokio::process::Command;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 pub struct WorkspaceManager {
     root: PathBuf,
@@ -68,9 +68,9 @@ impl WorkspaceManager {
 
         if created_now {
             if let (Some(adapter), Some(url)) = (&self.git_adapter, &self.repo_url) {
-                crate::git::GitAdapter::clone(&**adapter, url, &path).await.map_err(|e| {
-                    SympheoError::WorkspaceError(format!("git clone failed: {e}"))
-                })?;
+                crate::git::GitAdapter::clone(&**adapter, url, &path)
+                    .await
+                    .map_err(|e| SympheoError::WorkspaceError(format!("git clone failed: {e}")))?;
             } else if let Some(script) = after_create_hook {
                 self.run_hook("after_create", script, &path).await?;
             }
@@ -83,12 +83,7 @@ impl WorkspaceManager {
         })
     }
 
-    pub async fn run_hook(
-        &self,
-        name: &str,
-        script: &str,
-        cwd: &Path,
-    ) -> Result<(), SympheoError> {
+    pub async fn run_hook(&self, name: &str, script: &str, cwd: &Path) -> Result<(), SympheoError> {
         tracing::info!(hook = name, cwd = %cwd.display(), "running workspace hook");
         let mut child = Command::new("bash")
             .arg("-lc")
@@ -126,10 +121,10 @@ impl WorkspaceManager {
     pub async fn remove_workspace(&self, identifier: &str, before_remove: Option<&str>) {
         let path = self.workspace_path(identifier);
         if path.exists() {
-            if let Some(script) = before_remove {
-                if let Err(e) = self.run_hook("before_remove", script, &path).await {
-                    tracing::warn!(error = %e, "before_remove hook failed");
-                }
+            if let Some(script) = before_remove
+                && let Err(e) = self.run_hook("before_remove", script, &path).await
+            {
+                tracing::warn!(error = %e, "before_remove hook failed");
             }
             if let Err(e) = tokio::fs::remove_dir_all(&path).await {
                 tracing::warn!(path = %path.display(), error = %e, "failed to remove workspace");
@@ -138,7 +133,10 @@ impl WorkspaceManager {
     }
 
     pub fn validate_inside_root(&self, path: &Path) -> Result<(), SympheoError> {
-        let root = self.root.canonicalize().unwrap_or_else(|_| self.root.clone());
+        let root = self
+            .root
+            .canonicalize()
+            .unwrap_or_else(|_| self.root.clone());
         let target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         if !target.starts_with(&root) {
             return Err(SympheoError::WorkspaceError(
@@ -161,10 +159,7 @@ mod tests {
             "root".into(),
             serde_json::Value::String(root.to_string_lossy().to_string()),
         );
-        raw.insert(
-            "workspace".into(),
-            serde_json::Value::Object(workspace),
-        );
+        raw.insert("workspace".into(), serde_json::Value::Object(workspace));
         ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into())
     }
 
@@ -180,8 +175,14 @@ mod tests {
     #[test]
     fn test_sanitize_identifier_basic() {
         assert_eq!(WorkspaceManager::sanitize_identifier("ABC-123"), "ABC-123");
-        assert_eq!(WorkspaceManager::sanitize_identifier("feat/new_thing"), "feat_new_thing");
-        assert_eq!(WorkspaceManager::sanitize_identifier("bug: crash!"), "bug__crash_");
+        assert_eq!(
+            WorkspaceManager::sanitize_identifier("feat/new_thing"),
+            "feat_new_thing"
+        );
+        assert_eq!(
+            WorkspaceManager::sanitize_identifier("bug: crash!"),
+            "bug__crash_"
+        );
     }
 
     #[test]
@@ -231,7 +232,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         let config = test_config_with_root(tmp.clone());
         let mgr = WorkspaceManager::new(&config).unwrap();
-        let info = mgr.create_or_reuse("HOOK-1", Some("echo hello > created")).await.unwrap();
+        let info = mgr
+            .create_or_reuse("HOOK-1", Some("echo hello > created"))
+            .await
+            .unwrap();
         assert!(info.created_now);
         assert!(info.path.join("created").exists());
         let contents = std::fs::read_to_string(info.path.join("created")).unwrap();
@@ -274,19 +278,10 @@ mod tests {
             "root".into(),
             serde_json::Value::String(tmp.to_string_lossy().to_string()),
         );
-        raw.insert(
-            "workspace".into(),
-            serde_json::Value::Object(workspace),
-        );
+        raw.insert("workspace".into(), serde_json::Value::Object(workspace));
         let mut hooks = serde_json::Map::<String, serde_json::Value>::new();
-        hooks.insert(
-            "timeout_ms".into(),
-            serde_json::Value::Number(100.into()),
-        );
-        raw.insert(
-            "hooks".into(),
-            serde_json::Value::Object(hooks),
-        );
+        hooks.insert("timeout_ms".into(), serde_json::Value::Number(100.into()));
+        raw.insert("hooks".into(), serde_json::Value::Object(hooks));
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
         let mgr = WorkspaceManager::new(&config).unwrap();
         let result = mgr.run_hook("test", "sleep 5", &tmp).await;
@@ -347,9 +342,8 @@ mod tests {
         let result = mgr.create_or_reuse("FAIL-1", None).await;
         assert!(result.is_err());
 
-        let mut perms = std::fs::metadata(&readonly).unwrap().permissions();
-        perms.set_readonly(false);
-        std::fs::set_permissions(&readonly, perms).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o755)).unwrap();
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -383,9 +377,8 @@ mod tests {
         // The workspace should still exist because removal failed
         assert!(info.path.exists());
         // Cleanup: restore permissions
-        let mut perms = std::fs::metadata(&info.path).unwrap().permissions();
-        perms.set_readonly(false);
-        std::fs::set_permissions(&info.path, perms).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&info.path, std::fs::Permissions::from_mode(0o755)).unwrap();
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

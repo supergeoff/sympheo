@@ -1,10 +1,10 @@
 use crate::orchestrator::state::OrchestratorState;
 use axum::{
+    Router,
     extract::{Path as AxumPath, State},
     http::StatusCode,
     response::Json,
     routing::{get, post},
-    Router,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -99,7 +99,9 @@ async fn dashboard(State(state): State<SharedState>) -> (StatusCode, String) {
                 html_escape(&r.identifier),
                 r.attempt,
                 error_text,
-                r.due_at.saturating_duration_since(std::time::Instant::now()).as_secs_f64()
+                r.due_at
+                    .saturating_duration_since(std::time::Instant::now())
+                    .as_secs_f64()
             )
         })
         .collect();
@@ -191,7 +193,11 @@ async fn dashboard(State(state): State<SharedState>) -> (StatusCode, String) {
   </script>
 </body>
 </html>"#,
-        last_tick, running_count, retrying_count, total_tokens, runtime_secs,
+        last_tick,
+        running_count,
+        retrying_count,
+        total_tokens,
+        runtime_secs,
         if running_rows.is_empty() {
             "<tr><td colspan=8 style='text-align:center;'>No active sessions</td></tr>".to_string()
         } else {
@@ -331,13 +337,16 @@ mod tests {
     use super::*;
     use crate::orchestrator::state::{OrchestratorState, RunningEntry};
     use crate::tracker::model::{Issue, LiveSession, RetryEntry, TokenTotals};
-    use std::collections::{HashMap, HashSet};
-    use std::sync::atomic::{AtomicBool, Ordering};
+
     use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
 
     #[test]
     fn test_html_escape() {
-        assert_eq!(html_escape("<script>alert('xss')</script>"), "&lt;script&gt;alert('xss')&lt;/script&gt;");
+        assert_eq!(
+            html_escape("<script>alert('xss')</script>"),
+            "&lt;script&gt;alert('xss')&lt;/script&gt;"
+        );
         assert_eq!(html_escape("foo & bar"), "foo &amp; bar");
         assert_eq!(html_escape("\"quoted\""), "&quot;quoted&quot;");
         assert_eq!(html_escape("<div>"), "&lt;div&gt;");
@@ -579,6 +588,6 @@ mod tests {
         let json = result.unwrap().0;
         assert_eq!(json["issue_identifier"], "TEST-1");
         assert!(json["session"].is_object());
-        assert!(json["recent_events"].as_array().unwrap().len() > 0);
+        assert!(!json["recent_events"].as_array().unwrap().is_empty());
     }
 }

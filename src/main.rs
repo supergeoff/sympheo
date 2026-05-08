@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use sympheo::config::typed::ServiceConfig;
 use sympheo::orchestrator::tick::Orchestrator;
+use sympheo::skills::loader::load_skills;
 use sympheo::tracker::github::GithubTracker;
 use sympheo::tracker::IssueTracker;
 use sympheo::workflow::loader::WorkflowLoader;
@@ -82,6 +83,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         workflow.prompt_template,
     );
 
+    let skill_mapping = config.skill_mapping();
+    let skills = load_skills(&skill_mapping, &workflow_dir).unwrap_or_else(|e| {
+        warn!(error = %e, "failed to load skills, continuing without skills");
+        std::collections::HashMap::new()
+    });
+
     if let Err(e) = config.validate_for_dispatch() {
         error!(error = %e, "startup validation failed");
         std::process::exit(1);
@@ -106,7 +113,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let orchestrator = Arc::new(Orchestrator::new(config.clone(), tracker)?);
+    let orchestrator = Arc::new(Orchestrator::new(config.clone(), tracker, skills)?);
     let state = orchestrator.state.clone();
 
     // Optional HTTP server
@@ -153,8 +160,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 workflow_dir.clone(),
                 new_workflow.prompt_template,
             );
+            let new_skill_mapping = new_config.skill_mapping();
+            let new_skills = load_skills(&new_skill_mapping, &workflow_dir).unwrap_or_else(|e| {
+                warn!(error = %e, "failed to reload skills, continuing with previous skills");
+                std::collections::HashMap::new()
+            });
             info!("workflow reloaded");
             orch_for_watch.reload_config(new_config).await;
+            orch_for_watch.reload_skills(new_skills).await;
         }
     });
 

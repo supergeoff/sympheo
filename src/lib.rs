@@ -3,6 +3,7 @@ pub mod config;
 pub mod error;
 pub mod orchestrator;
 pub mod server;
+pub mod skills;
 pub mod tracker;
 pub mod workflow;
 pub mod workspace;

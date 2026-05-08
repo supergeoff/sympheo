@@ -3,10 +3,12 @@ use crate::config::typed::ServiceConfig;
 use crate::error::SympheoError;
 use crate::orchestrator::retry::schedule_retry;
 use crate::orchestrator::state::{OrchestratorState, RunningEntry};
+use crate::skills::Skill;
 use crate::tracker::model::{Issue, LiveSession};
 use crate::tracker::IssueTracker;
 use crate::workspace::manager::WorkspaceManager;
 use chrono::Utc;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -18,12 +20,14 @@ pub struct Orchestrator {
     tracker: Arc<dyn IssueTracker>,
     runner: Arc<AgentRunner>,
     workspace_manager: Arc<WorkspaceManager>,
+    pub skills: Arc<RwLock<HashMap<String, Skill>>>,
 }
 
 impl Orchestrator {
     pub fn new(
         config: ServiceConfig,
         tracker: Arc<dyn IssueTracker>,
+        skills: HashMap<String, Skill>,
     ) -> Result<Self, SympheoError> {
         let state = OrchestratorState::new(
             config.poll_interval_ms(),
@@ -37,6 +41,7 @@ impl Orchestrator {
             tracker,
             runner: Arc::new(runner),
             workspace_manager: Arc::new(workspace_manager),
+            skills: Arc::new(RwLock::new(skills)),
         })
     }
 
@@ -45,6 +50,10 @@ impl Orchestrator {
         state.poll_interval_ms = config.poll_interval_ms();
         state.max_concurrent_agents = config.max_concurrent_agents();
         *self.config.write().await = config;
+    }
+
+    pub async fn reload_skills(&self, skills: HashMap<String, Skill>) {
+        *self.skills.write().await = skills;
     }
 
     pub async fn tick(&self) {
@@ -232,6 +241,7 @@ impl Orchestrator {
         let runner = self.runner.clone();
         let tracker = self.tracker.clone();
         let workspace_manager = self.workspace_manager.clone();
+        let skills = self.skills.clone();
 
         tokio::spawn(async move {
             let cfg = config.read().await.clone();
@@ -244,6 +254,7 @@ impl Orchestrator {
                 tracker.as_ref(),
                 workspace_manager.as_ref(),
                 state.clone(),
+                skills.clone(),
                 cancelled,
             )
             .await;
@@ -421,6 +432,7 @@ async fn run_worker(
     tracker: &dyn IssueTracker,
     workspace_manager: &WorkspaceManager,
     state: Arc<RwLock<OrchestratorState>>,
+    skills: Arc<RwLock<HashMap<String, Skill>>>,
     cancelled: Arc<AtomicBool>,
 ) -> Result<(), SympheoError> {
     let workspace = workspace_manager
@@ -446,7 +458,14 @@ async fn run_worker(
         }
 
         let prompt = if turn_number == 1 {
-            build_prompt(config, &issue, attempt)?
+            let skill_instructions = {
+                let skills_guard = skills.read().await;
+                skills_guard
+                    .get(&issue.state.to_lowercase())
+                    .or_else(|| skills_guard.get("default"))
+                    .map(|s| s.content.clone())
+            };
+            build_prompt(config, &issue, attempt, skill_instructions.as_deref())?
         } else {
             "Continue working on the current task. Review the conversation history and proceed with the next step.".to_string()
         };
@@ -525,7 +544,9 @@ fn build_prompt(
     config: &ServiceConfig,
     issue: &Issue,
     attempt: Option<u32>,
+    skill_instructions: Option<&str>,
 ) -> Result<String, SympheoError> {
+    let skill_instructions = skill_instructions.map(|s| s.to_string());
     use liquid::model::Value;
     use std::collections::HashMap;
 
@@ -535,10 +556,20 @@ fn build_prompt(
         config.prompt_template.clone()
     };
 
+    let full_template = if let Some(ref skill) = skill_instructions {
+        if !skill.is_empty() {
+            format!("{}\n\n---\n\n{}", skill, template_str)
+        } else {
+            template_str
+        }
+    } else {
+        template_str
+    };
+
     let template = liquid::ParserBuilder::with_stdlib()
         .build()
         .map_err(|e| SympheoError::TemplateParseError(e.to_string()))?
-        .parse(&template_str)
+        .parse(&full_template)
         .map_err(|e| SympheoError::TemplateParseError(e.to_string()))?;
 
     let mut globals = HashMap::new();
@@ -551,6 +582,10 @@ fn build_prompt(
     if let Some(a) = attempt {
         globals.insert("attempt".to_string(), Value::Scalar(a.into()));
     }
+    globals.insert(
+        "skill_instructions".to_string(),
+        Value::Scalar(skill_instructions.clone().unwrap_or_default().into()),
+    );
 
     let output = template
         .render(&globals)
@@ -585,7 +620,7 @@ mod tests {
             created_at: None,
             updated_at: None,
         };
-        let prompt = build_prompt(&config, &issue, None).unwrap();
+        let prompt = build_prompt(&config, &issue, None, None).unwrap();
         assert_eq!(prompt, "Fix the bug");
     }
 
@@ -611,7 +646,7 @@ mod tests {
             created_at: None,
             updated_at: None,
         };
-        let prompt = build_prompt(&config, &issue, None).unwrap();
+        let prompt = build_prompt(&config, &issue, None, None).unwrap();
         assert_eq!(prompt, "You are working on an issue from the tracker.");
     }
 
@@ -637,7 +672,7 @@ mod tests {
             created_at: None,
             updated_at: None,
         };
-        let prompt = build_prompt(&config, &issue, Some(2)).unwrap();
+        let prompt = build_prompt(&config, &issue, Some(2), None).unwrap();
         assert_eq!(prompt, "Attempt 2");
     }
 
@@ -668,8 +703,8 @@ mod tests {
     #[test]
     fn test_serde_json_to_liquid_number_float() {
         assert_eq!(
-            serde_json_to_liquid(&serde_json::Value::Number(serde_json::Number::from_f64(3.14).unwrap())),
-            liquid::model::Value::Scalar(3.14f64.into())
+            serde_json_to_liquid(&serde_json::Value::Number(serde_json::Number::from_f64(std::f64::consts::PI).unwrap())),
+            liquid::model::Value::Scalar(std::f64::consts::PI.into())
         );
     }
 
@@ -727,7 +762,7 @@ mod tests {
             created_at: None,
             updated_at: None,
         };
-        let result = build_prompt(&config, &issue, None);
+        let result = build_prompt(&config, &issue, None, None);
         assert!(matches!(result, Err(SympheoError::TemplateRenderError(_))));
     }
 
@@ -753,8 +788,93 @@ mod tests {
             created_at: None,
             updated_at: None,
         };
-        let result = build_prompt(&config, &issue, None);
+        let result = build_prompt(&config, &issue, None, None);
         assert!(matches!(result, Err(SympheoError::TemplateParseError(_))));
+    }
+
+    #[test]
+    fn test_build_prompt_with_skill_instructions() {
+        let mut raw = serde_yaml::Mapping::new();
+        raw.insert(
+            serde_yaml::Value::String("tracker".into()),
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+        );
+        let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "Fix {{ issue.title }}".into());
+        let issue = Issue {
+            id: "1".into(),
+            identifier: "TEST-1".into(),
+            title: "the bug".into(),
+            description: None,
+            priority: None,
+            state: "todo".into(),
+            branch_name: None,
+            url: None,
+            labels: vec![],
+            blocked_by: vec![],
+            created_at: None,
+            updated_at: None,
+        };
+        let prompt = build_prompt(&config, &issue, None, Some("Analyze first.")).unwrap();
+        assert!(prompt.contains("Analyze first."));
+        assert!(prompt.contains("Fix the bug"));
+        assert!(prompt.contains("---"));
+    }
+
+    #[test]
+    fn test_build_prompt_with_empty_skill_instructions() {
+        let mut raw = serde_yaml::Mapping::new();
+        raw.insert(
+            serde_yaml::Value::String("tracker".into()),
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+        );
+        let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "Fix {{ issue.title }}".into());
+        let issue = Issue {
+            id: "1".into(),
+            identifier: "TEST-1".into(),
+            title: "the bug".into(),
+            description: None,
+            priority: None,
+            state: "todo".into(),
+            branch_name: None,
+            url: None,
+            labels: vec![],
+            blocked_by: vec![],
+            created_at: None,
+            updated_at: None,
+        };
+        let prompt = build_prompt(&config, &issue, None, Some("")).unwrap();
+        assert_eq!(prompt, "Fix the bug");
+    }
+
+    #[test]
+    fn test_build_prompt_skill_variable_in_template() {
+        let mut raw = serde_yaml::Mapping::new();
+        raw.insert(
+            serde_yaml::Value::String("tracker".into()),
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+        );
+        let config = ServiceConfig::new(
+            raw,
+            PathBuf::from("/tmp"),
+            "Skill: {{ skill_instructions }} | Issue: {{ issue.title }}".into(),
+        );
+        let issue = Issue {
+            id: "1".into(),
+            identifier: "TEST-1".into(),
+            title: "the bug".into(),
+            description: None,
+            priority: None,
+            state: "todo".into(),
+            branch_name: None,
+            url: None,
+            labels: vec![],
+            blocked_by: vec![],
+            created_at: None,
+            updated_at: None,
+        };
+        let prompt = build_prompt(&config, &issue, None, Some("Analyze first.")).unwrap();
+        assert!(prompt.contains("Skill: Analyze first."));
+        assert!(prompt.contains("Issue: the bug"));
     }
 }
 

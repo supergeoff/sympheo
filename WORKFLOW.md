@@ -63,7 +63,7 @@ Description: {{ issue.description }}
 
 {% case issue.state %}
 {% when "todo" %}
-Your task is to verify and advance this ticket to the Spec stage. Do NOT write code, run tests, or modify source files.
+Your task is to verify, complete and advance this ticket to the Spec stage. Do NOT write code, run tests, or modify source files.
 {% when "spec" %}
 Your task is to produce a complete Low-Level Design (LLD) for this issue. Do NOT write implementation code yet.
 {% when "in progress" %}
@@ -77,7 +77,7 @@ Your task is to write or update documentation. When complete, open a PR and move
 {% endcase %}
 
 The project board has the following columns and workflow:
-- **Todo**: Issues waiting to be picked up. Verify and move to Spec.
+- **Todo**: Issues waiting to be picked up. Verify, complete and move to Spec.
 - **Spec**: Technical specification and design phase. When ready to implement, move to "In Progress".
 - **In Progress**: Active development and implementation phase. Work in a dedicated branch from now on. When done, move to "Review".
 - **Review**: Code review phase. When review passes, move to "Test".

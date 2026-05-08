@@ -252,6 +252,19 @@ impl ServiceConfig {
         map
     }
 
+    pub fn daytona_mode(&self) -> String {
+        self.daytona()
+            .and_then(|m| resolver::get_string(m, "mode"))
+            .unwrap_or_else(|| "oneshot".to_string())
+            .to_lowercase()
+    }
+
+    pub fn daytona_repo_url(&self) -> Option<String> {
+        self.daytona()
+            .and_then(|m| resolver::get_string(m, "repo_url"))
+            .filter(|s| !s.is_empty())
+    }
+
     pub fn validate_for_dispatch(&self) -> Result<(), SympheoError> {
         let kind = self.tracker_kind().ok_or(SympheoError::InvalidConfiguration(
             "tracker.kind is required".into(),

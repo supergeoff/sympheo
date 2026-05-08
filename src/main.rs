@@ -124,7 +124,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = orchestrator.state.clone();
 
     // Optional HTTP server
-    if let Some(port) = cli.port {
+    let resolved_port = cli.port.or(config.server_port());
+    if let Some(port) = resolved_port {
+        info!(port = %port, source = if cli.port.is_some() { "cli" } else { "config" }, "starting http server");
         let state_clone = state.clone();
         tokio::spawn(async move {
             if let Err(e) = sympheo::server::start_server(port, state_clone).await {
@@ -182,7 +184,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Main loop
-    let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(config.poll_interval_ms()));
+    let mut current_interval_ms = config.poll_interval_ms();
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(current_interval_ms));
     interval.tick().await; // first tick immediate-ish
 
     loop {
@@ -197,7 +200,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
         }
         let cfg = orchestrator.config.read().await.clone();
-        interval = tokio::time::interval(tokio::time::Duration::from_millis(cfg.poll_interval_ms()));
+        let new_interval_ms = cfg.poll_interval_ms();
+        if new_interval_ms != current_interval_ms {
+            tracing::debug!(old = %current_interval_ms, new = %new_interval_ms, "polling interval changed");
+            current_interval_ms = new_interval_ms;
+            interval = tokio::time::interval(tokio::time::Duration::from_millis(current_interval_ms));
+        }
         orchestrator.tick().await;
         orchestrator.process_retries().await;
     }

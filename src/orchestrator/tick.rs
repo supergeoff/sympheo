@@ -192,7 +192,20 @@ impl Orchestrator {
 
         for id in to_kill {
             warn!(issue_id = %id, "stall detected, terminating");
+            let identifier = {
+                let state = self.state.read().await;
+                state.running.get(&id).map(|e| e.issue.identifier.clone())
+            };
             self.handle_worker_exit(&id, false, Some("stalled".into())).await;
+            if let Some(ident) = identifier {
+                let ws_path = self.workspace_manager.workspace_path(&ident);
+                if let Err(e) = self.runner.cleanup_workspace(&ws_path).await {
+                    warn!(error = %e, issue_id = %id, "cleanup failed for stalled worker");
+                }
+                self.workspace_manager
+                    .remove_workspace(&ident, config.hook_script("before_remove").as_deref())
+                    .await;
+            }
         }
 
         // Tracker state refresh
@@ -289,15 +302,20 @@ impl Orchestrator {
                     error!(issue_id = %issue.id, error = %e, "worker failed");
                     if let Some(entry) = st.running.remove(&issue.id) {
                         let next_attempt = attempt.unwrap_or(0) + 1;
-                        let retry = schedule_retry(
-                            issue.id.clone(),
-                            entry.issue.identifier.clone(),
-                            next_attempt,
-                            Some(e.to_string()),
-                            &cfg,
-                            false,
-                        );
-                        st.retry_attempts.insert(issue.id.clone(), retry);
+                        if next_attempt > cfg.max_retry_attempts() {
+                            warn!(issue_id = %issue.id, attempt = %next_attempt, "max retry attempts reached, dropping retry");
+                            st.claimed.remove(&issue.id);
+                        } else {
+                            let retry = schedule_retry(
+                                issue.id.clone(),
+                                entry.issue.identifier.clone(),
+                                next_attempt,
+                                Some(e.to_string()),
+                                &cfg,
+                                false,
+                            );
+                            st.retry_attempts.insert(issue.id.clone(), retry);
+                        }
                     }
                 }
             }
@@ -328,15 +346,20 @@ impl Orchestrator {
                 state.retry_attempts.insert(issue_id.to_string(), retry);
             } else {
                 let next_attempt = entry.retry_attempt.unwrap_or(0) + 1;
-                let retry = schedule_retry(
-                    issue_id.to_string(),
-                    entry.issue.identifier.clone(),
-                    next_attempt,
-                    error,
-                    &cfg,
-                    false,
-                );
-                state.retry_attempts.insert(issue_id.to_string(), retry);
+                if next_attempt > cfg.max_retry_attempts() {
+                    warn!(issue_id = %issue_id, attempt = %next_attempt, "max retry attempts reached, dropping retry");
+                    state.claimed.remove(issue_id);
+                } else {
+                    let retry = schedule_retry(
+                        issue_id.to_string(),
+                        entry.issue.identifier.clone(),
+                        next_attempt,
+                        error,
+                        &cfg,
+                        false,
+                    );
+                    state.retry_attempts.insert(issue_id.to_string(), retry);
+                }
             }
         }
     }
@@ -363,16 +386,22 @@ impl Orchestrator {
                 Err(e) => {
                     warn!(issue_id = %issue_id, error = %e, "retry candidate fetch failed, requeuing");
                     let config = self.config.read().await.clone();
-                    let new_retry = schedule_retry(
-                        issue_id.clone(),
-                        retry.identifier.clone(),
-                        retry.attempt + 1,
-                        Some("retry poll failed".into()),
-                        &config,
-                        false,
-                    );
-                    let mut st = self.state.write().await;
-                    st.retry_attempts.insert(issue_id, new_retry);
+                    if retry.attempt + 1 > config.max_retry_attempts() {
+                        warn!(issue_id = %issue_id, attempt = %retry.attempt, "max retry attempts reached, dropping retry");
+                        let mut st = self.state.write().await;
+                        st.claimed.remove(&issue_id);
+                    } else {
+                        let new_retry = schedule_retry(
+                            issue_id.clone(),
+                            retry.identifier.clone(),
+                            retry.attempt + 1,
+                            Some("retry poll failed".into()),
+                            &config,
+                            false,
+                        );
+                        let mut st = self.state.write().await;
+                        st.retry_attempts.insert(issue_id, new_retry);
+                    }
                     continue;
                 }
             };
@@ -493,6 +522,7 @@ async fn run_worker(
         attempt_record.transition(AttemptStatus::StreamingTurn);
 
         // Consume streamed events and update state
+        let mut token_usage_received = false;
         while let Some(event) = event_rx.recv().await {
             match &event {
                 AgentEvent::RateLimit { payload } => {
@@ -500,6 +530,7 @@ async fn run_worker(
                     st.codex_rate_limits = Some(payload.clone());
                 }
                 AgentEvent::TokenUsage { input, output, total } => {
+                    token_usage_received = true;
                     let (last_input, last_output, last_total) = {
                         let st = state.read().await;
                         if let Some(entry) = st.running.get(&issue.id) {
@@ -547,6 +578,26 @@ async fn run_worker(
                     }
                 }
                 _ => {}
+            }
+        }
+
+        // Fallback: if no TokenUsage event was received, use tokens from turn_result
+        if !token_usage_received {
+            if let Some(ref token_info) = turn_result.tokens {
+                let mut st = state.write().await;
+                st.codex_totals.input_tokens += token_info.input;
+                st.codex_totals.output_tokens += token_info.output;
+                st.codex_totals.total_tokens += token_info.total;
+                if let Some(entry) = st.running.get_mut(&issue.id) {
+                    if let Some(ref mut sess) = entry.session {
+                        sess.input_tokens = token_info.input;
+                        sess.output_tokens = token_info.output;
+                        sess.total_tokens = token_info.total;
+                        sess.last_reported_input_tokens = token_info.input;
+                        sess.last_reported_output_tokens = token_info.output;
+                        sess.last_reported_total_tokens = token_info.total;
+                    }
+                }
             }
         }
 

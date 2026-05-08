@@ -1,0 +1,33 @@
+#/usr/bin/env bash
+set -euo pipefail
+
+COMMIT_MSG_FILE=$1
+
+# Skip merge commits
+if grep -q '^Merge branch' "$COMMIT_MSG_FILE"; then
+  exit 0
+fi
+
+# Read first line
+FIRST_LINE=$(head -n 1 "$COMMIT_MSG_FILE" | sed 's/#.*//')
+
+if [ -z "$FIRST_LINE" ]; then
+  echo "❌ Commit message cannot be empty"
+  exit 1
+fi
+
+# Check format with regex
+if ! echo "$FIRST_LINE" | grep -qE '^(feat|fix|docs|style|refactor|test|chore|perf|build|ci|revert)(\([a-z0-9_-]+\))?!?: .+$'; then
+  echo "❌ Invalid commit message format"
+  echo "Expected: <type>([scope])?: <description>"
+  echo "Allowed types: feat,fix,docs,style,refactor,test,chore,perf,build,ci,revert"
+  exit 1
+fi
+
+# Check length
+if [ ${#FIRST_LINE} -gt 150 ]; then
+  echo "❌ First line too long (max 150 chars)"
+  exit 1
+fi
+
+echo "✅ Commit message format OK"

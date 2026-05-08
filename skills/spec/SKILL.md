@@ -117,7 +117,35 @@ Include the following sections:
 
 ### 5. Inject the LLD into the Ticket
 
-Overwrite or append the ticket with the complete LLD. Format it in clear Markdown. Use code blocks for signatures, types, and examples.
+You MUST persist the full LLD onto the GitHub issue body itself — not in the
+PR description, not in commit messages, not in a local file alone. The issue
+body is the single source of truth for the implementation phase.
+
+Procedure (run these commands; do not skip the verification):
+
+1. Write the complete LLD to a file on disk:
+   `/tmp/lld-{{ issue.identifier }}.md`
+   The first line of the file MUST be `## LLD` so the verification step can
+   detect it.
+
+2. Overwrite the issue body:
+   ```
+   gh issue edit {{ issue.id }} --repo <owner>/<repo> --body-file /tmp/lld-{{ issue.identifier }}.md
+   ```
+   Use the same `<owner>/<repo>` as the project this issue belongs to.
+
+3. Verify the write landed by reading the body back:
+   ```
+   gh issue view {{ issue.id }} --repo <owner>/<repo> --json body --jq .body | grep -q '^## LLD'
+   ```
+   This command MUST exit 0. If it does not, the LLD was not persisted —
+   stop, report the failure, and do NOT transition the issue.
+
+4. Only after the verification command succeeds may you move the issue to
+   the "In Progress" column.
+
+Format the LLD in clear Markdown. Use fenced code blocks for signatures,
+types, and examples.
 
 ## Rules
 

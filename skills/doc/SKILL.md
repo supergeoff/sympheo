@@ -75,7 +75,34 @@ Add an entry following the project's changelog format (usually Keep a Changelog)
 - Ensure no broken links or references.
 - If you mention a file, function, or module name, verify it exists and is spelled correctly.
 
-### 6. Produce Documentation Report
+### 6. Open the Pull Request and Gate on Green CI
+
+This is the final gate before the issue moves to Done. A merged PR with red
+CI defeats the purpose of the workflow.
+
+1. Open the pull request from the feature branch to `main`:
+   ```
+   gh pr create --repo <owner>/<repo> --base main --head <feature-branch> --title "<title>" --body-file <pr-body.md>
+   ```
+   Capture the PR number from the output.
+
+2. Block until every required check has finished, and fail fast on red:
+   ```
+   gh pr checks <pr-number> --repo <owner>/<repo> --watch --fail-fast
+   ```
+   This command exits 0 only when all required checks are green.
+
+3. If `gh pr checks` exits non-zero:
+   - Inspect the failing job: `gh run view --log-failed`.
+   - Diagnose the failure (compile error, lint, test, coverage threshold,
+     pattern enforcement). Push fixes to the same feature branch.
+   - Re-run step 2. Repeat until green.
+   - You MUST NOT transition the issue to Done while any check is red.
+
+4. Only when `gh pr checks` exits 0 may you move the issue to the "Done"
+   column.
+
+### 7. Produce Documentation Report
 
 Summarize what was updated:
 

@@ -133,6 +133,14 @@ async fn test_server_api_state_with_data() {
     assert_eq!(running[0]["tokens"]["output_tokens"], 50);
     let retrying = body["retrying"].as_array().unwrap();
     assert_eq!(retrying[0]["error"], "retry err");
+    assert!(body["summary"].is_object());
+    assert_eq!(body["summary"]["by_state"]["todo"], 1);
+    assert_eq!(
+        body["summary"]["recent_changes"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(body["summary"]["blocked"].as_array().unwrap().len(), 0);
+    assert_eq!(body["summary"]["delayed"].as_array().unwrap().len(), 1);
 }
 
 #[tokio::test]

@@ -23,6 +23,14 @@ The dashboard auto-refreshes every 5 seconds and shows:
 | **Tokens** | Total input + output tokens consumed across all sessions since startup. |
 | **Runtime** | Total wall-clock seconds agents have been running since startup. |
 
+### Ticket Summary
+
+A visual breakdown of ticket activity on the board:
+
+- **Counts per state** — small cards showing how many running issues are in each board column.
+- **Recent Movements** — the last 10 issues sorted by when they most recently changed state, with a human-readable timestamp (e.g. `45s ago`).
+- **Blocked or Delayed** — issues that are currently blocked by active dependencies, plus any issues sitting in the retry queue.
+
 ### Active Sessions Table
 
 Each row represents one running issue:
@@ -89,6 +97,33 @@ Returns the full orchestrator state.
       "error": "Agent exited with code 1"
     }
   ],
+  "summary": {
+    "by_state": {
+      "in progress": 2,
+      "todo": 1
+    },
+    "recent_changes": [
+      {
+        "identifier": "#42",
+        "state": "in progress",
+        "last_state_change_at": "2024-01-15T09:25:00Z"
+      }
+    ],
+    "blocked": [
+      {
+        "identifier": "#44",
+        "state": "todo",
+        "blocked_by": ["#45"]
+      }
+    ],
+    "delayed": [
+      {
+        "identifier": "#43",
+        "attempt": 2,
+        "error": "Agent exited with code 1"
+      }
+    ]
+  },
   "codex_totals": {
     "input_tokens": 45000,
     "output_tokens": 12000,

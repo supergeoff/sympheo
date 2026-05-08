@@ -1,4 +1,4 @@
-use crate::orchestrator::state::OrchestratorState;
+use crate::orchestrator::state::{OrchestratorState, RunningEntry};
 use axum::{
     Router,
     extract::{Path as AxumPath, State},
@@ -118,6 +118,89 @@ async fn dashboard(State(state): State<SharedState>) -> (StatusCode, String) {
         })
         .unwrap_or_else(|| "never".to_string());
 
+    let terminal_states = vec!["done".to_string(), "closed".to_string()];
+    let mut state_counts: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    let mut recent_changes: Vec<&RunningEntry> = Vec::new();
+    let mut blocked_entries: Vec<&RunningEntry> = Vec::new();
+
+    for entry in st.running.values() {
+        *state_counts.entry(entry.issue.state.clone()).or_insert(0) += 1;
+        recent_changes.push(entry);
+        if entry.issue.is_blocked(&terminal_states) {
+            blocked_entries.push(entry);
+        }
+    }
+
+    recent_changes.sort_by_key(|b| std::cmp::Reverse(b.last_state_change_at));
+
+    let state_summary_cards: String = state_counts
+        .iter()
+        .map(|(state, count)| {
+            format!(
+                r#"<article><h5>{}</h5><p class="display">{}</p></article>"#,
+                html_escape(state),
+                count
+            )
+        })
+        .collect();
+
+    let recent_rows: String = recent_changes
+        .iter()
+        .take(10)
+        .map(|e| {
+            let secs = (now - e.last_state_change_at).num_seconds();
+            let ago = if secs < 60 {
+                format!("{}s ago", secs)
+            } else {
+                format!("{}m ago", secs / 60)
+            };
+            format!(
+                "<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
+                html_escape(&e.issue.identifier),
+                html_escape(&e.issue.state),
+                ago
+            )
+        })
+        .collect();
+
+    let blocked_rows: String = blocked_entries
+        .iter()
+        .map(|e| {
+            let blockers = e
+                .issue
+                .blocked_by
+                .iter()
+                .filter_map(|b| b.identifier.as_ref())
+                .map(|id| html_escape(id))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "<tr><td>{}</td><td>{}</td><td>Blocked by: {}</td></tr>",
+                html_escape(&e.issue.identifier),
+                html_escape(&e.issue.state),
+                if blockers.is_empty() {
+                    "-".to_string()
+                } else {
+                    blockers
+                }
+            )
+        })
+        .collect();
+
+    let delayed_rows: String = st
+        .retry_attempts
+        .values()
+        .map(|r| {
+            format!(
+                "<tr><td>{}</td><td>{}</td><td>Retry attempt #{}</td></tr>",
+                html_escape(&r.identifier),
+                "retrying",
+                r.attempt
+            )
+        })
+        .collect();
+
     let html = format!(
         r#"<!DOCTYPE html>
 <html lang="en" data-theme="dark">
@@ -157,6 +240,27 @@ async fn dashboard(State(state): State<SharedState>) -> (StatusCode, String) {
         <p class="display">{}s</p>
       </article>
     </div>
+
+    <h2>Ticket Summary</h2>
+    <div class="grid">
+      {}
+    </div>
+
+    <h3>Recent Movements</h3>
+    <table>
+      <thead>
+        <tr><th>Issue</th><th>State</th><th>Last Changed</th></tr>
+      </thead>
+      <tbody>{}</tbody>
+    </table>
+
+    <h3>Blocked or Delayed</h3>
+    <table>
+      <thead>
+        <tr><th>Issue</th><th>State</th><th>Reason</th></tr>
+      </thead>
+      <tbody>{}</tbody>
+    </table>
 
     <h2>Active Sessions</h2>
     <table>
@@ -198,6 +302,22 @@ async fn dashboard(State(state): State<SharedState>) -> (StatusCode, String) {
         retrying_count,
         total_tokens,
         runtime_secs,
+        if state_summary_cards.is_empty() {
+            "<p>No active tickets</p>".to_string()
+        } else {
+            state_summary_cards
+        },
+        if recent_rows.is_empty() {
+            "<tr><td colspan=3 style='text-align:center;'>No recent changes</td></tr>".to_string()
+        } else {
+            recent_rows
+        },
+        if blocked_rows.is_empty() && delayed_rows.is_empty() {
+            "<tr><td colspan=3 style='text-align:center;'>No blocked or delayed tickets</td></tr>"
+                .to_string()
+        } else {
+            blocked_rows + &delayed_rows
+        },
         if running_rows.is_empty() {
             "<tr><td colspan=8 style='text-align:center;'>No active sessions</td></tr>".to_string()
         } else {
@@ -257,6 +377,37 @@ async fn api_state(State(state): State<SharedState>) -> Json<serde_json::Value> 
             })
         })
         .collect();
+    let terminal_states = vec!["done".to_string(), "closed".to_string()];
+    let mut state_counts: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    let mut recent_changes: Vec<&RunningEntry> = Vec::new();
+    let mut blocked_entries: Vec<&RunningEntry> = Vec::new();
+    for entry in st.running.values() {
+        *state_counts.entry(entry.issue.state.clone()).or_insert(0) += 1;
+        recent_changes.push(entry);
+        if entry.issue.is_blocked(&terminal_states) {
+            blocked_entries.push(entry);
+        }
+    }
+    recent_changes.sort_by_key(|b| std::cmp::Reverse(b.last_state_change_at));
+    let summary = json!({
+        "by_state": state_counts,
+        "recent_changes": recent_changes.iter().take(10).map(|e| json!({
+            "identifier": e.issue.identifier,
+            "state": e.issue.state,
+            "last_state_change_at": e.last_state_change_at.to_rfc3339(),
+        })).collect::<Vec<_>>(),
+        "blocked": blocked_entries.iter().map(|e| json!({
+            "identifier": e.issue.identifier,
+            "state": e.issue.state,
+            "blocked_by": e.issue.blocked_by.iter().filter_map(|b| b.identifier.clone()).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+        "delayed": st.retry_attempts.values().map(|r| json!({
+            "identifier": r.identifier,
+            "attempt": r.attempt,
+            "error": r.error,
+        })).collect::<Vec<_>>(),
+    });
     Json(json!({
         "generated_at": now,
         "counts": {
@@ -265,6 +416,7 @@ async fn api_state(State(state): State<SharedState>) -> Json<serde_json::Value> 
         },
         "running": running,
         "retrying": retrying,
+        "summary": summary,
         "codex_totals": {
             "input_tokens": st.codex_totals.input_tokens,
             "output_tokens": st.codex_totals.output_tokens,
@@ -589,5 +741,132 @@ mod tests {
         assert_eq!(json["issue_identifier"], "TEST-1");
         assert!(json["session"].is_object());
         assert!(!json["recent_events"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_dashboard_summary_sections() {
+        let mut state = OrchestratorState::new(5000, 5);
+        let ts = chrono::Utc::now();
+        state.running.insert(
+            "1".into(),
+            RunningEntry {
+                issue: Issue {
+                    id: "1".into(),
+                    identifier: "TEST-1".into(),
+                    title: "a".into(),
+                    description: None,
+                    priority: None,
+                    state: "todo".into(),
+                    branch_name: None,
+                    url: None,
+                    labels: vec![],
+                    blocked_by: vec![],
+                    ..Default::default()
+                },
+                session: None,
+                started_at: ts,
+                retry_attempt: None,
+                turn_count: 0,
+                stagnation_counter: 0,
+                last_state_change_at: ts,
+                cancelled: Arc::new(AtomicBool::new(false)),
+            },
+        );
+        state.running.insert(
+            "2".into(),
+            RunningEntry {
+                issue: Issue {
+                    id: "2".into(),
+                    identifier: "TEST-2".into(),
+                    title: "b".into(),
+                    description: None,
+                    priority: None,
+                    state: "in progress".into(),
+                    branch_name: None,
+                    url: None,
+                    labels: vec![],
+                    blocked_by: vec![crate::tracker::model::BlockerRef {
+                        id: Some("3".into()),
+                        identifier: Some("TEST-3".into()),
+                        state: Some("in progress".into()),
+                    }],
+                    ..Default::default()
+                },
+                session: None,
+                started_at: ts,
+                retry_attempt: None,
+                turn_count: 0,
+                stagnation_counter: 0,
+                last_state_change_at: ts + chrono::Duration::seconds(1),
+                cancelled: Arc::new(AtomicBool::new(false)),
+            },
+        );
+        state.retry_attempts.insert(
+            "3".into(),
+            RetryEntry {
+                issue_id: "3".into(),
+                identifier: "TEST-3".into(),
+                attempt: 1,
+                error: Some("timeout".into()),
+                due_at: std::time::Instant::now(),
+            },
+        );
+
+        let shared = Arc::new(RwLock::new(state));
+        let (status, body) = dashboard(State(shared)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("Ticket Summary"));
+        assert!(body.contains("Recent Movements"));
+        assert!(body.contains("Blocked or Delayed"));
+        assert!(body.contains("todo") && body.contains("in progress"));
+        assert!(body.contains("TEST-2"));
+        assert!(body.contains("Blocked by: TEST-3"));
+        assert!(body.contains("Retry attempt #1"));
+    }
+
+    #[tokio::test]
+    async fn test_api_state_summary() {
+        let mut state = OrchestratorState::new(5000, 5);
+        let ts = chrono::Utc::now();
+        state.running.insert(
+            "1".into(),
+            RunningEntry {
+                issue: Issue {
+                    id: "1".into(),
+                    identifier: "TEST-1".into(),
+                    title: "a".into(),
+                    description: None,
+                    priority: None,
+                    state: "todo".into(),
+                    branch_name: None,
+                    url: None,
+                    labels: vec![],
+                    blocked_by: vec![crate::tracker::model::BlockerRef {
+                        id: Some("2".into()),
+                        identifier: Some("TEST-2".into()),
+                        state: Some("in progress".into()),
+                    }],
+                    ..Default::default()
+                },
+                session: None,
+                started_at: ts,
+                retry_attempt: None,
+                turn_count: 0,
+                stagnation_counter: 0,
+                last_state_change_at: ts,
+                cancelled: Arc::new(AtomicBool::new(false)),
+            },
+        );
+        let shared = Arc::new(RwLock::new(state));
+        let json = api_state(State(shared)).await.0;
+        assert!(json["summary"].is_object());
+        assert_eq!(json["summary"]["by_state"]["todo"], 1);
+        assert_eq!(
+            json["summary"]["recent_changes"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(json["summary"]["blocked"].as_array().unwrap().len(), 1);
+        assert_eq!(json["summary"]["blocked"][0]["identifier"], "TEST-1");
+        assert_eq!(json["summary"]["delayed"].as_array().unwrap().len(), 0);
     }
 }

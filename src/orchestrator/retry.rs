@@ -33,7 +33,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn make_config() -> ServiceConfig {
-        ServiceConfig::new(serde_yaml::Mapping::new(), PathBuf::from("/tmp"), "".into())
+        ServiceConfig::new(serde_json::Map::<String, serde_json::Value>::new(), PathBuf::from("/tmp"), "".into())
     }
 
     #[test]
@@ -95,15 +95,15 @@ mod tests {
 
     #[test]
     fn test_schedule_retry_max_backoff() {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut agent = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut agent = serde_json::Map::<String, serde_json::Value>::new();
         agent.insert(
-            serde_yaml::Value::String("max_retry_backoff_ms".into()),
-            serde_yaml::Value::Number(15000.into()),
+            "max_retry_backoff_ms".into(),
+            serde_json::Value::Number(15000.into()),
         );
         raw.insert(
-            serde_yaml::Value::String("agent".into()),
-            serde_yaml::Value::Mapping(agent),
+            "agent".into(),
+            serde_json::Value::Object(agent),
         );
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
         let before = Instant::now();

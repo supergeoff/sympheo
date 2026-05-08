@@ -4,36 +4,36 @@ use sympheo::agent::backend::AgentBackend;
 use sympheo::agent::runner::AgentRunner;
 use sympheo::config::typed::ServiceConfig;
 fn daytona_service_config(api_url: &str) -> ServiceConfig {
-    let mut raw = serde_yaml::Mapping::new();
-    let mut daytona = serde_yaml::Mapping::new();
+    let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+    let mut daytona = serde_json::Map::<String, serde_json::Value>::new();
     daytona.insert(
-        serde_yaml::Value::String("enabled".into()),
-        serde_yaml::Value::Bool(true),
+        "enabled".into(),
+        serde_json::Value::Bool(true),
     );
     daytona.insert(
-        serde_yaml::Value::String("api_key".into()),
-        serde_yaml::Value::String("test-key".into()),
+        "api_key".into(),
+        serde_json::Value::String("test-key".into()),
     );
     daytona.insert(
-        serde_yaml::Value::String("api_url".into()),
-        serde_yaml::Value::String(api_url.into()),
+        "api_url".into(),
+        serde_json::Value::String(api_url.into()),
     );
     daytona.insert(
-        serde_yaml::Value::String("target".into()),
-        serde_yaml::Value::String("eu".into()),
+        "target".into(),
+        serde_json::Value::String("eu".into()),
     );
     raw.insert(
-        serde_yaml::Value::String("daytona".into()),
-        serde_yaml::Value::Mapping(daytona),
+        "daytona".into(),
+        serde_json::Value::Object(daytona),
     );
-    let mut workspace = serde_yaml::Mapping::new();
+    let mut workspace = serde_json::Map::<String, serde_json::Value>::new();
     workspace.insert(
-        serde_yaml::Value::String("root".into()),
-        serde_yaml::Value::String(std::env::temp_dir().to_string_lossy().to_string()),
+        "root".into(),
+        serde_json::Value::String(std::env::temp_dir().to_string_lossy().to_string()),
     );
     raw.insert(
-        serde_yaml::Value::String("workspace".into()),
-        serde_yaml::Value::Mapping(workspace),
+        "workspace".into(),
+        serde_json::Value::Object(workspace),
     );
     ServiceConfig::new(raw, PathBuf::from("/tmp"), "prompt".into())
 }

@@ -19,7 +19,7 @@ Do the work
 
 #[test]
 fn test_service_config_defaults() {
-    let raw = serde_yaml::Mapping::new();
+    let raw = serde_json::Map::<String, serde_json::Value>::new();
     let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "prompt".into());
     assert_eq!(config.tracker_kind(), None);
     assert_eq!(config.poll_interval_ms(), 30000);
@@ -84,7 +84,7 @@ fn test_issue_is_blocked() {
 
 #[test]
 fn test_config_var_resolution() {
-    std::env::set_var("TEST_SYM_KEY", "secret123");
+    unsafe { std::env::set_var("TEST_SYM_KEY", "secret123") };
     assert_eq!(
         sympheo::config::resolver::resolve_value("$TEST_SYM_KEY"),
         "secret123"
@@ -98,25 +98,25 @@ fn test_config_var_resolution() {
 #[test]
 fn test_daytona_config_parsing() {
     use std::path::PathBuf;
-    let mut raw = serde_yaml::Mapping::new();
-    let mut daytona = serde_yaml::Mapping::new();
+    let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+    let mut daytona = serde_json::Map::<String, serde_json::Value>::new();
     daytona.insert(
-        serde_yaml::Value::String("enabled".into()),
-        serde_yaml::Value::Bool(true),
+        "enabled".into(),
+        serde_json::Value::Bool(true),
     );
     daytona.insert(
-        serde_yaml::Value::String("api_key".into()),
-        serde_yaml::Value::String("$DAYTONA_KEY".into()),
+        "api_key".into(),
+        serde_json::Value::String("$DAYTONA_KEY".into()),
     );
     daytona.insert(
-        serde_yaml::Value::String("endpoint".into()),
-        serde_yaml::Value::String("https://api.daytona.io".into()),
+        "endpoint".into(),
+        serde_json::Value::String("https://api.daytona.io".into()),
     );
     raw.insert(
-        serde_yaml::Value::String("daytona".into()),
-        serde_yaml::Value::Mapping(daytona),
+        "daytona".into(),
+        serde_json::Value::Object(daytona),
     );
-    std::env::set_var("DAYTONA_KEY", "secret");
+    unsafe { std::env::set_var("DAYTONA_KEY", "secret") };
     let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "prompt".into());
     assert!(config.daytona_enabled());
     assert_eq!(config.daytona_api_key(), Some("secret".into()));

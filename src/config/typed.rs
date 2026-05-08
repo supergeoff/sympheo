@@ -5,50 +5,50 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub struct ServiceConfig {
-    raw: serde_yaml::Mapping,
+    raw: serde_json::Map<String, serde_json::Value>,
     workflow_dir: PathBuf,
     pub prompt_template: String,
 }
 
 impl ServiceConfig {
-    pub fn new(raw: serde_yaml::Mapping, workflow_dir: PathBuf, prompt_template: String) -> Self {
+    pub fn new(raw: serde_json::Map<String, serde_json::Value>, workflow_dir: PathBuf, prompt_template: String) -> Self {
         Self { raw, workflow_dir, prompt_template }
     }
 
-    pub fn raw(&self) -> &serde_yaml::Mapping {
+    pub fn raw(&self) -> &serde_json::Map<String, serde_json::Value> {
         &self.raw
     }
 
-    fn tracker(&self) -> Option<&serde_yaml::Mapping> {
-        self.raw.get("tracker").and_then(|v| v.as_mapping())
+    fn tracker(&self) -> Option<&serde_json::Map<String, serde_json::Value>> {
+        self.raw.get("tracker").and_then(|v| v.as_object())
     }
 
-    fn polling(&self) -> Option<&serde_yaml::Mapping> {
-        self.raw.get("polling").and_then(|v| v.as_mapping())
+    fn polling(&self) -> Option<&serde_json::Map<String, serde_json::Value>> {
+        self.raw.get("polling").and_then(|v| v.as_object())
     }
 
-    fn workspace(&self) -> Option<&serde_yaml::Mapping> {
-        self.raw.get("workspace").and_then(|v| v.as_mapping())
+    fn workspace(&self) -> Option<&serde_json::Map<String, serde_json::Value>> {
+        self.raw.get("workspace").and_then(|v| v.as_object())
     }
 
-    fn hooks(&self) -> Option<&serde_yaml::Mapping> {
-        self.raw.get("hooks").and_then(|v| v.as_mapping())
+    fn hooks(&self) -> Option<&serde_json::Map<String, serde_json::Value>> {
+        self.raw.get("hooks").and_then(|v| v.as_object())
     }
 
-    fn agent(&self) -> Option<&serde_yaml::Mapping> {
-        self.raw.get("agent").and_then(|v| v.as_mapping())
+    fn agent(&self) -> Option<&serde_json::Map<String, serde_json::Value>> {
+        self.raw.get("agent").and_then(|v| v.as_object())
     }
 
-    fn codex(&self) -> Option<&serde_yaml::Mapping> {
-        self.raw.get("codex").and_then(|v| v.as_mapping())
+    fn codex(&self) -> Option<&serde_json::Map<String, serde_json::Value>> {
+        self.raw.get("codex").and_then(|v| v.as_object())
     }
 
-    pub fn daytona(&self) -> Option<&serde_yaml::Mapping> {
-        self.raw.get("daytona").and_then(|v| v.as_mapping())
+    pub fn daytona(&self) -> Option<&serde_json::Map<String, serde_json::Value>> {
+        self.raw.get("daytona").and_then(|v| v.as_object())
     }
 
-    pub fn skills(&self) -> Option<&serde_yaml::Mapping> {
-        self.raw.get("skills").and_then(|v| v.as_mapping())
+    pub fn skills(&self) -> Option<&serde_json::Map<String, serde_json::Value>> {
+        self.raw.get("skills").and_then(|v| v.as_object())
     }
 
     pub fn tracker_kind(&self) -> Option<String> {
@@ -180,7 +180,7 @@ impl ServiceConfig {
             .map(|map| {
                 map.iter()
                     .filter_map(|(k, v)| {
-                        let key = k.as_str()?.to_lowercase();
+                        let key = k.to_lowercase();
                         let val = v.as_i64()? as u32;
                         Some((key, val.max(1)))
                     })
@@ -205,7 +205,7 @@ impl ServiceConfig {
 
     pub fn server_port(&self) -> Option<u16> {
         self.raw.get("server")
-            .and_then(|v| v.as_mapping())
+            .and_then(|v| v.as_object())
             .and_then(|m| resolver::get_i64(m, "port"))
             .map(|v| v.clamp(1, 65535) as u16)
     }
@@ -215,12 +215,12 @@ impl ServiceConfig {
         if let Some(agent_map) = self.agent() {
             if let Some(state_map) = agent_map
                 .get("max_concurrent_agents_by_state")
-                .and_then(|v| v.as_mapping())
+                .and_then(|v| v.as_object())
             {
                 for (k, v) in state_map {
-                    if let (Some(key), Some(val)) = (k.as_str(), v.as_i64()) {
+                    if let Some(val) = v.as_i64() {
                         if val > 0 {
-                            map.insert(key.to_lowercase(), val as usize);
+                            map.insert(k.to_lowercase(), val as usize);
                         }
                     }
                 }
@@ -305,10 +305,10 @@ impl ServiceConfig {
     pub fn daytona_env(&self) -> HashMap<String, String> {
         let mut map = HashMap::new();
         if let Some(daytona_map) = self.daytona() {
-            if let Some(env_map) = daytona_map.get("env").and_then(|v| v.as_mapping()) {
+            if let Some(env_map) = daytona_map.get("env").and_then(|v| v.as_object()) {
                 for (k, v) in env_map {
-                    if let (Some(key), Some(val)) = (k.as_str(), v.as_str()) {
-                        map.insert(key.to_string(), resolver::resolve_value(val));
+                    if let Some(val) = v.as_str() {
+                        map.insert(k.to_string(), resolver::resolve_value(val));
                     }
                 }
             }
@@ -373,10 +373,10 @@ mod tests {
     use std::path::PathBuf;
 
     fn empty_config() -> ServiceConfig {
-        ServiceConfig::new(serde_yaml::Mapping::new(), PathBuf::from("/tmp"), "".into())
+        ServiceConfig::new(serde_json::Map::<String, serde_json::Value>::new(), PathBuf::from("/tmp"), "".into())
     }
 
-    fn config_with(raw: serde_yaml::Mapping) -> ServiceConfig {
+    fn config_with(raw: serde_json::Map<String, serde_json::Value>) -> ServiceConfig {
         ServiceConfig::new(raw, PathBuf::from("/tmp"), "prompt".into())
     }
 
@@ -393,15 +393,15 @@ mod tests {
 
     #[test]
     fn test_tracker_kind_present() {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut tracker = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut tracker = serde_json::Map::<String, serde_json::Value>::new();
         tracker.insert(
-            serde_yaml::Value::String("kind".into()),
-            serde_yaml::Value::String("github".into()),
+            "kind".into(),
+            serde_json::Value::String("github".into()),
         );
         raw.insert(
-            serde_yaml::Value::String("tracker".into()),
-            serde_yaml::Value::Mapping(tracker),
+            "tracker".into(),
+            serde_json::Value::Object(tracker),
         );
         assert_eq!(config_with(raw).tracker_kind(), Some("github".to_string()));
     }
@@ -413,93 +413,93 @@ mod tests {
 
     #[test]
     fn test_tracker_endpoint_custom() {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut tracker = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut tracker = serde_json::Map::<String, serde_json::Value>::new();
         tracker.insert(
-            serde_yaml::Value::String("endpoint".into()),
-            serde_yaml::Value::String("https://custom.github.com".into()),
+            "endpoint".into(),
+            serde_json::Value::String("https://custom.github.com".into()),
         );
         raw.insert(
-            serde_yaml::Value::String("tracker".into()),
-            serde_yaml::Value::Mapping(tracker),
+            "tracker".into(),
+            serde_json::Value::Object(tracker),
         );
         assert_eq!(config_with(raw).tracker_endpoint(), "https://custom.github.com");
     }
 
     #[test]
     fn test_tracker_api_key_plain() {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut tracker = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut tracker = serde_json::Map::<String, serde_json::Value>::new();
         tracker.insert(
-            serde_yaml::Value::String("api_key".into()),
-            serde_yaml::Value::String("secret123".into()),
+            "api_key".into(),
+            serde_json::Value::String("secret123".into()),
         );
         raw.insert(
-            serde_yaml::Value::String("tracker".into()),
-            serde_yaml::Value::Mapping(tracker),
+            "tracker".into(),
+            serde_json::Value::Object(tracker),
         );
         assert_eq!(config_with(raw).tracker_api_key(), Some("secret123".to_string()));
     }
 
     #[test]
     fn test_tracker_api_key_env_resolution() {
-        std::env::set_var("TEST_GH_KEY", "gh_secret");
-        let mut raw = serde_yaml::Mapping::new();
-        let mut tracker = serde_yaml::Mapping::new();
+        unsafe { std::env::set_var("TEST_GH_KEY", "gh_secret") };
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut tracker = serde_json::Map::<String, serde_json::Value>::new();
         tracker.insert(
-            serde_yaml::Value::String("api_key".into()),
-            serde_yaml::Value::String("$TEST_GH_KEY".into()),
+            "api_key".into(),
+            serde_json::Value::String("$TEST_GH_KEY".into()),
         );
         raw.insert(
-            serde_yaml::Value::String("tracker".into()),
-            serde_yaml::Value::Mapping(tracker),
+            "tracker".into(),
+            serde_json::Value::Object(tracker),
         );
         assert_eq!(config_with(raw).tracker_api_key(), Some("gh_secret".to_string()));
-        std::env::remove_var("TEST_GH_KEY");
+        unsafe { std::env::remove_var("TEST_GH_KEY") };
     }
 
     #[test]
     fn test_tracker_api_key_empty_after_resolution() {
-        std::env::remove_var("TEST_EMPTY_KEY");
-        let mut raw = serde_yaml::Mapping::new();
-        let mut tracker = serde_yaml::Mapping::new();
+        unsafe { std::env::remove_var("TEST_EMPTY_KEY") };
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut tracker = serde_json::Map::<String, serde_json::Value>::new();
         tracker.insert(
-            serde_yaml::Value::String("api_key".into()),
-            serde_yaml::Value::String("$TEST_EMPTY_KEY".into()),
+            "api_key".into(),
+            serde_json::Value::String("$TEST_EMPTY_KEY".into()),
         );
         raw.insert(
-            serde_yaml::Value::String("tracker".into()),
-            serde_yaml::Value::Mapping(tracker),
+            "tracker".into(),
+            serde_json::Value::Object(tracker),
         );
         assert_eq!(config_with(raw).tracker_api_key(), None);
     }
 
     #[test]
     fn test_tracker_project_slug() {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut tracker = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut tracker = serde_json::Map::<String, serde_json::Value>::new();
         tracker.insert(
-            serde_yaml::Value::String("project_slug".into()),
-            serde_yaml::Value::String("owner/repo".into()),
+            "project_slug".into(),
+            serde_json::Value::String("owner/repo".into()),
         );
         raw.insert(
-            serde_yaml::Value::String("tracker".into()),
-            serde_yaml::Value::Mapping(tracker),
+            "tracker".into(),
+            serde_json::Value::Object(tracker),
         );
         assert_eq!(config_with(raw).tracker_project_slug(), Some("owner/repo".to_string()));
     }
 
     #[test]
     fn test_tracker_project_number() {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut tracker = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut tracker = serde_json::Map::<String, serde_json::Value>::new();
         tracker.insert(
-            serde_yaml::Value::String("project_number".into()),
-            serde_yaml::Value::Number(42.into()),
+            "project_number".into(),
+            serde_json::Value::Number(42.into()),
         );
         raw.insert(
-            serde_yaml::Value::String("tracker".into()),
-            serde_yaml::Value::Mapping(tracker),
+            "tracker".into(),
+            serde_json::Value::Object(tracker),
         );
         assert_eq!(config_with(raw).tracker_project_number(), Some(42));
     }
@@ -512,19 +512,19 @@ mod tests {
 
     #[test]
     fn test_active_states_custom() {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut tracker = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut tracker = serde_json::Map::<String, serde_json::Value>::new();
         let seq = vec![
-            serde_yaml::Value::String("Backlog".into()),
-            serde_yaml::Value::String("Ready".into()),
+            serde_json::Value::String("Backlog".into()),
+            serde_json::Value::String("Ready".into()),
         ];
         tracker.insert(
-            serde_yaml::Value::String("active_states".into()),
-            serde_yaml::Value::Sequence(seq),
+            "active_states".into(),
+            serde_json::Value::Array(seq),
         );
         raw.insert(
-            serde_yaml::Value::String("tracker".into()),
-            serde_yaml::Value::Mapping(tracker),
+            "tracker".into(),
+            serde_json::Value::Object(tracker),
         );
         assert_eq!(config_with(raw).active_states(), vec!["backlog", "ready"]);
     }
@@ -542,30 +542,30 @@ mod tests {
 
     #[test]
     fn test_poll_interval_custom() {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut polling = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut polling = serde_json::Map::<String, serde_json::Value>::new();
         polling.insert(
-            serde_yaml::Value::String("interval_ms".into()),
-            serde_yaml::Value::Number(5000.into()),
+            "interval_ms".into(),
+            serde_json::Value::Number(5000.into()),
         );
         raw.insert(
-            serde_yaml::Value::String("polling".into()),
-            serde_yaml::Value::Mapping(polling),
+            "polling".into(),
+            serde_json::Value::Object(polling),
         );
         assert_eq!(config_with(raw).poll_interval_ms(), 5000);
     }
 
     #[test]
     fn test_poll_interval_min_clamp() {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut polling = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut polling = serde_json::Map::<String, serde_json::Value>::new();
         polling.insert(
-            serde_yaml::Value::String("interval_ms".into()),
-            serde_yaml::Value::Number(100.into()),
+            "interval_ms".into(),
+            serde_json::Value::Number(100.into()),
         );
         raw.insert(
-            serde_yaml::Value::String("polling".into()),
-            serde_yaml::Value::Mapping(polling),
+            "polling".into(),
+            serde_json::Value::Object(polling),
         );
         assert_eq!(config_with(raw).poll_interval_ms(), 1000);
     }
@@ -578,15 +578,15 @@ mod tests {
 
     #[test]
     fn test_hook_script() {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut hooks = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut hooks = serde_json::Map::<String, serde_json::Value>::new();
         hooks.insert(
-            serde_yaml::Value::String("after_create".into()),
-            serde_yaml::Value::String("echo hello".into()),
+            "after_create".into(),
+            serde_json::Value::String("echo hello".into()),
         );
         raw.insert(
-            serde_yaml::Value::String("hooks".into()),
-            serde_yaml::Value::Mapping(hooks),
+            "hooks".into(),
+            serde_json::Value::Object(hooks),
         );
         let config = config_with(raw);
         assert_eq!(config.hook_script("after_create"), Some("echo hello".to_string()));
@@ -605,15 +605,15 @@ mod tests {
 
     #[test]
     fn test_max_concurrent_agents_min_clamp() {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut agent = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut agent = serde_json::Map::<String, serde_json::Value>::new();
         agent.insert(
-            serde_yaml::Value::String("max_concurrent_agents".into()),
-            serde_yaml::Value::Number(0.into()),
+            "max_concurrent_agents".into(),
+            serde_json::Value::Number(0.into()),
         );
         raw.insert(
-            serde_yaml::Value::String("agent".into()),
-            serde_yaml::Value::Mapping(agent),
+            "agent".into(),
+            serde_json::Value::Object(agent),
         );
         assert_eq!(config_with(raw).max_concurrent_agents(), 1);
     }
@@ -625,15 +625,15 @@ mod tests {
 
     #[test]
     fn test_max_turns_min_clamp() {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut agent = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut agent = serde_json::Map::<String, serde_json::Value>::new();
         agent.insert(
-            serde_yaml::Value::String("max_turns".into()),
-            serde_yaml::Value::Number(0.into()),
+            "max_turns".into(),
+            serde_json::Value::Number(0.into()),
         );
         raw.insert(
-            serde_yaml::Value::String("agent".into()),
-            serde_yaml::Value::Mapping(agent),
+            "agent".into(),
+            serde_json::Value::Object(agent),
         );
         assert_eq!(config_with(raw).max_turns(), 1);
     }
@@ -645,43 +645,43 @@ mod tests {
 
     #[test]
     fn test_max_retry_backoff_min_clamp() {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut agent = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut agent = serde_json::Map::<String, serde_json::Value>::new();
         agent.insert(
-            serde_yaml::Value::String("max_retry_backoff_ms".into()),
-            serde_yaml::Value::Number(100.into()),
+            "max_retry_backoff_ms".into(),
+            serde_json::Value::Number(100.into()),
         );
         raw.insert(
-            serde_yaml::Value::String("agent".into()),
-            serde_yaml::Value::Mapping(agent),
+            "agent".into(),
+            serde_json::Value::Object(agent),
         );
         assert_eq!(config_with(raw).max_retry_backoff_ms(), 1000);
     }
 
     #[test]
     fn test_max_concurrent_agents_by_state() {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut agent = serde_yaml::Mapping::new();
-        let mut state_map = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut agent = serde_json::Map::<String, serde_json::Value>::new();
+        let mut state_map = serde_json::Map::<String, serde_json::Value>::new();
         state_map.insert(
-            serde_yaml::Value::String("todo".into()),
-            serde_yaml::Value::Number(3.into()),
+            "todo".into(),
+            serde_json::Value::Number(3.into()),
         );
         state_map.insert(
-            serde_yaml::Value::String("in progress".into()),
-            serde_yaml::Value::Number(5.into()),
+            "in progress".into(),
+            serde_json::Value::Number(5.into()),
         );
         state_map.insert(
-            serde_yaml::Value::String("invalid".into()),
-            serde_yaml::Value::Number(0.into()),
+            "invalid".into(),
+            serde_json::Value::Number(0.into()),
         );
         agent.insert(
-            serde_yaml::Value::String("max_concurrent_agents_by_state".into()),
-            serde_yaml::Value::Mapping(state_map),
+            "max_concurrent_agents_by_state".into(),
+            serde_json::Value::Object(state_map),
         );
         raw.insert(
-            serde_yaml::Value::String("agent".into()),
-            serde_yaml::Value::Mapping(agent),
+            "agent".into(),
+            serde_json::Value::Object(agent),
         );
         let map = config_with(raw).max_concurrent_agents_by_state();
         assert_eq!(map.get("todo"), Some(&3usize));
@@ -701,45 +701,45 @@ mod tests {
 
     #[test]
     fn test_continuation_prompt_custom() {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut agent = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut agent = serde_json::Map::<String, serde_json::Value>::new();
         agent.insert(
-            serde_yaml::Value::String("continuation_prompt".into()),
-            serde_yaml::Value::String("Continuez le travail".into()),
+            "continuation_prompt".into(),
+            serde_json::Value::String("Continuez le travail".into()),
         );
         raw.insert(
-            serde_yaml::Value::String("agent".into()),
-            serde_yaml::Value::Mapping(agent),
+            "agent".into(),
+            serde_json::Value::Object(agent),
         );
         assert_eq!(config_with(raw).continuation_prompt(), "Continuez le travail");
     }
 
     #[test]
     fn test_tracker_endpoint_default_github() {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut tracker = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut tracker = serde_json::Map::<String, serde_json::Value>::new();
         tracker.insert(
-            serde_yaml::Value::String("kind".into()),
-            serde_yaml::Value::String("github".into()),
+            "kind".into(),
+            serde_json::Value::String("github".into()),
         );
         raw.insert(
-            serde_yaml::Value::String("tracker".into()),
-            serde_yaml::Value::Mapping(tracker),
+            "tracker".into(),
+            serde_json::Value::Object(tracker),
         );
         assert_eq!(config_with(raw).tracker_endpoint(), "https://api.github.com");
     }
 
     #[test]
     fn test_tracker_endpoint_default_linear() {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut tracker = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut tracker = serde_json::Map::<String, serde_json::Value>::new();
         tracker.insert(
-            serde_yaml::Value::String("kind".into()),
-            serde_yaml::Value::String("linear".into()),
+            "kind".into(),
+            serde_json::Value::String("linear".into()),
         );
         raw.insert(
-            serde_yaml::Value::String("tracker".into()),
-            serde_yaml::Value::Mapping(tracker),
+            "tracker".into(),
+            serde_json::Value::Object(tracker),
         );
         assert_eq!(config_with(raw).tracker_endpoint(), "https://api.linear.app/graphql");
     }
@@ -766,19 +766,19 @@ mod tests {
 
     #[test]
     fn test_daytona_api_key() {
-        std::env::set_var("TEST_DAYTONA_KEY", "dk");
-        let mut raw = serde_yaml::Mapping::new();
-        let mut daytona = serde_yaml::Mapping::new();
+        unsafe { std::env::set_var("TEST_DAYTONA_KEY", "dk") };
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut daytona = serde_json::Map::<String, serde_json::Value>::new();
         daytona.insert(
-            serde_yaml::Value::String("api_key".into()),
-            serde_yaml::Value::String("$TEST_DAYTONA_KEY".into()),
+            "api_key".into(),
+            serde_json::Value::String("$TEST_DAYTONA_KEY".into()),
         );
         raw.insert(
-            serde_yaml::Value::String("daytona".into()),
-            serde_yaml::Value::Mapping(daytona),
+            "daytona".into(),
+            serde_json::Value::Object(daytona),
         );
         assert_eq!(config_with(raw).daytona_api_key(), Some("dk".to_string()));
-        std::env::remove_var("TEST_DAYTONA_KEY");
+        unsafe { std::env::remove_var("TEST_DAYTONA_KEY") };
     }
 
     #[test]
@@ -793,15 +793,15 @@ mod tests {
 
     #[test]
     fn test_daytona_image() {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut daytona = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut daytona = serde_json::Map::<String, serde_json::Value>::new();
         daytona.insert(
-            serde_yaml::Value::String("image".into()),
-            serde_yaml::Value::String("my-image".into()),
+            "image".into(),
+            serde_json::Value::String("my-image".into()),
         );
         raw.insert(
-            serde_yaml::Value::String("daytona".into()),
-            serde_yaml::Value::Mapping(daytona),
+            "daytona".into(),
+            serde_json::Value::Object(daytona),
         );
         assert_eq!(config_with(raw).daytona_image(), Some("my-image".to_string()));
     }
@@ -813,70 +813,70 @@ mod tests {
 
     #[test]
     fn test_daytona_timeout_min_clamp() {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut daytona = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut daytona = serde_json::Map::<String, serde_json::Value>::new();
         daytona.insert(
-            serde_yaml::Value::String("timeout_sec".into()),
-            serde_yaml::Value::Number(10.into()),
+            "timeout_sec".into(),
+            serde_json::Value::Number(10.into()),
         );
         raw.insert(
-            serde_yaml::Value::String("daytona".into()),
-            serde_yaml::Value::Mapping(daytona),
+            "daytona".into(),
+            serde_json::Value::Object(daytona),
         );
         assert_eq!(config_with(raw).daytona_timeout_sec(), 30);
     }
 
     #[test]
     fn test_daytona_env() {
-        std::env::set_var("TEST_DAYTONA_ENV", "val");
-        let mut raw = serde_yaml::Mapping::new();
-        let mut daytona = serde_yaml::Mapping::new();
-        let mut env = serde_yaml::Mapping::new();
+        unsafe { std::env::set_var("TEST_DAYTONA_ENV", "val") };
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut daytona = serde_json::Map::<String, serde_json::Value>::new();
+        let mut env = serde_json::Map::<String, serde_json::Value>::new();
         env.insert(
-            serde_yaml::Value::String("KEY1".into()),
-            serde_yaml::Value::String("v1".into()),
+            "KEY1".into(),
+            serde_json::Value::String("v1".into()),
         );
         env.insert(
-            serde_yaml::Value::String("KEY2".into()),
-            serde_yaml::Value::String("$TEST_DAYTONA_ENV".into()),
+            "KEY2".into(),
+            serde_json::Value::String("$TEST_DAYTONA_ENV".into()),
         );
         daytona.insert(
-            serde_yaml::Value::String("env".into()),
-            serde_yaml::Value::Mapping(env),
+            "env".into(),
+            serde_json::Value::Object(env),
         );
         raw.insert(
-            serde_yaml::Value::String("daytona".into()),
-            serde_yaml::Value::Mapping(daytona),
+            "daytona".into(),
+            serde_json::Value::Object(daytona),
         );
         let map = config_with(raw).daytona_env();
         assert_eq!(map.get("KEY1"), Some(&"v1".to_string()));
         assert_eq!(map.get("KEY2"), Some(&"val".to_string()));
-        std::env::remove_var("TEST_DAYTONA_ENV");
+        unsafe { std::env::remove_var("TEST_DAYTONA_ENV") };
     }
 
     #[test]
     fn test_validate_for_dispatch_ok() {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut tracker = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut tracker = serde_json::Map::<String, serde_json::Value>::new();
         tracker.insert(
-            serde_yaml::Value::String("kind".into()),
-            serde_yaml::Value::String("github".into()),
+            "kind".into(),
+            serde_json::Value::String("github".into()),
         );
         tracker.insert(
-            serde_yaml::Value::String("api_key".into()),
-            serde_yaml::Value::String("key".into()),
+            "api_key".into(),
+            serde_json::Value::String("key".into()),
         );
         tracker.insert(
-            serde_yaml::Value::String("project_slug".into()),
-            serde_yaml::Value::String("owner/repo".into()),
+            "project_slug".into(),
+            serde_json::Value::String("owner/repo".into()),
         );
         tracker.insert(
-            serde_yaml::Value::String("project_number".into()),
-            serde_yaml::Value::Number(1.into()),
+            "project_number".into(),
+            serde_json::Value::Number(1.into()),
         );
         raw.insert(
-            serde_yaml::Value::String("tracker".into()),
-            serde_yaml::Value::Mapping(tracker),
+            "tracker".into(),
+            serde_json::Value::Object(tracker),
         );
         let config = config_with(raw);
         assert!(config.validate_for_dispatch().is_ok());
@@ -893,15 +893,15 @@ mod tests {
 
     #[test]
     fn test_validate_unsupported_tracker_kind() {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut tracker = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut tracker = serde_json::Map::<String, serde_json::Value>::new();
         tracker.insert(
-            serde_yaml::Value::String("kind".into()),
-            serde_yaml::Value::String("linear".into()),
+            "kind".into(),
+            serde_json::Value::String("linear".into()),
         );
         raw.insert(
-            serde_yaml::Value::String("tracker".into()),
-            serde_yaml::Value::Mapping(tracker),
+            "tracker".into(),
+            serde_json::Value::Object(tracker),
         );
         let config = config_with(raw);
         assert!(matches!(
@@ -912,15 +912,15 @@ mod tests {
 
     #[test]
     fn test_validate_missing_api_key() {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut tracker = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut tracker = serde_json::Map::<String, serde_json::Value>::new();
         tracker.insert(
-            serde_yaml::Value::String("kind".into()),
-            serde_yaml::Value::String("github".into()),
+            "kind".into(),
+            serde_json::Value::String("github".into()),
         );
         raw.insert(
-            serde_yaml::Value::String("tracker".into()),
-            serde_yaml::Value::Mapping(tracker),
+            "tracker".into(),
+            serde_json::Value::Object(tracker),
         );
         let config = config_with(raw);
         assert!(matches!(
@@ -931,19 +931,19 @@ mod tests {
 
     #[test]
     fn test_validate_missing_project_slug() {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut tracker = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut tracker = serde_json::Map::<String, serde_json::Value>::new();
         tracker.insert(
-            serde_yaml::Value::String("kind".into()),
-            serde_yaml::Value::String("github".into()),
+            "kind".into(),
+            serde_json::Value::String("github".into()),
         );
         tracker.insert(
-            serde_yaml::Value::String("api_key".into()),
-            serde_yaml::Value::String("key".into()),
+            "api_key".into(),
+            serde_json::Value::String("key".into()),
         );
         raw.insert(
-            serde_yaml::Value::String("tracker".into()),
-            serde_yaml::Value::Mapping(tracker),
+            "tracker".into(),
+            serde_json::Value::Object(tracker),
         );
         let config = config_with(raw);
         assert!(matches!(
@@ -954,23 +954,23 @@ mod tests {
 
     #[test]
     fn test_validate_missing_project_number() {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut tracker = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut tracker = serde_json::Map::<String, serde_json::Value>::new();
         tracker.insert(
-            serde_yaml::Value::String("kind".into()),
-            serde_yaml::Value::String("github".into()),
+            "kind".into(),
+            serde_json::Value::String("github".into()),
         );
         tracker.insert(
-            serde_yaml::Value::String("api_key".into()),
-            serde_yaml::Value::String("key".into()),
+            "api_key".into(),
+            serde_json::Value::String("key".into()),
         );
         tracker.insert(
-            serde_yaml::Value::String("project_slug".into()),
-            serde_yaml::Value::String("owner/repo".into()),
+            "project_slug".into(),
+            serde_json::Value::String("owner/repo".into()),
         );
         raw.insert(
-            serde_yaml::Value::String("tracker".into()),
-            serde_yaml::Value::Mapping(tracker),
+            "tracker".into(),
+            serde_json::Value::Object(tracker),
         );
         let config = config_with(raw);
         assert!(matches!(
@@ -981,36 +981,36 @@ mod tests {
 
     #[test]
     fn test_validate_empty_codex_command() {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut tracker = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut tracker = serde_json::Map::<String, serde_json::Value>::new();
         tracker.insert(
-            serde_yaml::Value::String("kind".into()),
-            serde_yaml::Value::String("github".into()),
+            "kind".into(),
+            serde_json::Value::String("github".into()),
         );
         tracker.insert(
-            serde_yaml::Value::String("api_key".into()),
-            serde_yaml::Value::String("key".into()),
+            "api_key".into(),
+            serde_json::Value::String("key".into()),
         );
         tracker.insert(
-            serde_yaml::Value::String("project_slug".into()),
-            serde_yaml::Value::String("owner/repo".into()),
+            "project_slug".into(),
+            serde_json::Value::String("owner/repo".into()),
         );
         tracker.insert(
-            serde_yaml::Value::String("project_number".into()),
-            serde_yaml::Value::Number(1.into()),
+            "project_number".into(),
+            serde_json::Value::Number(1.into()),
         );
-        let mut codex = serde_yaml::Mapping::new();
+        let mut codex = serde_json::Map::<String, serde_json::Value>::new();
         codex.insert(
-            serde_yaml::Value::String("command".into()),
-            serde_yaml::Value::String("   ".into()),
+            "command".into(),
+            serde_json::Value::String("   ".into()),
         );
         raw.insert(
-            serde_yaml::Value::String("tracker".into()),
-            serde_yaml::Value::Mapping(tracker),
+            "tracker".into(),
+            serde_json::Value::Object(tracker),
         );
         raw.insert(
-            serde_yaml::Value::String("codex".into()),
-            serde_yaml::Value::Mapping(codex),
+            "codex".into(),
+            serde_json::Value::Object(codex),
         );
         let config = config_with(raw);
         assert!(matches!(
@@ -1021,36 +1021,36 @@ mod tests {
 
     #[test]
     fn test_validate_daytona_missing_key() {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut tracker = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut tracker = serde_json::Map::<String, serde_json::Value>::new();
         tracker.insert(
-            serde_yaml::Value::String("kind".into()),
-            serde_yaml::Value::String("github".into()),
+            "kind".into(),
+            serde_json::Value::String("github".into()),
         );
         tracker.insert(
-            serde_yaml::Value::String("api_key".into()),
-            serde_yaml::Value::String("key".into()),
+            "api_key".into(),
+            serde_json::Value::String("key".into()),
         );
         tracker.insert(
-            serde_yaml::Value::String("project_slug".into()),
-            serde_yaml::Value::String("owner/repo".into()),
+            "project_slug".into(),
+            serde_json::Value::String("owner/repo".into()),
         );
         tracker.insert(
-            serde_yaml::Value::String("project_number".into()),
-            serde_yaml::Value::Number(1.into()),
+            "project_number".into(),
+            serde_json::Value::Number(1.into()),
         );
-        let mut daytona = serde_yaml::Mapping::new();
+        let mut daytona = serde_json::Map::<String, serde_json::Value>::new();
         daytona.insert(
-            serde_yaml::Value::String("enabled".into()),
-            serde_yaml::Value::Bool(true),
+            "enabled".into(),
+            serde_json::Value::Bool(true),
         );
         raw.insert(
-            serde_yaml::Value::String("tracker".into()),
-            serde_yaml::Value::Mapping(tracker),
+            "tracker".into(),
+            serde_json::Value::Object(tracker),
         );
         raw.insert(
-            serde_yaml::Value::String("daytona".into()),
-            serde_yaml::Value::Mapping(daytona),
+            "daytona".into(),
+            serde_json::Value::Object(daytona),
         );
         let config = config_with(raw);
         assert!(matches!(

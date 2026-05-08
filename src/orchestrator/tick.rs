@@ -606,7 +606,7 @@ async fn run_worker(
 
     // Auto-create branch when entering in progress
     if issue.state.to_lowercase() == "in progress" && issue.branch_name.is_none() {
-        if let Some(ref adapter) = workspace_manager.git_adapter() {
+        if let Some(adapter) = workspace_manager.git_adapter() {
             let sanitized: String = issue.title.to_lowercase()
                 .replace(|c: char| !c.is_alphanumeric() && c != '-', "-")
                 .replace("--", "-")
@@ -656,7 +656,7 @@ async fn run_worker(
         }
 
         // Git state verification before each turn
-        if let Some(ref adapter) = workspace_manager.git_adapter() {
+        if let Some(adapter) = workspace_manager.git_adapter() {
             if let Err(e) = adapter.fetch(&workspace.path, "origin").await {
                 warn!(issue_id = %issue.id, error = %e, "git fetch failed");
             }
@@ -930,10 +930,10 @@ mod tests {
 
     #[test]
     fn test_build_prompt_with_template() {
-        let mut raw = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::new();
         raw.insert(
-            serde_yaml::Value::String("tracker".into()),
-            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+            "tracker".into(),
+            serde_json::Value::Object(serde_json::Map::new()),
         );
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "Fix {{ issue.title }}".into());
         let issue = Issue {
@@ -955,10 +955,10 @@ mod tests {
 
     #[test]
     fn test_build_prompt_empty_template() {
-        let mut raw = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::new();
         raw.insert(
-            serde_yaml::Value::String("tracker".into()),
-            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+            "tracker".into(),
+            serde_json::Value::Object(serde_json::Map::new()),
         );
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
         let issue = Issue {
@@ -980,10 +980,10 @@ mod tests {
 
     #[test]
     fn test_build_prompt_with_attempt() {
-        let mut raw = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::new();
         raw.insert(
-            serde_yaml::Value::String("tracker".into()),
-            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+            "tracker".into(),
+            serde_json::Value::Object(serde_json::Map::new()),
         );
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "Attempt {{ attempt }}".into());
         let issue = Issue {
@@ -1069,10 +1069,10 @@ mod tests {
 
     #[test]
     fn test_build_prompt_unknown_variable_fails() {
-        let mut raw = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::new();
         raw.insert(
-            serde_yaml::Value::String("tracker".into()),
-            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+            "tracker".into(),
+            serde_json::Value::Object(serde_json::Map::new()),
         );
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "Hello {{ unknown }}".into());
         let issue = Issue {
@@ -1094,10 +1094,10 @@ mod tests {
 
     #[test]
     fn test_build_prompt_strict_unknown_root_var() {
-        let mut raw = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::new();
         raw.insert(
-            serde_yaml::Value::String("tracker".into()),
-            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+            "tracker".into(),
+            serde_json::Value::Object(serde_json::Map::new()),
         );
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "Hello {{ unknown_var }}".into());
         let issue = Issue {
@@ -1119,10 +1119,10 @@ mod tests {
 
     #[test]
     fn test_build_prompt_invalid_template_syntax() {
-        let mut raw = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::new();
         raw.insert(
-            serde_yaml::Value::String("tracker".into()),
-            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+            "tracker".into(),
+            serde_json::Value::Object(serde_json::Map::new()),
         );
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "{{ unclosed".into());
         let issue = Issue {
@@ -1144,10 +1144,10 @@ mod tests {
 
     #[test]
     fn test_build_prompt_with_skill() {
-        let mut raw = serde_yaml::Mapping::new();
+        let mut raw = serde_json::Map::new();
         raw.insert(
-            serde_yaml::Value::String("tracker".into()),
-            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+            "tracker".into(),
+            serde_json::Value::Object(serde_json::Map::new()),
         );
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "Fix {{ issue.title }}".into());
         let issue = Issue {
@@ -1167,6 +1167,391 @@ mod tests {
         assert!(prompt.contains("Analyze the issue first."));
         assert!(prompt.contains("Fix the bug"));
         assert!(prompt.contains("---"));
+    }
+
+    #[tokio::test]
+    async fn test_apply_agent_event_step_start_creates_session() {
+        use crate::agent::parser::{AgentEvent, StepStartPart};
+        use crate::orchestrator::state::{OrchestratorState, RunningEntry};
+        use crate::tracker::model::Issue;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        let state = Arc::new(RwLock::new(OrchestratorState::new(5000, 5)));
+        {
+            let mut st = state.write().await;
+            st.running.insert(
+                "1".into(),
+                RunningEntry {
+                    issue: Issue {
+                        id: "1".into(),
+                        identifier: "TEST-1".into(),
+                        title: "a".into(),
+                        description: None,
+                        priority: None,
+                        state: "todo".into(),
+                        branch_name: None,
+                        url: None,
+                        labels: vec![],
+                        blocked_by: vec![],
+                        ..Default::default()
+                    },
+                    session: None,
+                    started_at: chrono::Utc::now(),
+                    retry_attempt: None,
+                    turn_count: 2,
+                    stagnation_counter: 0,
+                    last_state_change_at: chrono::Utc::now(),
+                    cancelled: Arc::new(AtomicBool::new(false)),
+                },
+            );
+        }
+
+        let event = AgentEvent::StepStart {
+            timestamp: 0,
+            session_id: "sess-1".into(),
+            part: StepStartPart {
+                id: "p1".into(),
+                message_id: "m1".into(),
+                session_id: "sess-1".into(),
+                part_type: "step_start".into(),
+            },
+        };
+
+        apply_agent_event(&state, "1", event).await;
+
+        let st = state.read().await;
+        let entry = st.running.get("1").unwrap();
+        let sess = entry.session.as_ref().unwrap();
+        assert_eq!(sess.session_id, "sess-1-m1");
+        assert_eq!(sess.thread_id, "sess-1");
+        assert_eq!(sess.turn_id, "m1");
+        assert_eq!(sess.turn_count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_apply_agent_event_step_start_updates_session() {
+        use crate::agent::parser::{AgentEvent, StepStartPart};
+        use crate::orchestrator::state::{OrchestratorState, RunningEntry};
+        use crate::tracker::model::{Issue, LiveSession};
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        let state = Arc::new(RwLock::new(OrchestratorState::new(5000, 5)));
+        {
+            let mut st = state.write().await;
+            st.running.insert(
+                "1".into(),
+                RunningEntry {
+                    issue: Issue::default(),
+                    session: Some(LiveSession {
+                        session_id: "old".into(),
+                        thread_id: "old-t".into(),
+                        turn_id: "old-u".into(),
+                        agent_pid: None,
+                        last_event: None,
+                        last_message: None,
+                        last_timestamp: None,
+                        input_tokens: 100,
+                        output_tokens: 100,
+                        total_tokens: 100,
+                        last_reported_input_tokens: 50,
+                        last_reported_output_tokens: 50,
+                        last_reported_total_tokens: 50,
+                        turn_count: 0,
+                        pr_url: None,
+                    }),
+                    started_at: chrono::Utc::now(),
+                    retry_attempt: None,
+                    turn_count: 0,
+                    stagnation_counter: 0,
+                    last_state_change_at: chrono::Utc::now(),
+                    cancelled: Arc::new(AtomicBool::new(false)),
+                },
+            );
+        }
+
+        let event = AgentEvent::StepStart {
+            timestamp: 0,
+            session_id: "sess-2".into(),
+            part: StepStartPart {
+                id: "p1".into(),
+                message_id: "m2".into(),
+                session_id: "sess-2".into(),
+                part_type: "step_start".into(),
+            },
+        };
+
+        apply_agent_event(&state, "1", event).await;
+
+        let st = state.read().await;
+        let sess = st.running.get("1").unwrap().session.as_ref().unwrap();
+        assert_eq!(sess.session_id, "sess-2-m2");
+        assert_eq!(sess.thread_id, "sess-2");
+        assert_eq!(sess.turn_id, "m2");
+        assert_eq!(sess.last_reported_input_tokens, 0);
+        assert_eq!(sess.last_reported_output_tokens, 0);
+        assert_eq!(sess.last_reported_total_tokens, 0);
+        assert_eq!(sess.last_event, Some("step_start".into()));
+    }
+
+    #[tokio::test]
+    async fn test_apply_agent_event_token_usage_updates_totals() {
+        use crate::agent::parser::AgentEvent;
+        use crate::orchestrator::state::{OrchestratorState, RunningEntry};
+        use crate::tracker::model::{Issue, LiveSession};
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        let state = Arc::new(RwLock::new(OrchestratorState::new(5000, 5)));
+        {
+            let mut st = state.write().await;
+            st.running.insert(
+                "1".into(),
+                RunningEntry {
+                    issue: Issue::default(),
+                    session: Some(LiveSession {
+                        session_id: "s1".into(),
+                        thread_id: "t1".into(),
+                        turn_id: "u1".into(),
+                        agent_pid: None,
+                        last_event: None,
+                        last_message: None,
+                        last_timestamp: None,
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        total_tokens: 0,
+                        last_reported_input_tokens: 10,
+                        last_reported_output_tokens: 20,
+                        last_reported_total_tokens: 30,
+                        turn_count: 0,
+                        pr_url: None,
+                    }),
+                    started_at: chrono::Utc::now(),
+                    retry_attempt: None,
+                    turn_count: 0,
+                    stagnation_counter: 0,
+                    last_state_change_at: chrono::Utc::now(),
+                    cancelled: Arc::new(AtomicBool::new(false)),
+                },
+            );
+        }
+
+        let event = AgentEvent::TokenUsage {
+            input: 50,
+            output: 80,
+            total: 130,
+        };
+        apply_agent_event(&state, "1", event).await;
+
+        let st = state.read().await;
+        assert_eq!(st.codex_totals.input_tokens, 40); // 50 - 10
+        assert_eq!(st.codex_totals.output_tokens, 60); // 80 - 20
+        assert_eq!(st.codex_totals.total_tokens, 100); // 130 - 30
+        let sess = st.running.get("1").unwrap().session.as_ref().unwrap();
+        assert_eq!(sess.input_tokens, 50);
+        assert_eq!(sess.output_tokens, 80);
+        assert_eq!(sess.total_tokens, 130);
+    }
+
+    #[tokio::test]
+    async fn test_apply_agent_event_rate_limit() {
+        use crate::agent::parser::AgentEvent;
+        use crate::orchestrator::state::OrchestratorState;
+
+        let state = Arc::new(RwLock::new(OrchestratorState::new(5000, 5)));
+        let event = AgentEvent::RateLimit {
+            payload: serde_json::json!({"limit": 100}),
+        };
+        apply_agent_event(&state, "1", event).await;
+
+        let st = state.read().await;
+        assert_eq!(st.codex_rate_limits, Some(serde_json::json!({"limit": 100})));
+    }
+
+    #[tokio::test]
+    async fn test_apply_agent_event_notification() {
+        use crate::agent::parser::AgentEvent;
+        use crate::orchestrator::state::{OrchestratorState, RunningEntry};
+        use crate::tracker::model::{Issue, LiveSession};
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        let state = Arc::new(RwLock::new(OrchestratorState::new(5000, 5)));
+        {
+            let mut st = state.write().await;
+            st.running.insert(
+                "1".into(),
+                RunningEntry {
+                    issue: Issue::default(),
+                    session: Some(LiveSession {
+                        session_id: "s1".into(),
+                        thread_id: "t1".into(),
+                        turn_id: "u1".into(),
+                        agent_pid: None,
+                        last_event: None,
+                        last_message: None,
+                        last_timestamp: None,
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        total_tokens: 0,
+                        last_reported_input_tokens: 0,
+                        last_reported_output_tokens: 0,
+                        last_reported_total_tokens: 0,
+                        turn_count: 0,
+                        pr_url: None,
+                    }),
+                    started_at: chrono::Utc::now(),
+                    retry_attempt: None,
+                    turn_count: 0,
+                    stagnation_counter: 0,
+                    last_state_change_at: chrono::Utc::now(),
+                    cancelled: Arc::new(AtomicBool::new(false)),
+                },
+            );
+        }
+
+        let event = AgentEvent::Notification {
+            session_id: "s1".into(),
+            message: "hello world".into(),
+        };
+        apply_agent_event(&state, "1", event).await;
+
+        let st = state.read().await;
+        let sess = st.running.get("1").unwrap().session.as_ref().unwrap();
+        assert_eq!(sess.last_message, Some("hello world".into()));
+    }
+
+    #[tokio::test]
+    async fn test_apply_agent_event_text_appends() {
+        use crate::agent::parser::{AgentEvent, TextPart};
+        use crate::orchestrator::state::{OrchestratorState, RunningEntry};
+        use crate::tracker::model::{Issue, LiveSession};
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        let state = Arc::new(RwLock::new(OrchestratorState::new(5000, 5)));
+        {
+            let mut st = state.write().await;
+            st.running.insert(
+                "1".into(),
+                RunningEntry {
+                    issue: Issue::default(),
+                    session: Some(LiveSession {
+                        session_id: "s1".into(),
+                        thread_id: "t1".into(),
+                        turn_id: "u1".into(),
+                        agent_pid: None,
+                        last_event: None,
+                        last_message: Some("pre ".into()),
+                        last_timestamp: None,
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        total_tokens: 0,
+                        last_reported_input_tokens: 0,
+                        last_reported_output_tokens: 0,
+                        last_reported_total_tokens: 0,
+                        turn_count: 0,
+                        pr_url: None,
+                    }),
+                    started_at: chrono::Utc::now(),
+                    retry_attempt: None,
+                    turn_count: 0,
+                    stagnation_counter: 0,
+                    last_state_change_at: chrono::Utc::now(),
+                    cancelled: Arc::new(AtomicBool::new(false)),
+                },
+            );
+        }
+
+        let event = AgentEvent::Text {
+            timestamp: 0,
+            session_id: "s1".into(),
+            part: TextPart {
+                id: "p1".into(),
+                message_id: "m1".into(),
+                session_id: "s1".into(),
+                part_type: "text".into(),
+                text: "fix".into(),
+                time: None,
+            },
+        };
+        apply_agent_event(&state, "1", event).await;
+
+        let st = state.read().await;
+        let sess = st.running.get("1").unwrap().session.as_ref().unwrap();
+        assert_eq!(sess.last_message, Some("pre fix".into()));
+    }
+
+    #[tokio::test]
+    async fn test_apply_agent_event_step_finish_with_tokens() {
+        use crate::agent::parser::{AgentEvent, StepFinishPart, TokenInfo};
+        use crate::orchestrator::state::{OrchestratorState, RunningEntry};
+        use crate::tracker::model::{Issue, LiveSession};
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        let state = Arc::new(RwLock::new(OrchestratorState::new(5000, 5)));
+        {
+            let mut st = state.write().await;
+            st.running.insert(
+                "1".into(),
+                RunningEntry {
+                    issue: Issue::default(),
+                    session: Some(LiveSession {
+                        session_id: "s1".into(),
+                        thread_id: "t1".into(),
+                        turn_id: "u1".into(),
+                        agent_pid: None,
+                        last_event: None,
+                        last_message: None,
+                        last_timestamp: None,
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        total_tokens: 0,
+                        last_reported_input_tokens: 0,
+                        last_reported_output_tokens: 0,
+                        last_reported_total_tokens: 0,
+                        turn_count: 0,
+                        pr_url: None,
+                    }),
+                    started_at: chrono::Utc::now(),
+                    retry_attempt: None,
+                    turn_count: 0,
+                    stagnation_counter: 0,
+                    last_state_change_at: chrono::Utc::now(),
+                    cancelled: Arc::new(AtomicBool::new(false)),
+                },
+            );
+        }
+
+        let event = AgentEvent::StepFinish {
+            timestamp: 0,
+            session_id: "s1".into(),
+            part: StepFinishPart {
+                id: "p1".into(),
+                reason: "done".into(),
+                message_id: "m1".into(),
+                session_id: "s1".into(),
+                part_type: "step_finish".into(),
+                tokens: Some(TokenInfo {
+                    total: 100,
+                    input: 40,
+                    output: 60,
+                    reasoning: 0,
+                    cache: None,
+                }),
+                cost: None,
+            },
+        };
+        apply_agent_event(&state, "1", event).await;
+
+        let st = state.read().await;
+        let sess = st.running.get("1").unwrap().session.as_ref().unwrap();
+        assert_eq!(sess.last_event, Some("step_finish".into()));
+        assert_eq!(sess.input_tokens, 40);
+        assert_eq!(sess.output_tokens, 60);
+        assert_eq!(sess.total_tokens, 100);
     }
 }
 

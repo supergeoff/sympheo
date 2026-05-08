@@ -44,16 +44,16 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    fn base_config() -> serde_yaml::Mapping {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut workspace = serde_yaml::Mapping::new();
+    fn base_config() -> serde_json::Map<String, serde_json::Value> {
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut workspace = serde_json::Map::<String, serde_json::Value>::new();
         workspace.insert(
-            serde_yaml::Value::String("root".into()),
-            serde_yaml::Value::String("/tmp".into()),
+            "root".into(),
+            serde_json::Value::String("/tmp".into()),
         );
         raw.insert(
-            serde_yaml::Value::String("workspace".into()),
-            serde_yaml::Value::Mapping(workspace),
+            "workspace".into(),
+            serde_json::Value::Object(workspace),
         );
         raw
     }
@@ -61,14 +61,14 @@ mod tests {
     #[test]
     fn test_agent_runner_local_success() {
         let mut raw = base_config();
-        let mut codex = serde_yaml::Mapping::new();
+        let mut codex = serde_json::Map::<String, serde_json::Value>::new();
         codex.insert(
-            serde_yaml::Value::String("command".into()),
-            serde_yaml::Value::String("echo".into()),
+            "command".into(),
+            serde_json::Value::String("echo".into()),
         );
         raw.insert(
-            serde_yaml::Value::String("codex".into()),
-            serde_yaml::Value::Mapping(codex),
+            "codex".into(),
+            serde_json::Value::Object(codex),
         );
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
         let runner = AgentRunner::new(&config);
@@ -78,26 +78,26 @@ mod tests {
     #[test]
     fn test_agent_runner_daytona_success() {
         let mut raw = base_config();
-        let mut daytona = serde_yaml::Mapping::new();
+        let mut daytona = serde_json::Map::<String, serde_json::Value>::new();
         daytona.insert(
-            serde_yaml::Value::String("enabled".into()),
-            serde_yaml::Value::Bool(true),
+            "enabled".into(),
+            serde_json::Value::Bool(true),
         );
         daytona.insert(
-            serde_yaml::Value::String("api_key".into()),
-            serde_yaml::Value::String("test-key".into()),
+            "api_key".into(),
+            serde_json::Value::String("test-key".into()),
         );
         daytona.insert(
-            serde_yaml::Value::String("server_url".into()),
-            serde_yaml::Value::String("http://localhost".into()),
+            "server_url".into(),
+            serde_json::Value::String("http://localhost".into()),
         );
         daytona.insert(
-            serde_yaml::Value::String("target".into()),
-            serde_yaml::Value::String("local".into()),
+            "target".into(),
+            serde_json::Value::String("local".into()),
         );
         raw.insert(
-            serde_yaml::Value::String("daytona".into()),
-            serde_yaml::Value::Mapping(daytona),
+            "daytona".into(),
+            serde_json::Value::Object(daytona),
         );
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
         let runner = AgentRunner::new(&config);
@@ -107,15 +107,15 @@ mod tests {
     #[test]
     fn test_agent_runner_daytona_failure() {
         let mut raw = base_config();
-        let mut daytona = serde_yaml::Mapping::new();
+        let mut daytona = serde_json::Map::<String, serde_json::Value>::new();
         daytona.insert(
-            serde_yaml::Value::String("enabled".into()),
-            serde_yaml::Value::Bool(true),
+            "enabled".into(),
+            serde_json::Value::Bool(true),
         );
         // Missing api_key
         raw.insert(
-            serde_yaml::Value::String("daytona".into()),
-            serde_yaml::Value::Mapping(daytona),
+            "daytona".into(),
+            serde_json::Value::Object(daytona),
         );
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
         let runner = AgentRunner::new(&config);

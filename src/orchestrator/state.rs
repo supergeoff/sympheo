@@ -246,4 +246,49 @@ mod tests {
         entry.cancelled.store(true, Ordering::Relaxed);
         assert!(entry.is_cancelled());
     }
+
+    #[test]
+    fn test_state_debug() {
+        let state = OrchestratorState::new(5000, 5);
+        let debug = format!("{:?}", state);
+        assert!(debug.contains("OrchestratorState"));
+        assert!(debug.contains("poll_interval_ms"));
+        assert!(debug.contains("running"));
+        assert!(debug.contains("claimed"));
+    }
+
+    #[test]
+    fn test_state_clone() {
+        let mut state = OrchestratorState::new(5000, 5);
+        state.claimed.insert("1".into());
+        state.running.insert(
+            "1".into(),
+            RunningEntry {
+                issue: Issue {
+                    id: "1".into(),
+                    identifier: "TEST-1".into(),
+                    title: "a".into(),
+                    description: None,
+                    priority: None,
+                    state: "todo".into(),
+                    branch_name: None,
+                    url: None,
+                    labels: vec![],
+                    blocked_by: vec![],
+                    ..Default::default()
+                },
+                session: None,
+                started_at: chrono::Utc::now(),
+                retry_attempt: None,
+                turn_count: 0,
+                stagnation_counter: 0,
+                last_state_change_at: chrono::Utc::now(),
+                cancelled: Arc::new(AtomicBool::new(false)),
+            },
+        );
+        let cloned = state.clone();
+        assert_eq!(cloned.claimed.len(), 1);
+        assert_eq!(cloned.running.len(), 1);
+        assert_eq!(cloned.poll_interval_ms, 5000);
+    }
 }

@@ -324,3 +324,530 @@ impl GithubTracker {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::typed::ServiceConfig;
+    use crate::tracker::github::GithubTracker;
+    use crate::tracker::model::Issue;
+    use std::path::PathBuf;
+    use wiremock::{matchers, Mock, MockServer, ResponseTemplate};
+
+    fn make_config(endpoint: &str) -> ServiceConfig {
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut tracker = serde_json::Map::<String, serde_json::Value>::new();
+        tracker.insert(
+            "kind".into(),
+            serde_json::Value::String("github".into()),
+        );
+        tracker.insert(
+            "api_key".into(),
+            serde_json::Value::String("test-key".into()),
+        );
+        tracker.insert(
+            "project_slug".into(),
+            serde_json::Value::String("owner/repo".into()),
+        );
+        tracker.insert(
+            "project_number".into(),
+            serde_json::Value::Number(1.into()),
+        );
+        tracker.insert(
+            "endpoint".into(),
+            serde_json::Value::String(endpoint.into()),
+        );
+        raw.insert(
+            "tracker".into(),
+            serde_json::Value::Object(tracker),
+        );
+        ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into())
+    }
+
+    fn project_id_response() -> serde_json::Value {
+        serde_json::json!({
+            "data": {
+                "organization": {
+                    "projectV2": { "id": "proj-123" }
+                }
+            }
+        })
+    }
+
+    fn project_fields_response() -> serde_json::Value {
+        serde_json::json!({
+            "data": {
+                "node": {
+                    "fields": {
+                        "nodes": [
+                            {
+                                "id": "field-1",
+                                "name": "Status",
+                                "options": [
+                                    { "id": "opt-1", "name": "Todo" },
+                                    { "id": "opt-2", "name": "In Progress" },
+                                    { "id": "opt-3", "name": "Done" }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            }
+        })
+    }
+
+    fn mutation_success_response() -> serde_json::Value {
+        serde_json::json!({
+            "data": {
+                "updateProjectV2ItemFieldValue": {
+                    "projectV2Item": { "id": "item-123" }
+                }
+            }
+        })
+    }
+
+    fn comment_success_response() -> serde_json::Value {
+        serde_json::json!({
+            "data": {
+                "addComment": {
+                    "commentEdge": { "node": { "id": "comment-123" } }
+                }
+            }
+        })
+    }
+
+    fn update_body_success_response() -> serde_json::Value {
+        serde_json::json!({
+            "data": {
+                "updateIssue": {
+                    "issue": { "id": "issue-123" }
+                }
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn test_move_issue_state_success() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(project_id_response()))
+            .up_to_n_times(1)
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(project_fields_response()))
+            .up_to_n_times(1)
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(mutation_success_response()))
+            .mount(&mock_server)
+            .await;
+
+        let config = make_config(&mock_server.uri());
+        let tracker = GithubTracker::new(&config).unwrap();
+        let issue = Issue {
+            project_item_id: Some("item-123".into()),
+            ..Default::default()
+        };
+        assert!(tracker.move_issue_state(&issue, "Done").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_move_issue_state_missing_project_item_id() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(project_id_response()))
+            .up_to_n_times(1)
+            .mount(&mock_server)
+            .await;
+
+        let config = make_config(&mock_server.uri());
+        let tracker = GithubTracker::new(&config).unwrap();
+        let issue = Issue::default();
+        let result = tracker.move_issue_state(&issue, "Done").await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), SympheoError::InvalidConfiguration(_)));
+    }
+
+    #[tokio::test]
+    async fn test_add_comment_success() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(comment_success_response()))
+            .mount(&mock_server)
+            .await;
+
+        let config = make_config(&mock_server.uri());
+        let tracker = GithubTracker::new(&config).unwrap();
+        let issue = Issue {
+            node_id: Some("issue-123".into()),
+            ..Default::default()
+        };
+        assert!(tracker.add_comment(&issue, "Great work!").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_add_comment_missing_node_id() {
+        let mock_server = MockServer::start().await;
+        let config = make_config(&mock_server.uri());
+        let tracker = GithubTracker::new(&config).unwrap();
+        let issue = Issue::default();
+        let result = tracker.add_comment(&issue, "test").await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), SympheoError::InvalidConfiguration(_)));
+    }
+
+    #[tokio::test]
+    async fn test_update_issue_body_success() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(update_body_success_response()))
+            .mount(&mock_server)
+            .await;
+
+        let config = make_config(&mock_server.uri());
+        let tracker = GithubTracker::new(&config).unwrap();
+        let issue = Issue {
+            node_id: Some("issue-123".into()),
+            ..Default::default()
+        };
+        assert!(tracker.update_issue_body(&issue, "Updated body").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_update_issue_body_missing_node_id() {
+        let mock_server = MockServer::start().await;
+        let config = make_config(&mock_server.uri());
+        let tracker = GithubTracker::new(&config).unwrap();
+        let issue = Issue::default();
+        let result = tracker.update_issue_body(&issue, "test").await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), SympheoError::InvalidConfiguration(_)));
+    }
+
+    #[tokio::test]
+    async fn test_ensure_project_id_org_path() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(project_id_response()))
+            .mount(&mock_server)
+            .await;
+
+        let config = make_config(&mock_server.uri());
+        let tracker = GithubTracker::new(&config).unwrap();
+        let id = tracker.ensure_project_id().await.unwrap();
+        assert_eq!(id, "proj-123");
+    }
+
+    #[tokio::test]
+    async fn test_ensure_project_id_user_path() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "user": {
+                        "projectV2": { "id": "proj-user-123" }
+                    }
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let config = make_config(&mock_server.uri());
+        let tracker = GithubTracker::new(&config).unwrap();
+        let id = tracker.ensure_project_id().await.unwrap();
+        assert_eq!(id, "proj-user-123");
+    }
+
+    #[tokio::test]
+    async fn test_ensure_project_id_caches() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(project_id_response()))
+            .up_to_n_times(1)
+            .mount(&mock_server)
+            .await;
+
+        let config = make_config(&mock_server.uri());
+        let tracker = GithubTracker::new(&config).unwrap();
+        let id1 = tracker.ensure_project_id().await.unwrap();
+        let id2 = tracker.ensure_project_id().await.unwrap();
+        assert_eq!(id1, id2);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_status_option_cache_miss() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(project_fields_response()))
+            .up_to_n_times(1)
+            .mount(&mock_server)
+            .await;
+
+        let config = make_config(&mock_server.uri());
+        let tracker = GithubTracker::new(&config).unwrap();
+        let (field_id, option_id) = tracker
+            .resolve_status_option("proj-123", "Status", "Done")
+            .await
+            .unwrap();
+        assert_eq!(field_id, "field-1");
+        assert_eq!(option_id, "opt-3");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_status_option_cache_hit() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(project_fields_response()))
+            .up_to_n_times(1)
+            .mount(&mock_server)
+            .await;
+
+        let config = make_config(&mock_server.uri());
+        let tracker = GithubTracker::new(&config).unwrap();
+        let _ = tracker.resolve_status_option("proj-123", "Status", "Done").await.unwrap();
+        let (field_id, option_id) = tracker
+            .resolve_status_option("proj-123", "Status", "Done")
+            .await
+            .unwrap();
+        assert_eq!(field_id, "field-1");
+        assert_eq!(option_id, "opt-3");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_status_option_field_not_found() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "node": {
+                        "fields": { "nodes": [] }
+                    }
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let config = make_config(&mock_server.uri());
+        let tracker = GithubTracker::new(&config).unwrap();
+        let result = tracker.resolve_status_option("proj-123", "Status", "Done").await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), SympheoError::InvalidConfiguration(_)));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_status_option_option_not_found() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(project_fields_response()))
+            .mount(&mock_server)
+            .await;
+
+        let config = make_config(&mock_server.uri());
+        let tracker = GithubTracker::new(&config).unwrap();
+        let result = tracker.resolve_status_option("proj-123", "Status", "NonExistent").await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), SympheoError::InvalidConfiguration(_)));
+    }
+
+    #[tokio::test]
+    async fn test_graphql_mutation_rate_limit_wait() {
+        let mock_server = MockServer::start().await;
+        let reset_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() + 2;
+
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path("/graphql"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .insert_header("x-ratelimit-remaining", "0")
+                    .insert_header("x-ratelimit-reset", reset_ts.to_string())
+                    .set_body_json(serde_json::json!({"data": null})),
+            )
+            .up_to_n_times(1)
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(mutation_success_response()))
+            .mount(&mock_server)
+            .await;
+
+        let config = make_config(&mock_server.uri());
+        let tracker = GithubTracker::new(&config).unwrap();
+        let result = tracker
+            .graphql_mutation("mutation {}", serde_json::json!({}))
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_graphql_mutation_500_retry_then_success() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path("/graphql"))
+            .respond_with(ResponseTemplate::new(500).set_body_json(serde_json::json!({"error": "boom"})))
+            .up_to_n_times(1)
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(mutation_success_response()))
+            .mount(&mock_server)
+            .await;
+
+        let config = make_config(&mock_server.uri());
+        let tracker = GithubTracker::new(&config).unwrap();
+        let result = tracker
+            .graphql_mutation("mutation {}", serde_json::json!({}))
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_graphql_mutation_500_exhausted() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path("/graphql"))
+            .respond_with(ResponseTemplate::new(500).set_body_json(serde_json::json!({"error": "boom"})))
+            .mount(&mock_server)
+            .await;
+
+        let config = make_config(&mock_server.uri());
+        let tracker = GithubTracker::new(&config).unwrap();
+        let result = tracker
+            .graphql_mutation("mutation {}", serde_json::json!({}))
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_graphql_mutation_graphql_errors() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "errors": [{"message": "Something went wrong"}]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let config = make_config(&mock_server.uri());
+        let tracker = GithubTracker::new(&config).unwrap();
+        let result = tracker
+            .graphql_mutation("mutation {}", serde_json::json!({}))
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("GraphQL errors"));
+    }
+
+    #[tokio::test]
+    async fn test_ensure_project_id_not_found() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "organization": null,
+                    "user": null
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let config = make_config(&mock_server.uri());
+        let tracker = GithubTracker::new(&config).unwrap();
+        let result = tracker.ensure_project_id().await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), SympheoError::InvalidConfiguration(_)));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_status_option_cannot_fetch_fields() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "node": {
+                        "fields": null
+                    }
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let config = make_config(&mock_server.uri());
+        let tracker = GithubTracker::new(&config).unwrap();
+        let result = tracker.resolve_status_option("proj-123", "Status", "Done").await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), SympheoError::InvalidConfiguration(_)));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_status_option_field_missing_id() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "node": {
+                        "fields": {
+                            "nodes": [
+                                {
+                                    "name": "Status",
+                                    "options": []
+                                }
+                            ]
+                        }
+                    }
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let config = make_config(&mock_server.uri());
+        let tracker = GithubTracker::new(&config).unwrap();
+        let result = tracker.resolve_status_option("proj-123", "Status", "Done").await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), SympheoError::InvalidConfiguration(_)));
+    }
+}

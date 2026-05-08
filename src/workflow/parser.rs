@@ -7,9 +7,9 @@ pub fn parse(content: &str) -> Result<WorkflowDefinition, SympheoError> {
         if let Some(end_idx) = after_first.find("---") {
             let front_matter = &after_first[..end_idx];
             let body = &after_first[end_idx + 3..];
-            let yaml_value: serde_yaml::Value = serde_yaml::from_str(front_matter)
+            let yaml_value: serde_json::Value = serde_saphyr::from_str(front_matter)
                 .map_err(|e| SympheoError::WorkflowParseError(e.to_string()))?;
-            let mapping = yaml_value.as_mapping().ok_or(SympheoError::WorkflowFrontMatterNotAMap)?;
+            let mapping = yaml_value.as_object().ok_or(SympheoError::WorkflowFrontMatterNotAMap)?;
             Ok(WorkflowDefinition {
                 config: mapping.clone(),
                 prompt_template: body.trim().to_string(),
@@ -21,7 +21,7 @@ pub fn parse(content: &str) -> Result<WorkflowDefinition, SympheoError> {
         }
     } else {
         Ok(WorkflowDefinition {
-            config: serde_yaml::Mapping::new(),
+            config: serde_json::Map::<String, serde_json::Value>::new(),
             prompt_template: content.trim().to_string(),
         })
     }

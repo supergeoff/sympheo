@@ -5,31 +5,31 @@ use sympheo::tracker::IssueTracker;
 use wiremock::{matchers, Mock, MockServer, ResponseTemplate};
 
 fn make_config(endpoint: &str) -> ServiceConfig {
-    let mut raw = serde_yaml::Mapping::new();
-    let mut tracker = serde_yaml::Mapping::new();
+    let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+    let mut tracker = serde_json::Map::<String, serde_json::Value>::new();
     tracker.insert(
-        serde_yaml::Value::String("kind".into()),
-        serde_yaml::Value::String("github".into()),
+        "kind".into(),
+        serde_json::Value::String("github".into()),
     );
     tracker.insert(
-        serde_yaml::Value::String("api_key".into()),
-        serde_yaml::Value::String("test-key".into()),
+        "api_key".into(),
+        serde_json::Value::String("test-key".into()),
     );
     tracker.insert(
-        serde_yaml::Value::String("project_slug".into()),
-        serde_yaml::Value::String("owner/repo".into()),
+        "project_slug".into(),
+        serde_json::Value::String("owner/repo".into()),
     );
     tracker.insert(
-        serde_yaml::Value::String("project_number".into()),
-        serde_yaml::Value::Number(1.into()),
+        "project_number".into(),
+        serde_json::Value::Number(1.into()),
     );
     tracker.insert(
-        serde_yaml::Value::String("endpoint".into()),
-        serde_yaml::Value::String(endpoint.into()),
+        "endpoint".into(),
+        serde_json::Value::String(endpoint.into()),
     );
     raw.insert(
-        serde_yaml::Value::String("tracker".into()),
-        serde_yaml::Value::Mapping(tracker),
+        "tracker".into(),
+        serde_json::Value::Object(tracker),
     );
     ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into())
 }
@@ -207,6 +207,119 @@ async fn test_graphql_error_response() {
     let tracker = GithubTracker::new(&config).unwrap();
     let result = tracker.fetch_candidate_issues().await;
     assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn test_move_issue_state_e2e() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(matchers::method("POST"))
+        .and(matchers::path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {
+                "organization": { "projectV2": { "id": "proj-123" } }
+            }
+        })))
+        .up_to_n_times(1)
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(matchers::method("POST"))
+        .and(matchers::path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {
+                "node": {
+                    "fields": {
+                        "nodes": [
+                            {
+                                "id": "field-1",
+                                "name": "Status",
+                                "options": [
+                                    { "id": "opt-1", "name": "Todo" },
+                                    { "id": "opt-2", "name": "Done" }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            }
+        })))
+        .up_to_n_times(1)
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(matchers::method("POST"))
+        .and(matchers::path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {
+                "updateProjectV2ItemFieldValue": {
+                    "projectV2Item": { "id": "item-123" }
+                }
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let config = make_config(&mock_server.uri());
+    let tracker = GithubTracker::new(&config).unwrap();
+    let issue = sympheo::tracker::model::Issue {
+        id: "issue-1".into(),
+        project_item_id: Some("item-123".into()),
+        ..Default::default()
+    };
+    assert!(tracker.move_issue_state(&issue, "Done").await.is_ok());
+}
+
+#[tokio::test]
+async fn test_add_comment_e2e() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(matchers::method("POST"))
+        .and(matchers::path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {
+                "addComment": {
+                    "commentEdge": { "node": { "id": "comment-123" } }
+                }
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let config = make_config(&mock_server.uri());
+    let tracker = GithubTracker::new(&config).unwrap();
+    let issue = sympheo::tracker::model::Issue {
+        id: "issue-1".into(),
+        node_id: Some("node-123".into()),
+        ..Default::default()
+    };
+    assert!(tracker.add_comment(&issue, "Great work!").await.is_ok());
+}
+
+#[tokio::test]
+async fn test_update_issue_body_e2e() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(matchers::method("POST"))
+        .and(matchers::path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {
+                "updateIssue": {
+                    "issue": { "id": "issue-123" }
+                }
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let config = make_config(&mock_server.uri());
+    let tracker = GithubTracker::new(&config).unwrap();
+    let issue = sympheo::tracker::model::Issue {
+        id: "issue-1".into(),
+        node_id: Some("node-123".into()),
+        ..Default::default()
+    };
+    assert!(tracker.update_issue_body(&issue, "Updated body text").await.is_ok());
 }
 
 #[tokio::test]

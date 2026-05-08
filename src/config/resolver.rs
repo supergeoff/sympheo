@@ -42,6 +42,10 @@ pub fn get_i64(mapping: &serde_yaml::Mapping, key: &str) -> Option<i64> {
     mapping.get(key).and_then(|v| v.as_i64())
 }
 
+pub fn get_bool(mapping: &serde_yaml::Mapping, key: &str) -> Option<bool> {
+    mapping.get(key).and_then(|v| v.as_bool())
+}
+
 pub fn get_str_list(mapping: &serde_yaml::Mapping, key: &str) -> Option<Vec<String>> {
     mapping.get(key).and_then(|v| v.as_sequence()).map(|seq| {
         seq.iter()

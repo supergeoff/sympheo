@@ -8,7 +8,7 @@ pub struct BlockerRef {
     pub state: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct Issue {
     pub id: String,
     pub identifier: String,
@@ -20,6 +20,8 @@ pub struct Issue {
     pub url: Option<String>,
     pub labels: Vec<String>,
     pub blocked_by: Vec<BlockerRef>,
+    pub node_id: Option<String>,
+    pub project_item_id: Option<String>,
     pub created_at: Option<DateTime<Utc>>,
     pub updated_at: Option<DateTime<Utc>>,
 }
@@ -65,6 +67,7 @@ pub struct LiveSession {
     pub last_reported_output_tokens: u64,
     pub last_reported_total_tokens: u64,
     pub turn_count: u32,
+    pub pr_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -138,6 +141,16 @@ pub struct WorkspaceInfo {
     pub created_now: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct PullRequest {
+    pub id: String,
+    pub url: String,
+    pub title: String,
+    pub state: String,
+    pub head_branch: String,
+    pub base_branch: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,8 +172,7 @@ mod tests {
                 identifier: Some("TEST-2".into()),
                 state: Some("in progress".into()),
             }],
-            created_at: None,
-            updated_at: None,
+            ..Default::default()
         };
         let terminal = vec!["closed".into(), "done".into()];
         assert!(issue.is_blocked(&terminal));
@@ -183,8 +195,7 @@ mod tests {
                 identifier: Some("TEST-2".into()),
                 state: Some("Closed".into()),
             }],
-            created_at: None,
-            updated_at: None,
+            ..Default::default()
         };
         let terminal = vec!["closed".into(), "done".into()];
         assert!(!issue.is_blocked(&terminal));
@@ -203,8 +214,7 @@ mod tests {
             url: None,
             labels: vec![],
             blocked_by: vec![],
-            created_at: None,
-            updated_at: None,
+            ..Default::default()
         };
         let terminal = vec!["closed".into()];
         assert!(!issue.is_blocked(&terminal));
@@ -227,8 +237,7 @@ mod tests {
                 identifier: Some("TEST-2".into()),
                 state: None,
             }],
-            created_at: None,
-            updated_at: None,
+            ..Default::default()
         };
         let terminal = vec!["closed".into()];
         assert!(!issue.is_blocked(&terminal));
@@ -258,8 +267,7 @@ mod tests {
                     state: Some("in progress".into()),
                 },
             ],
-            created_at: None,
-            updated_at: None,
+            ..Default::default()
         };
         let terminal = vec!["closed".into(), "done".into()];
         assert!(issue.is_blocked(&terminal));

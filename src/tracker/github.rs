@@ -6,6 +6,10 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
 use serde_json::json;
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+pub mod mutations;
 
 pub struct GithubTracker {
     client: reqwest::Client,
@@ -13,6 +17,9 @@ pub struct GithubTracker {
     repo: String,
     project_number: i64,
     endpoint: String,
+    project_id: Mutex<Option<String>>,
+    field_cache: Mutex<HashMap<String, (String, HashMap<String, String>)>>,
+    fetch_blocked_by: bool,
 }
 
 impl GithubTracker {
@@ -57,6 +64,9 @@ impl GithubTracker {
             repo: parts[1].to_string(),
             project_number,
             endpoint: config.tracker_endpoint(),
+            project_id: Mutex::new(None),
+            field_cache: Mutex::new(HashMap::new()),
+            fetch_blocked_by: config.fetch_blocked_by(),
         })
     }
 
@@ -143,6 +153,15 @@ impl GithubTracker {
                           }
                         }
                       }
+                      linkedItems(first: 20) {
+                        nodes {
+                          ... on Issue {
+                            id
+                            number
+                            state
+                          }
+                        }
+                      }
                     }
                     pageInfo { hasNextPage endCursor }
                   }
@@ -177,6 +196,15 @@ impl GithubTracker {
                           ... on ProjectV2ItemFieldSingleSelectValue {
                             field { ... on ProjectV2FieldCommon { name } }
                             name
+                          }
+                        }
+                      }
+                      linkedItems(first: 20) {
+                        nodes {
+                          ... on Issue {
+                            id
+                            number
+                            state
                           }
                         }
                       }
@@ -301,6 +329,28 @@ impl GithubTracker {
                 .to_lowercase()
         });
 
+        let node_id = content.get("id").and_then(|n| n.as_str()).map(|s| s.to_string());
+        let project_item_id = item.get("id").and_then(|n| n.as_str()).map(|s| s.to_string());
+
+        let blocked_by = if self.fetch_blocked_by {
+            item.get("linkedItems")
+                .and_then(|l| l.get("nodes"))
+                .and_then(|n| n.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|node| {
+                            let id = node.get("id").and_then(|n| n.as_str()).map(|s| s.to_string());
+                            let number = node.get("number").and_then(|n| n.as_i64()).map(|n| n.to_string());
+                            let state = node.get("state").and_then(|s| s.as_str()).map(|s| s.to_lowercase());
+                            Some(crate::tracker::model::BlockerRef { id, identifier: number, state })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            vec![]
+        };
+
         Some(Issue {
             id: number.to_string(),
             identifier: format!("{}-{}", self.repo.to_uppercase(), number),
@@ -314,7 +364,9 @@ impl GithubTracker {
                 .and_then(|u| u.as_str())
                 .map(|s| s.to_string()),
             labels,
-            blocked_by: vec![],
+            blocked_by,
+            node_id,
+            project_item_id,
             created_at: content
                 .get("createdAt")
                 .and_then(|s| s.as_str())
@@ -627,5 +679,17 @@ impl IssueTracker for GithubTracker {
             .filter(|issue| ids.contains(&issue.id))
             .collect();
         Ok(issues)
+    }
+
+    async fn move_issue_state(&self, issue: &Issue, new_state: &str) -> Result<(), SympheoError> {
+        self.move_issue_state(issue, new_state).await
+    }
+
+    async fn add_comment(&self, issue: &Issue, body: &str) -> Result<(), SympheoError> {
+        self.add_comment(issue, body).await
+    }
+
+    async fn update_issue_body(&self, issue: &Issue, body: &str) -> Result<(), SympheoError> {
+        self.update_issue_body(issue, body).await
     }
 }

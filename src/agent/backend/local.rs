@@ -7,9 +7,12 @@ use crate::tracker::model::Issue;
 use crate::workspace::manager::WorkspaceManager;
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
+use tracing::Instrument;
 
 pub struct LocalBackend {
     command: String,
@@ -25,6 +28,56 @@ impl LocalBackend {
             workspace_manager: WorkspaceManager::new(config)?,
         })
     }
+
+    async fn probe_opencode(&self, workspace_path: &Path) -> Result<(), SympheoError> {
+        let probe_file = workspace_path.join(".sympheo_probe.txt");
+        tokio::fs::write(&probe_file, "__sympheo_probe__").await
+            .map_err(|e| SympheoError::AgentRunnerError(format!("probe write failed: {e}")))?;
+
+        let mut cmd = Command::new("bash");
+        cmd.arg("-lc");
+        let probe_cmd = format!(
+            r#"PROMPT=$(cat "{}"); {} "$PROMPT" --format json --dir "{}" --dangerously-skip-permissions"#,
+            shell_escape(&probe_file.to_string_lossy()),
+            self.command,
+            shell_escape(&workspace_path.to_string_lossy())
+        );
+        cmd.arg(&probe_cmd);
+        cmd.current_dir(workspace_path);
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+
+        let mut child = cmd.spawn()
+            .map_err(|e| SympheoError::AgentRunnerError(format!("probe spawn failed: {e}")))?;
+
+        let probe_result = timeout(Duration::from_secs(10), async {
+            let stderr = child.stderr.take()
+                .ok_or_else(|| SympheoError::AgentRunnerError("probe missing stderr".into()))?;
+            let reader = BufReader::new(stderr);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let trimmed = line.trim();
+                if trimmed.contains("Usage:") || trimmed.starts_with("--") || trimmed.contains("error: unknown") {
+                    return Err(SympheoError::AgentRunnerError(
+                        "OpenCode rejected arguments — check prompt length or special characters".into()
+                    ));
+                }
+            }
+            Ok(())
+        }).await;
+
+        let _ = child.start_kill();
+        let _ = tokio::fs::remove_file(&probe_file).await;
+
+        match probe_result {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(e),
+            Err(_) => {
+                tracing::warn!("opencode pre-flight probe timed out, proceeding anyway");
+                Ok(())
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -35,150 +88,185 @@ impl AgentBackend for LocalBackend {
         prompt: &str,
         session_id: Option<&str>,
         workspace_path: &Path,
+        cancelled: Arc<AtomicBool>,
     ) -> Result<(TurnResult, tokio::sync::mpsc::Receiver<AgentEvent>), SympheoError> {
-        self.workspace_manager
-            .validate_inside_root(workspace_path)?;
-
-        // Write prompt to a temp file to avoid shell escaping and ARG_MAX issues
-        let prompt_file = workspace_path.join(format!(".sympheo_prompt_{}.txt", issue.id));
-        tokio::fs::write(&prompt_file, prompt).await
-            .map_err(|e| SympheoError::AgentRunnerError(format!("failed to write prompt file: {e}")))?;
-
-        let mut cmd = Command::new("bash");
-        cmd.arg("-lc");
-
-        let mut opencode_cmd = format!(
-            r#"PROMPT=$(cat "{}"); {} "$PROMPT" --format json --dir "{}" --dangerously-skip-permissions"#,
-            shell_escape(&prompt_file.to_string_lossy()),
-            self.command,
-            shell_escape(&workspace_path.to_string_lossy())
-        );
-        if let Some(sid) = session_id {
-            opencode_cmd.push_str(&format!(" --session {}", shell_escape(sid)));
-        }
-        cmd.arg(&opencode_cmd);
-        cmd.current_dir(workspace_path);
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
-
-        // Run in a new process group so we can kill the entire tree reliably
-        unsafe {
-            cmd.pre_exec(|| {
-                libc::setpgid(0, 0);
-                Ok(())
-            });
-        }
-
-        tracing::info!(
+        let sid = session_id.unwrap_or("new");
+        let span = tracing::info_span!(
+            "opencode_turn",
             issue_id = %issue.id,
             issue_identifier = %issue.identifier,
-            "launching opencode agent (local backend)"
+            session_id = %sid,
         );
-        tracing::debug!(command = %opencode_cmd, "local backend command");
+        let span_clone = span.clone();
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| SympheoError::AgentRunnerError(format!("spawn failed: {e}")))?;
+        async move {
+            self.workspace_manager
+                .validate_inside_root(workspace_path)?;
 
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| SympheoError::AgentRunnerError("missing stdout".into()))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| SympheoError::AgentRunnerError("missing stderr".into()))?;
+            let sanitized = sanitize_prompt_for_opencode(prompt);
+            tracing::debug!(prompt_len = sanitized.len(), "prompt length");
 
-        // Spawn stderr reader task to capture agent diagnostic output
-        let issue_id_for_stderr = issue.id.clone();
-        let stderr_handle = tokio::spawn(async move {
-            let stderr_reader = BufReader::new(stderr);
-            let mut stderr_lines = stderr_reader.lines();
-            while let Ok(Some(line)) = stderr_lines.next_line().await {
-                let trimmed = line.trim();
-                if !trimmed.is_empty() {
-                    tracing::warn!(
-                        issue_id = %issue_id_for_stderr,
-                        target = "opencode::stderr",
-                        "{}",
-                        trimmed
-                    );
-                }
+            // Pre-flight probe
+            self.probe_opencode(workspace_path).await?;
+
+            // Write prompt to a temp file to avoid shell escaping and ARG_MAX issues
+            let prompt_file = workspace_path.join(format!(".sympheo_prompt_{}.txt", issue.id));
+            tokio::fs::write(&prompt_file, &sanitized).await
+                .map_err(|e| SympheoError::AgentRunnerError(format!("failed to write prompt file: {e}")))?;
+
+            let mut cmd = Command::new("bash");
+            cmd.arg("-lc");
+
+            let mut opencode_cmd = format!(
+                r#"PROMPT=$(cat "{}"); {} "$PROMPT" --format json --dir "{}" --dangerously-skip-permissions"#,
+                shell_escape(&prompt_file.to_string_lossy()),
+                self.command,
+                shell_escape(&workspace_path.to_string_lossy())
+            );
+            if let Some(sid) = session_id {
+                opencode_cmd.push_str(&format!(" --session {}", shell_escape(sid)));
             }
-        });
+            cmd.arg(&opencode_cmd);
+            cmd.current_dir(workspace_path);
+            cmd.stdout(Stdio::piped());
+            cmd.stderr(Stdio::piped());
 
-        let reader = BufReader::new(stdout);
-        let mut lines = reader.lines();
+            // Run in a new process group so we can kill the entire tree reliably
+            unsafe {
+                cmd.pre_exec(|| {
+                    libc::setpgid(0, 0);
+                    Ok(())
+                });
+            }
 
-        let (event_tx, event_rx) = tokio::sync::mpsc::channel(100);
+            tracing::info!("launching opencode agent (local backend)");
+            tracing::debug!(command = %opencode_cmd, "local backend command");
 
-        let mut current_session: Option<String> = None;
-        let mut current_turn: Option<String> = None;
-        let mut accumulated_text = String::new();
-        let mut tokens: Option<TokenInfo> = None;
-        let mut success = false;
+            let mut child = cmd
+                .spawn()
+                .map_err(|e| SympheoError::AgentRunnerError(format!("spawn failed: {e}")))?;
 
-        let read_result = timeout(self.turn_timeout, async {
-            while let Ok(Some(line)) = lines.next_line().await {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                if let Some(event) = parse_event_line(&line) {
-                    match &event {
-                        AgentEvent::StepStart { session_id, part, .. } => {
-                            current_session = Some(session_id.clone());
-                            current_turn = Some(part.message_id.clone());
-                            tracing::debug!(session = %part.session_id, message = %part.message_id, "step_start");
+            // Track PID and start cancellation watchdog
+            let child_pid = Arc::new(AtomicU32::new(child.id().unwrap_or(0)));
+            let child_pid_watch = child_pid.clone();
+            let cancelled_watch = cancelled.clone();
+            let _watchdog = tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    if cancelled_watch.load(Ordering::Relaxed) {
+                        let pid = child_pid_watch.load(Ordering::Relaxed);
+                        if pid != 0 {
+                            let pgid = pid as i32;
+                            unsafe {
+                                let _ = libc::killpg(pgid, libc::SIGKILL);
+                                let _ = libc::kill(pgid, libc::SIGKILL);
+                            }
                         }
-                        AgentEvent::Text { part, .. } => {
-                            accumulated_text.push_str(&part.text);
-                        }
-                        AgentEvent::StepFinish { part, .. } => {
-                            tokens = part.tokens.clone();
-                            success = part.reason == "stop" || part.reason == "tool-calls";
-                            tracing::info!(
-                                reason = %part.reason,
-                                success,
-                                "step_finish"
-                            );
-                        }
-                        _ => {}
+                        break;
                     }
-                    let _ = event_tx.send(event).await;
                 }
-            }
-        })
-        .await;
+            });
 
-        if read_result.is_err() {
-            drop(event_tx);
+            let stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| SympheoError::AgentRunnerError("missing stdout".into()))?;
+            let stderr = child
+                .stderr
+                .take()
+                .ok_or_else(|| SympheoError::AgentRunnerError("missing stderr".into()))?;
+
+            // Spawn stderr reader task to capture agent diagnostic output
+            let stderr_span = tracing::info_span!(parent: span_clone, "opencode_stderr");
+            let stderr_handle = tokio::spawn(async move {
+                let stderr_reader = BufReader::new(stderr);
+                let mut stderr_lines = stderr_reader.lines();
+                while let Ok(Some(line)) = stderr_lines.next_line().await {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        tracing::warn!(target = "opencode::stderr", "{}", trimmed);
+                    }
+                }
+            }.instrument(stderr_span));
+
+            let reader = BufReader::new(stdout);
+            let mut lines = reader.lines();
+
+            let (event_tx, event_rx) = tokio::sync::mpsc::channel(100);
+
+            let mut current_session: Option<String> = None;
+            let mut current_turn: Option<String> = None;
+            let mut accumulated_text = String::new();
+            let mut tokens: Option<TokenInfo> = None;
+            let mut success = false;
+
+            let read_result = timeout(self.turn_timeout, async {
+                while let Ok(Some(line)) = lines.next_line().await {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    if let Some(event) = parse_event_line(&line) {
+                        tracing::debug!(event = ?event, "parsed agent event");
+                        match &event {
+                            AgentEvent::StepStart { session_id, part, .. } => {
+                                current_session = Some(session_id.clone());
+                                current_turn = Some(part.message_id.clone());
+                                tracing::debug!(session = %part.session_id, message = %part.message_id, "step_start");
+                            }
+                            AgentEvent::Text { part, .. } => {
+                                accumulated_text.push_str(&part.text);
+                            }
+                            AgentEvent::StepFinish { part, .. } => {
+                                tokens = part.tokens.clone();
+                                success = part.reason == "stop" || part.reason == "tool-calls";
+                                tracing::info!(
+                                    reason = %part.reason,
+                                    success,
+                                    session_id = %part.session_id,
+                                    message_id = %part.message_id,
+                                    "step_finish"
+                                );
+                            }
+                            _ => {}
+                        }
+                        let _ = event_tx.send(event).await;
+                    } else {
+                        tracing::warn!(raw = %line, "failed to parse event line");
+                    }
+                }
+            })
+            .await;
+
+            if read_result.is_err() {
+                drop(event_tx);
+                kill_process_group(&mut child);
+                let _ = stderr_handle.abort();
+                let _ = tokio::fs::remove_file(&prompt_file).await;
+                return Err(SympheoError::AgentTurnTimeout);
+            }
+
+            // Terminate the process since the turn is complete
+            // opencode run may not exit on its own after step_finish
             kill_process_group(&mut child);
             let _ = stderr_handle.abort();
+            // Attempt to reap the process without blocking the result
+            let _ = timeout(Duration::from_secs(5), child.wait()).await;
             let _ = tokio::fs::remove_file(&prompt_file).await;
-            return Err(SympheoError::AgentTurnTimeout);
-        }
 
-        // Terminate the process since the turn is complete
-        // opencode run may not exit on its own after step_finish
-        kill_process_group(&mut child);
-        let _ = stderr_handle.abort();
-        // Attempt to reap the process without blocking the result
-        let _ = timeout(Duration::from_secs(5), child.wait()).await;
-        let _ = tokio::fs::remove_file(&prompt_file).await;
+            let sid = current_session.unwrap_or_else(|| issue.id.clone());
+            let tid = current_turn.unwrap_or_else(|| "turn-1".into());
 
-        let sid = current_session.unwrap_or_else(|| issue.id.clone());
-        let tid = current_turn.unwrap_or_else(|| "turn-1".into());
-
-        Ok((
-            TurnResult {
-                session_id: sid.clone(),
-                turn_id: tid,
-                success,
-                text: accumulated_text,
-                tokens,
-            },
-            event_rx,
-        ))
+            Ok((
+                TurnResult {
+                    session_id: sid.clone(),
+                    turn_id: tid,
+                    success,
+                    text: accumulated_text,
+                    tokens,
+                },
+                event_rx,
+            ))
+        }.instrument(span).await
     }
 }
 
@@ -212,6 +300,13 @@ fn shell_escape(s: &str) -> String {
         .replace(']', "\\]")
         .replace('\n', "\\n")
 }
+
+fn sanitize_prompt_for_opencode(prompt: &str) -> String {
+    let re = regex::Regex::new(r"(?m)^--[a-z0-9-]+$").unwrap();
+    re.replace_all(prompt, |caps: &regex::Captures| format!("`{}`", &caps[0]))
+        .to_string()
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -284,10 +379,9 @@ mod tests {
             url: None,
             labels: vec![],
             blocked_by: vec![],
-            created_at: None,
-            updated_at: None,
+            ..Default::default()
         };
-        let result = backend.run_turn(&issue, "prompt", None, &tmp).await.map(|(tr, _rx)| tr);
+        let result = backend.run_turn(&issue, "prompt", None, &tmp, std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))).await.map(|(tr, _rx)| tr);
         assert!(
             matches!(result, Err(SympheoError::AgentTurnTimeout)),
             "expected AgentTurnTimeout, got {:?}",
@@ -338,10 +432,9 @@ mod tests {
             url: None,
             labels: vec![],
             blocked_by: vec![],
-            created_at: None,
-            updated_at: None,
+            ..Default::default()
         };
-        let result = backend.run_turn(&issue, "prompt", None, &tmp).await.unwrap().0;
+        let result = backend.run_turn(&issue, "prompt", None, &tmp, std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))).await.unwrap().0;
         assert!(result.success);
         assert_eq!(result.text, "hello");
         assert_eq!(result.session_id, "sess-1");
@@ -396,10 +489,9 @@ mod tests {
             url: None,
             labels: vec![],
             blocked_by: vec![],
-            created_at: None,
-            updated_at: None,
+            ..Default::default()
         };
-        let result = backend.run_turn(&issue, "prompt", None, &tmp).await.unwrap().0;
+        let result = backend.run_turn(&issue, "prompt", None, &tmp, std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))).await.unwrap().0;
         assert!(!result.success);
         assert_eq!(result.text, "hello");
         let _ = std::fs::remove_dir_all(&tmp);
@@ -447,10 +539,9 @@ mod tests {
             url: None,
             labels: vec![],
             blocked_by: vec![],
-            created_at: None,
-            updated_at: None,
+            ..Default::default()
         };
-        let result = backend.run_turn(&issue, "prompt", Some("existing-session"), &tmp).await.unwrap().0;
+        let result = backend.run_turn(&issue, "prompt", Some("existing-session"), &tmp, std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))).await.unwrap().0;
         assert!(result.success);
         assert_eq!(result.text, "hello");
         let _ = std::fs::remove_dir_all(&tmp);
@@ -483,10 +574,9 @@ mod tests {
             url: None,
             labels: vec![],
             blocked_by: vec![],
-            created_at: None,
-            updated_at: None,
+            ..Default::default()
         };
-        let result = backend.run_turn(&issue, "prompt", None, Path::new("/etc")).await;
+        let result = backend.run_turn(&issue, "prompt", None, Path::new("/etc"), std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))).await;
         assert!(matches!(result, Err(SympheoError::WorkspaceError(_))));
         let _ = std::fs::remove_dir_all(&tmp);
     }

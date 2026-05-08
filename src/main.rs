@@ -98,30 +98,115 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Startup terminal workspace cleanup
     let tracker = Arc::new(GithubTracker::new(&config)?);
-    let terminal_states = config.terminal_states();
-    match tracker.fetch_issues_by_states(&terminal_states).await {
-        Ok(issues) => {
-            use sympheo::workspace::manager::WorkspaceManager;
-            let wm = WorkspaceManager::new(&config)?;
-            let runner = sympheo::agent::runner::AgentRunner::new(&config);
-            for issue in issues {
-                if let Ok(ref r) = runner {
-                    let ws_path = wm.workspace_path(&issue.identifier);
-                    if let Err(e) = r.cleanup_workspace(&ws_path).await {
-                        warn!(error = %e, issue_identifier = %issue.identifier, "startup cleanup daytona sandbox failed");
+    let _terminal_states = config.terminal_states();
+    let _active_states = config.active_states();
+    let tracker_for_cleanup = tracker.clone();
+    let config_for_cleanup = config.clone();
+
+    async fn do_cleanup(
+        tracker: &GithubTracker,
+        config: &ServiceConfig,
+        active_states: &[String],
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        let issues = tracker.fetch_issues_by_states(&config.terminal_states()).await?;
+        use sympheo::workspace::manager::WorkspaceManager;
+        let wm = WorkspaceManager::new(config)?;
+        let runner = sympheo::agent::runner::AgentRunner::new(config);
+        let mut cleaned = 0;
+        for issue in issues {
+            if let Ok(ref r) = runner {
+                let ws_path = wm.workspace_path(&issue.identifier);
+                if let Err(e) = r.cleanup_workspace(&ws_path).await {
+                    warn!(error = %e, issue_identifier = %issue.identifier, "startup cleanup daytona sandbox failed");
+                }
+            }
+            wm.remove_workspace(&issue.identifier, config.hook_script("before_remove").as_deref())
+                .await;
+            cleaned += 1;
+        }
+        // Orphan directory enumeration
+        let root = config.workspace_root()?;
+        let mut entries = tokio::fs::read_dir(&root).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with("SYMPHEO-") {
+                let identifier = name_str.strip_prefix("SYMPHEO-").unwrap_or("").to_string();
+                if identifier.is_empty() {
+                    continue;
+                }
+                // Check if this issue is active
+                if let Ok(issue_states) = tracker.fetch_issue_states_by_ids(&[identifier.clone()]).await {
+                    if let Some(issue) = issue_states.into_iter().next() {
+                        if active_states.iter().any(|s| s == &issue.state.to_lowercase()) {
+                            continue;
+                        }
                     }
                 }
-                wm.remove_workspace(&issue.identifier, config.hook_script("before_remove").as_deref())
-                    .await;
+                let _ = tokio::fs::remove_dir_all(entry.path()).await;
+                cleaned += 1;
             }
         }
+        Ok(cleaned)
+    }
+
+    let active_states_vec = config.active_states();
+    match do_cleanup(&tracker, &config, &active_states_vec).await {
+        Ok(count) => {
+            info!(cleaned = %count, "startup terminal cleanup completed");
+        }
         Err(e) => {
-            warn!(error = %e, "startup terminal cleanup failed");
+            warn!(error = %e, "startup terminal cleanup failed, scheduling background retry");
+            let tracker_retry = tracker_for_cleanup.clone();
+            let config_retry = config_for_cleanup.clone();
+            let active_states_retry = active_states_vec.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(300));
+                loop {
+                    interval.tick().await;
+                    match do_cleanup(&tracker_retry, &config_retry, &active_states_retry).await {
+                        Ok(count) => {
+                            info!(cleaned = %count, "background terminal cleanup completed");
+                            break;
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "background terminal cleanup failed, retrying in 5 minutes");
+                        }
+                    }
+                }
+            });
         }
     }
 
-    let orchestrator = Arc::new(Orchestrator::new(config.clone(), tracker, skills)?);
+    let git_adapter: Arc<dyn sympheo::git::GitAdapter> = Arc::new(sympheo::git::LocalGitAdapter::new());
+    let orchestrator = Arc::new(Orchestrator::new(config.clone(), tracker, skills, Some(git_adapter.clone()))?);
     let state = orchestrator.state.clone();
+
+    // Global graceful shutdown handler
+    let state_for_shutdown = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            warn!(error = %e, "ctrl_c handler error");
+            return;
+        }
+        info!("shutdown signal received, terminating child processes");
+        let st = state_for_shutdown.read().await;
+        for (issue_id, entry) in st.running.iter() {
+            if let Some(pid) = entry.session.as_ref().and_then(|s| s.agent_pid) {
+                let pgid = pid as i32;
+                unsafe {
+                    let _ = libc::killpg(pgid, libc::SIGTERM);
+                }
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                unsafe {
+                    let _ = libc::killpg(pgid, libc::SIGKILL);
+                    let _ = libc::kill(pgid, libc::SIGKILL);
+                }
+                info!(issue_id = %issue_id, pid = %pid, "sent SIGKILL to agent process");
+            }
+        }
+        std::process::exit(0);
+    });
 
     // Optional HTTP server
     let resolved_port = cli.port.or(config.server_port());

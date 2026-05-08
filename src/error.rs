@@ -61,6 +61,9 @@ pub enum SympheoError {
 
     #[error("daytona api error: {0}")]
     DaytonaApiError(String),
+
+    #[error("git error: {0}")]
+    GitError(String),
 }
 
 impl From<std::io::Error> for SympheoError {
@@ -154,6 +157,10 @@ mod tests {
         assert_eq!(
             format!("{}", SympheoError::DaytonaApiError("api".into())),
             "daytona api error: api"
+        );
+        assert_eq!(
+            format!("{}", SympheoError::GitError("merge conflict".into())),
+            "git error: merge conflict"
         );
     }
 

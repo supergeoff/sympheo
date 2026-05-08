@@ -12,6 +12,8 @@ pub struct RunningEntry {
     pub retry_attempt: Option<u32>,
     pub turn_count: u32,
     pub cancelled: Arc<AtomicBool>,
+    pub stagnation_counter: u32,
+    pub last_state_change_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl RunningEntry {
@@ -136,13 +138,14 @@ mod tests {
                     url: None,
                     labels: vec![],
                     blocked_by: vec![],
-                    created_at: None,
-                    updated_at: None,
+                    ..Default::default()
                 },
                 session: None,
                 started_at: chrono::Utc::now(),
                 retry_attempt: None,
                 turn_count: 0,
+                stagnation_counter: 0,
+                last_state_change_at: chrono::Utc::now(),
                 cancelled: Arc::new(AtomicBool::new(false)),
             },
         );
@@ -166,13 +169,14 @@ mod tests {
                     url: None,
                     labels: vec![],
                     blocked_by: vec![],
-                    created_at: None,
-                    updated_at: None,
+                    ..Default::default()
                 },
                 session: None,
                 started_at: chrono::Utc::now(),
                 retry_attempt: None,
                 turn_count: 0,
+                stagnation_counter: 0,
+                last_state_change_at: chrono::Utc::now(),
                 cancelled: Arc::new(AtomicBool::new(false)),
             },
         );
@@ -197,13 +201,14 @@ mod tests {
                         url: None,
                         labels: vec![],
                         blocked_by: vec![],
-                        created_at: None,
-                        updated_at: None,
+                        ..Default::default()
                     },
                     session: None,
                     started_at: chrono::Utc::now(),
                     retry_attempt: None,
                     turn_count: 0,
+                stagnation_counter: 0,
+                last_state_change_at: chrono::Utc::now(),
                     cancelled: Arc::new(AtomicBool::new(false)),
                 },
             );
@@ -227,13 +232,14 @@ mod tests {
                 url: None,
                 labels: vec![],
                 blocked_by: vec![],
-                created_at: None,
-                updated_at: None,
+                ..Default::default()
             },
             session: None,
             started_at: chrono::Utc::now(),
             retry_attempt: None,
             turn_count: 0,
+                stagnation_counter: 0,
+                last_state_change_at: chrono::Utc::now(),
             cancelled: Arc::new(AtomicBool::new(false)),
         };
         assert!(!entry.is_cancelled());

@@ -85,6 +85,12 @@ impl ServiceConfig {
             .and_then(|m| resolver::get_i64(m, "project_number"))
     }
 
+    pub fn fetch_blocked_by(&self) -> bool {
+        self.tracker()
+            .and_then(|m| resolver::get_bool(m, "fetch_blocked_by"))
+            .unwrap_or(false)
+    }
+
     pub fn active_states(&self) -> Vec<String> {
         self.tracker()
             .and_then(|m| resolver::get_str_list(m, "active_states"))
@@ -136,6 +142,17 @@ impl ServiceConfig {
         self.hooks().and_then(|m| resolver::get_string(m, name))
     }
 
+    pub fn workspace_repo_url(&self) -> Option<String> {
+        self.workspace().and_then(|m| resolver::get_string(m, "repo_url"))
+    }
+
+    pub fn workspace_git_reset_strategy(&self) -> String {
+        self.workspace()
+            .and_then(|m| resolver::get_string(m, "git_reset_strategy"))
+            .unwrap_or_else(|| "stash".to_string())
+            .to_lowercase()
+    }
+
     pub fn hook_timeout_ms(&self) -> u64 {
         self.hooks()
             .and_then(|m| resolver::get_i64(m, "timeout_ms"))
@@ -155,6 +172,21 @@ impl ServiceConfig {
             .and_then(|m| resolver::get_i64(m, "max_turns"))
             .unwrap_or(20)
             .max(1) as u32
+    }
+
+    pub fn max_turns_per_state(&self) -> std::collections::HashMap<String, u32> {
+        self.agent()
+            .and_then(|m| resolver::get_string_map(m, "max_turns_per_state"))
+            .map(|map| {
+                map.iter()
+                    .filter_map(|(k, v)| {
+                        let key = k.as_str()?.to_lowercase();
+                        let val = v.as_i64()? as u32;
+                        Some((key, val.max(1)))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub fn max_retry_backoff_ms(&self) -> u64 {

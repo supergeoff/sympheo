@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod config;
 pub mod error;
+pub mod git;
 pub mod orchestrator;
 pub mod server;
 pub mod skills;

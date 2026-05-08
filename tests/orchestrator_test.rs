@@ -72,8 +72,7 @@ fn make_issue(id: &str, identifier: &str, state: &str) -> Issue {
         url: None,
         labels: vec![],
         blocked_by: vec![],
-        created_at: None,
-        updated_at: None,
+        ..Default::default()
     }
 }
 
@@ -85,7 +84,7 @@ async fn test_orchestrator_tick_no_candidates() {
         by_states: vec![],
         by_ids: vec![],
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new()).unwrap();
+    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
     orch.tick().await;
 
     let state = orch.state.read().await;
@@ -102,7 +101,7 @@ async fn test_orchestrator_tick_dispatches_eligible_issue() {
         by_states: vec![],
         by_ids: vec![],
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new()).unwrap();
+    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
     orch.tick().await;
 
     let state = orch.state.read().await;
@@ -126,7 +125,7 @@ async fn test_orchestrator_tick_skips_blocked_todo() {
         by_states: vec![],
         by_ids: vec![],
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new()).unwrap();
+    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
     orch.tick().await;
 
     let state = orch.state.read().await;
@@ -143,7 +142,7 @@ async fn test_orchestrator_tick_skips_terminal_issue() {
         by_states: vec![],
         by_ids: vec![],
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new()).unwrap();
+    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
     orch.tick().await;
 
     let state = orch.state.read().await;
@@ -174,7 +173,7 @@ async fn test_orchestrator_tick_respects_concurrency_limit() {
         by_states: vec![],
         by_ids: vec![],
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new()).unwrap();
+    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
     orch.tick().await;
 
     let state = orch.state.read().await;
@@ -189,7 +188,7 @@ async fn test_orchestrator_reload_config() {
         by_states: vec![],
         by_ids: vec![],
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new()).unwrap();
+    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
 
     let mut new_raw = serde_yaml::Mapping::new();
     let mut polling = serde_yaml::Mapping::new();
@@ -227,7 +226,7 @@ async fn test_orchestrator_handle_worker_exit_normal() {
         by_states: vec![],
         by_ids: vec![],
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new()).unwrap();
+    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
 
     {
         let mut state = orch.state.write().await;
@@ -240,6 +239,8 @@ async fn test_orchestrator_handle_worker_exit_normal() {
                 retry_attempt: None,
                 turn_count: 0,
                 cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                stagnation_counter: 0,
+                last_state_change_at: chrono::Utc::now(),
             },
         );
         state.claimed.insert("1".into());
@@ -261,7 +262,7 @@ async fn test_orchestrator_handle_worker_exit_error() {
         by_states: vec![],
         by_ids: vec![],
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new()).unwrap();
+    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
 
     {
         let mut state = orch.state.write().await;
@@ -274,6 +275,8 @@ async fn test_orchestrator_handle_worker_exit_error() {
                 retry_attempt: Some(2),
                 turn_count: 0,
                 cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                stagnation_counter: 0,
+                last_state_change_at: chrono::Utc::now(),
             },
         );
         state.claimed.insert("1".into());
@@ -296,7 +299,7 @@ async fn test_orchestrator_process_retries_no_due() {
         by_states: vec![],
         by_ids: vec![],
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new()).unwrap();
+    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
     orch.process_retries().await;
 
     let state = orch.state.read().await;
@@ -311,7 +314,7 @@ async fn test_orchestrator_process_retries_due_released() {
         by_states: vec![],
         by_ids: vec![],
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new()).unwrap();
+    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
 
     {
         let mut state = orch.state.write().await;
@@ -344,7 +347,7 @@ async fn test_orchestrator_tick_dispatches_non_todo() {
         by_states: vec![],
         by_ids: vec![],
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new()).unwrap();
+    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
     orch.tick().await;
 
     let state = orch.state.read().await;
@@ -371,7 +374,7 @@ async fn test_orchestrator_tick_worker_completes() {
         by_states: vec![],
         by_ids: vec![],
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new()).unwrap();
+    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
     orch.tick().await;
 
     // Wait for worker to spawn and fail quickly
@@ -402,7 +405,7 @@ async fn test_orchestrator_tick_reconcile_stall_with_session() {
         by_states: vec![],
         by_ids: vec![],
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new()).unwrap();
+    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
 
     {
         let mut state = orch.state.write().await;
@@ -425,11 +428,14 @@ async fn test_orchestrator_tick_reconcile_stall_with_session() {
                     last_reported_output_tokens: 0,
                     last_reported_total_tokens: 0,
                     turn_count: 1,
+                    pr_url: None,
                 }),
                 started_at: chrono::Utc::now(),
                 retry_attempt: None,
                 turn_count: 0,
                 cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                stagnation_counter: 0,
+                last_state_change_at: chrono::Utc::now(),
             },
         );
         state.claimed.insert("1".into());
@@ -450,7 +456,7 @@ async fn test_orchestrator_tick_reconcile_terminal() {
         by_states: vec![],
         by_ids: vec![issue.clone()],
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new()).unwrap();
+    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
 
     {
         let mut state = orch.state.write().await;
@@ -463,6 +469,8 @@ async fn test_orchestrator_tick_reconcile_terminal() {
                 retry_attempt: None,
                 turn_count: 0,
                 cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                stagnation_counter: 0,
+                last_state_change_at: chrono::Utc::now(),
             },
         );
         state.claimed.insert("1".into());
@@ -484,7 +492,7 @@ async fn test_orchestrator_tick_reconcile_active() {
         by_states: vec![],
         by_ids: vec![issue.clone()],
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new()).unwrap();
+    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
 
     {
         let mut state = orch.state.write().await;
@@ -497,6 +505,8 @@ async fn test_orchestrator_tick_reconcile_active() {
                 retry_attempt: None,
                 turn_count: 0,
                 cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                stagnation_counter: 0,
+                last_state_change_at: chrono::Utc::now(),
             },
         );
         state.claimed.insert("1".into());
@@ -518,7 +528,7 @@ async fn test_orchestrator_tick_reconcile_unknown_state() {
         by_states: vec![],
         by_ids: vec![issue.clone()],
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new()).unwrap();
+    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
 
     {
         let mut state = orch.state.write().await;
@@ -531,6 +541,8 @@ async fn test_orchestrator_tick_reconcile_unknown_state() {
                 retry_attempt: None,
                 turn_count: 0,
                 cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                stagnation_counter: 0,
+                last_state_change_at: chrono::Utc::now(),
             },
         );
         state.claimed.insert("1".into());

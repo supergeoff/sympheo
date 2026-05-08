@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use crate::agent::backend::AgentBackend;
 use crate::agent::parser::{parse_line, OpencodeEvent, TokenInfo, TurnResult};
 use crate::config::typed::ServiceConfig;
-use crate::error::SymphonyError;
+use crate::error::SympheoError;
 use crate::tracker::model::Issue;
 use crate::workspace::manager::WorkspaceManager;
 use std::path::Path;
@@ -18,7 +18,7 @@ pub struct LocalBackend {
 }
 
 impl LocalBackend {
-    pub fn new(config: &ServiceConfig) -> Result<Self, SymphonyError> {
+    pub fn new(config: &ServiceConfig) -> Result<Self, SympheoError> {
         Ok(Self {
             command: config.codex_command(),
             turn_timeout: Duration::from_millis(config.codex_turn_timeout_ms()),
@@ -35,7 +35,7 @@ impl AgentBackend for LocalBackend {
         prompt: &str,
         session_id: Option<&str>,
         workspace_path: &Path,
-    ) -> Result<TurnResult, SymphonyError> {
+    ) -> Result<TurnResult, SympheoError> {
         self.workspace_manager
             .validate_inside_root(workspace_path)?;
 
@@ -43,7 +43,7 @@ impl AgentBackend for LocalBackend {
         cmd.arg("-lc");
 
         let mut opencode_cmd = format!(
-            r#"{} "{}" --format json --dir {}"#,
+            r#"{} "{}" --format json --dir {} --dangerously-skip-permissions"#,
             self.command,
             shell_escape(prompt),
             shell_escape(&workspace_path.to_string_lossy())
@@ -64,16 +64,16 @@ impl AgentBackend for LocalBackend {
 
         let mut child = cmd
             .spawn()
-            .map_err(|e| SymphonyError::AgentRunnerError(format!("spawn failed: {e}")))?;
+            .map_err(|e| SympheoError::AgentRunnerError(format!("spawn failed: {e}")))?;
 
         let stdout = child
             .stdout
             .take()
-            .ok_or_else(|| SymphonyError::AgentRunnerError("missing stdout".into()))?;
+            .ok_or_else(|| SympheoError::AgentRunnerError("missing stdout".into()))?;
         let stderr = child
             .stderr
             .take()
-            .ok_or_else(|| SymphonyError::AgentRunnerError("missing stderr".into()))?;
+            .ok_or_else(|| SympheoError::AgentRunnerError("missing stderr".into()))?;
 
         // Spawn stderr reader task to capture agent diagnostic output
         let issue_id_for_stderr = issue.id.clone();
@@ -135,7 +135,7 @@ impl AgentBackend for LocalBackend {
         if read_result.is_err() {
             let _ = child.kill().await;
             let _ = stderr_handle.abort();
-            return Err(SymphonyError::AgentTurnTimeout);
+            return Err(SympheoError::AgentTurnTimeout);
         }
 
         // Terminate the process since the turn is complete
@@ -163,4 +163,283 @@ fn shell_escape(s: &str) -> String {
         .replace('"', "\\\"")
         .replace('$', "\\$")
         .replace('`', "\\`")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_shell_escape_backslash() {
+        assert_eq!(shell_escape("a\\b"), "a\\\\b");
+    }
+
+    #[test]
+    fn test_shell_escape_quote() {
+        assert_eq!(shell_escape("say \"hi\""), "say \\\"hi\\\"");
+    }
+
+    #[test]
+    fn test_shell_escape_dollar() {
+        assert_eq!(shell_escape("$HOME"), "\\$HOME");
+    }
+
+    #[test]
+    fn test_shell_escape_backtick() {
+        assert_eq!(shell_escape("`cmd`"), "\\`cmd\\`");
+    }
+
+    #[test]
+    fn test_shell_escape_combined() {
+        assert_eq!(shell_escape("\\\"$`"), "\\\\\\\"\\$\\`");
+    }
+
+    #[tokio::test]
+    async fn test_local_backend_run_turn_timeout() {
+        let mut raw = serde_yaml::Mapping::new();
+        let mut workspace = serde_yaml::Mapping::new();
+        let tmp = std::env::temp_dir().join(format!("local_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        workspace.insert(
+            serde_yaml::Value::String("root".into()),
+            serde_yaml::Value::String(tmp.to_string_lossy().to_string()),
+        );
+        raw.insert(
+            serde_yaml::Value::String("workspace".into()),
+            serde_yaml::Value::Mapping(workspace),
+        );
+        let mut codex = serde_yaml::Mapping::new();
+        codex.insert(
+            serde_yaml::Value::String("command".into()),
+            serde_yaml::Value::String(r#"bash -c "sleep 1000""#.into()),
+        );
+        codex.insert(
+            serde_yaml::Value::String("turn_timeout_ms".into()),
+            serde_yaml::Value::Number(200.into()),
+        );
+        raw.insert(
+            serde_yaml::Value::String("codex".into()),
+            serde_yaml::Value::Mapping(codex),
+        );
+        let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
+        let backend = LocalBackend::new(&config).unwrap();
+        let issue = crate::tracker::model::Issue {
+            id: "1".into(),
+            identifier: "TEST-1".into(),
+            title: "test".into(),
+            description: None,
+            priority: None,
+            state: "todo".into(),
+            branch_name: None,
+            url: None,
+            labels: vec![],
+            blocked_by: vec![],
+            created_at: None,
+            updated_at: None,
+        };
+        let result = backend.run_turn(&issue, "prompt", None, &tmp).await;
+        assert!(
+            matches!(result, Err(SympheoError::AgentTurnTimeout)),
+            "expected AgentTurnTimeout, got {:?}",
+            result
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn test_local_backend_run_turn_success() {
+        let mut raw = serde_yaml::Mapping::new();
+        let mut workspace = serde_yaml::Mapping::new();
+        let tmp = std::env::temp_dir().join(format!("local_test3_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        workspace.insert(
+            serde_yaml::Value::String("root".into()),
+            serde_yaml::Value::String(tmp.to_string_lossy().to_string()),
+        );
+        raw.insert(
+            serde_yaml::Value::String("workspace".into()),
+            serde_yaml::Value::Mapping(workspace),
+        );
+        let mut codex = serde_yaml::Mapping::new();
+        // Print valid opencode events and exit
+        codex.insert(
+            serde_yaml::Value::String("command".into()),
+            serde_yaml::Value::String(r#"bash -c 'echo "{\"type\":\"step_start\",\"timestamp\":1,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p1\",\"messageID\":\"msg-1\",\"sessionID\":\"sess-1\",\"type\":\"step\"}}"; echo "{\"type\":\"text\",\"timestamp\":2,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p2\",\"messageID\":\"msg-2\",\"sessionID\":\"sess-1\",\"type\":\"text\",\"text\":\"hello\"}}"; echo "{\"type\":\"step_finish\",\"timestamp\":3,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p3\",\"reason\":\"stop\",\"messageID\":\"msg-3\",\"sessionID\":\"sess-1\",\"type\":\"finish\",\"tokens\":{\"total\":100,\"input\":50,\"output\":40,\"reasoning\":10,\"cache\":{\"write\":5,\"read\":3}}}}"'"#.into()),
+        );
+        codex.insert(
+            serde_yaml::Value::String("turn_timeout_ms".into()),
+            serde_yaml::Value::Number(5000.into()),
+        );
+        raw.insert(
+            serde_yaml::Value::String("codex".into()),
+            serde_yaml::Value::Mapping(codex),
+        );
+        let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
+        let backend = LocalBackend::new(&config).unwrap();
+        let issue = crate::tracker::model::Issue {
+            id: "1".into(),
+            identifier: "TEST-1".into(),
+            title: "test".into(),
+            description: None,
+            priority: None,
+            state: "todo".into(),
+            branch_name: None,
+            url: None,
+            labels: vec![],
+            blocked_by: vec![],
+            created_at: None,
+            updated_at: None,
+        };
+        let result = backend.run_turn(&issue, "prompt", None, &tmp).await.unwrap();
+        assert!(result.success);
+        assert_eq!(result.text, "hello");
+        assert_eq!(result.session_id, "sess-1");
+        assert_eq!(result.turn_id, "msg-1");
+        assert!(result.tokens.is_some());
+        let tokens = result.tokens.unwrap();
+        assert_eq!(tokens.total, 100);
+        assert_eq!(tokens.input, 50);
+        assert_eq!(tokens.output, 40);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn test_local_backend_run_turn_no_finish() {
+        let mut raw = serde_yaml::Mapping::new();
+        let mut workspace = serde_yaml::Mapping::new();
+        let tmp = std::env::temp_dir().join(format!("local_test4_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        workspace.insert(
+            serde_yaml::Value::String("root".into()),
+            serde_yaml::Value::String(tmp.to_string_lossy().to_string()),
+        );
+        raw.insert(
+            serde_yaml::Value::String("workspace".into()),
+            serde_yaml::Value::Mapping(workspace),
+        );
+        let mut codex = serde_yaml::Mapping::new();
+        // Print step_start and text but no step_finish
+        codex.insert(
+            serde_yaml::Value::String("command".into()),
+            serde_yaml::Value::String(r#"bash -c 'echo "{\"type\":\"step_start\",\"timestamp\":1,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p1\",\"messageID\":\"msg-1\",\"sessionID\":\"sess-1\",\"type\":\"step\"}}"; echo "{\"type\":\"text\",\"timestamp\":2,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p2\",\"messageID\":\"msg-2\",\"sessionID\":\"sess-1\",\"type\":\"text\",\"text\":\"hello\"}}"'"#.into()),
+        );
+        codex.insert(
+            serde_yaml::Value::String("turn_timeout_ms".into()),
+            serde_yaml::Value::Number(5000.into()),
+        );
+        raw.insert(
+            serde_yaml::Value::String("codex".into()),
+            serde_yaml::Value::Mapping(codex),
+        );
+        let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
+        let backend = LocalBackend::new(&config).unwrap();
+        let issue = crate::tracker::model::Issue {
+            id: "1".into(),
+            identifier: "TEST-1".into(),
+            title: "test".into(),
+            description: None,
+            priority: None,
+            state: "todo".into(),
+            branch_name: None,
+            url: None,
+            labels: vec![],
+            blocked_by: vec![],
+            created_at: None,
+            updated_at: None,
+        };
+        let result = backend.run_turn(&issue, "prompt", None, &tmp).await.unwrap();
+        assert!(!result.success);
+        assert_eq!(result.text, "hello");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn test_local_backend_run_turn_with_session_and_stderr() {
+        let mut raw = serde_yaml::Mapping::new();
+        let mut workspace = serde_yaml::Mapping::new();
+        let tmp = std::env::temp_dir().join(format!("local_test5_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        workspace.insert(
+            serde_yaml::Value::String("root".into()),
+            serde_yaml::Value::String(tmp.to_string_lossy().to_string()),
+        );
+        raw.insert(
+            serde_yaml::Value::String("workspace".into()),
+            serde_yaml::Value::Mapping(workspace),
+        );
+        let mut codex = serde_yaml::Mapping::new();
+        // Print valid opencode events to stdout and something to stderr
+        codex.insert(
+            serde_yaml::Value::String("command".into()),
+            serde_yaml::Value::String(r#"bash -c 'echo "stderr msg" >&2; sleep 0.2; echo "{\"type\":\"step_start\",\"timestamp\":1,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p1\",\"messageID\":\"msg-1\",\"sessionID\":\"sess-1\",\"type\":\"step\"}}"; echo "{\"type\":\"text\",\"timestamp\":2,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p2\",\"messageID\":\"msg-2\",\"sessionID\":\"sess-1\",\"type\":\"text\",\"text\":\"hello\"}}"; echo "{\"type\":\"step_finish\",\"timestamp\":3,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p3\",\"reason\":\"stop\",\"messageID\":\"msg-3\",\"sessionID\":\"sess-1\",\"type\":\"finish\",\"tokens\":{\"total\":100,\"input\":50,\"output\":40,\"reasoning\":10,\"cache\":{\"write\":5,\"read\":3}}}}"'"#.into()),
+        );
+        codex.insert(
+            serde_yaml::Value::String("turn_timeout_ms".into()),
+            serde_yaml::Value::Number(5000.into()),
+        );
+        raw.insert(
+            serde_yaml::Value::String("codex".into()),
+            serde_yaml::Value::Mapping(codex),
+        );
+        let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
+        let backend = LocalBackend::new(&config).unwrap();
+        let issue = crate::tracker::model::Issue {
+            id: "1".into(),
+            identifier: "TEST-1".into(),
+            title: "test".into(),
+            description: None,
+            priority: None,
+            state: "todo".into(),
+            branch_name: None,
+            url: None,
+            labels: vec![],
+            blocked_by: vec![],
+            created_at: None,
+            updated_at: None,
+        };
+        let result = backend.run_turn(&issue, "prompt", Some("existing-session"), &tmp).await.unwrap();
+        assert!(result.success);
+        assert_eq!(result.text, "hello");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn test_local_backend_validate_outside_root() {
+        let mut raw = serde_yaml::Mapping::new();
+        let mut workspace = serde_yaml::Mapping::new();
+        let tmp = std::env::temp_dir().join(format!("local_test2_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        workspace.insert(
+            serde_yaml::Value::String("root".into()),
+            serde_yaml::Value::String(tmp.to_string_lossy().to_string()),
+        );
+        raw.insert(
+            serde_yaml::Value::String("workspace".into()),
+            serde_yaml::Value::Mapping(workspace),
+        );
+        let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
+        let backend = LocalBackend::new(&config).unwrap();
+        let issue = crate::tracker::model::Issue {
+            id: "1".into(),
+            identifier: "TEST-1".into(),
+            title: "test".into(),
+            description: None,
+            priority: None,
+            state: "todo".into(),
+            branch_name: None,
+            url: None,
+            labels: vec![],
+            blocked_by: vec![],
+            created_at: None,
+            updated_at: None,
+        };
+        let result = backend.run_turn(&issue, "prompt", None, Path::new("/etc")).await;
+        assert!(matches!(result, Err(SympheoError::WorkspaceError(_))));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

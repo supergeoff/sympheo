@@ -1,7 +1,7 @@
 use std::path::PathBuf;
-use symphonie::config::typed::ServiceConfig;
-use symphonie::tracker::model::Issue;
-use symphonie::workspace::manager::WorkspaceManager;
+use sympheo::config::typed::ServiceConfig;
+use sympheo::tracker::model::Issue;
+use sympheo::workspace::manager::WorkspaceManager;
 
 #[test]
 fn test_workflow_loader_with_front_matter() {
@@ -12,7 +12,7 @@ tracker:
 ---
 Do the work
 "#;
-    let wf = symphonie::workflow::parser::parse(content).unwrap();
+    let wf = sympheo::workflow::parser::parse(content).unwrap();
     assert!(!wf.config.is_empty());
     assert_eq!(wf.prompt_template, "Do the work");
 }
@@ -58,7 +58,7 @@ fn test_issue_is_blocked() {
         url: None,
         labels: vec![],
         blocked_by: vec![
-            symphonie::tracker::model::BlockerRef {
+            sympheo::tracker::model::BlockerRef {
                 id: Some("2".into()),
                 identifier: Some("TEST-2".into()),
                 state: Some("in progress".into()),
@@ -72,7 +72,7 @@ fn test_issue_is_blocked() {
 
     let unblocked = Issue {
         blocked_by: vec![
-            symphonie::tracker::model::BlockerRef {
+            sympheo::tracker::model::BlockerRef {
                 id: Some("2".into()),
                 identifier: Some("TEST-2".into()),
                 state: Some("closed".into()),
@@ -87,11 +87,11 @@ fn test_issue_is_blocked() {
 fn test_config_var_resolution() {
     std::env::set_var("TEST_SYM_KEY", "secret123");
     assert_eq!(
-        symphonie::config::resolver::resolve_value("$TEST_SYM_KEY"),
+        sympheo::config::resolver::resolve_value("$TEST_SYM_KEY"),
         "secret123"
     );
     assert_eq!(
-        symphonie::config::resolver::resolve_value("plain"),
+        sympheo::config::resolver::resolve_value("plain"),
         "plain"
     );
 }

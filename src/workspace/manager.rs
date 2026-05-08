@@ -1,5 +1,5 @@
 use crate::config::typed::ServiceConfig;
-use crate::error::SymphonyError;
+use crate::error::SympheoError;
 use crate::tracker::model::WorkspaceInfo;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -12,7 +12,7 @@ pub struct WorkspaceManager {
 }
 
 impl WorkspaceManager {
-    pub fn new(config: &ServiceConfig) -> Result<Self, SymphonyError> {
+    pub fn new(config: &ServiceConfig) -> Result<Self, SympheoError> {
         let root = config.workspace_root()?;
         Ok(Self {
             root,
@@ -42,11 +42,11 @@ impl WorkspaceManager {
         &self,
         identifier: &str,
         after_create_hook: Option<&str>,
-    ) -> Result<WorkspaceInfo, SymphonyError> {
+    ) -> Result<WorkspaceInfo, SympheoError> {
         let path = self.workspace_path(identifier);
         let created_now = if !path.exists() {
             tokio::fs::create_dir_all(&path).await.map_err(|e| {
-                SymphonyError::WorkspaceError(format!("failed to create workspace dir: {e}"))
+                SympheoError::WorkspaceError(format!("failed to create workspace dir: {e}"))
             })?;
             true
         } else {
@@ -71,7 +71,7 @@ impl WorkspaceManager {
         name: &str,
         script: &str,
         cwd: &Path,
-    ) -> Result<(), SymphonyError> {
+    ) -> Result<(), SympheoError> {
         tracing::info!(hook = name, cwd = %cwd.display(), "running workspace hook");
         let mut child = Command::new("bash")
             .arg("-lc")
@@ -80,7 +80,7 @@ impl WorkspaceManager {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| SymphonyError::HookFailed(format!("spawn failed for {name}: {e}")))?;
+            .map_err(|e| SympheoError::HookFailed(format!("spawn failed for {name}: {e}")))?;
 
         let result = timeout(self.hook_timeout, child.wait()).await;
         match result {
@@ -88,17 +88,17 @@ impl WorkspaceManager {
                 if status.success() {
                     Ok(())
                 } else {
-                    Err(SymphonyError::HookFailed(format!(
+                    Err(SympheoError::HookFailed(format!(
                         "hook {name} exited with {status}"
                     )))
                 }
             }
-            Ok(Err(e)) => Err(SymphonyError::HookFailed(format!(
+            Ok(Err(e)) => Err(SympheoError::HookFailed(format!(
                 "hook {name} wait error: {e}"
             ))),
             Err(_) => {
                 let _ = child.kill().await;
-                Err(SymphonyError::HookFailed(format!(
+                Err(SympheoError::HookFailed(format!(
                     "hook {name} timed out after {:?}",
                     self.hook_timeout
                 )))
@@ -120,14 +120,267 @@ impl WorkspaceManager {
         }
     }
 
-    pub fn validate_inside_root(&self, path: &Path) -> Result<(), SymphonyError> {
+    pub fn validate_inside_root(&self, path: &Path) -> Result<(), SympheoError> {
         let root = self.root.canonicalize().unwrap_or_else(|_| self.root.clone());
         let target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         if !target.starts_with(&root) {
-            return Err(SymphonyError::WorkspaceError(
+            return Err(SympheoError::WorkspaceError(
                 "workspace path is outside root".into(),
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn test_config_with_root(root: PathBuf) -> ServiceConfig {
+        let mut raw = serde_yaml::Mapping::new();
+        let mut workspace = serde_yaml::Mapping::new();
+        workspace.insert(
+            serde_yaml::Value::String("root".into()),
+            serde_yaml::Value::String(root.to_string_lossy().to_string()),
+        );
+        raw.insert(
+            serde_yaml::Value::String("workspace".into()),
+            serde_yaml::Value::Mapping(workspace),
+        );
+        ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into())
+    }
+
+    fn unique_tmp(suffix: &str) -> PathBuf {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("sympheo_test_{}_{}", suffix, ts))
+    }
+
+    #[test]
+    fn test_sanitize_identifier_basic() {
+        assert_eq!(WorkspaceManager::sanitize_identifier("ABC-123"), "ABC-123");
+        assert_eq!(WorkspaceManager::sanitize_identifier("feat/new_thing"), "feat_new_thing");
+        assert_eq!(WorkspaceManager::sanitize_identifier("bug: crash!"), "bug__crash_");
+    }
+
+    #[test]
+    fn test_sanitize_identifier_preserves_dots() {
+        assert_eq!(WorkspaceManager::sanitize_identifier("v1.2.3"), "v1.2.3");
+    }
+
+    #[test]
+    fn test_workspace_path() {
+        let tmp = unique_tmp("ws");
+        let config = test_config_with_root(tmp.clone());
+        let mgr = WorkspaceManager::new(&config).unwrap();
+        let path = mgr.workspace_path("ISSUE-42");
+        assert_eq!(path, tmp.join("ISSUE-42"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn test_create_or_reuse_new() {
+        let tmp = unique_tmp("new");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let config = test_config_with_root(tmp.clone());
+        let mgr = WorkspaceManager::new(&config).unwrap();
+        let info = mgr.create_or_reuse("NEW-1", None).await.unwrap();
+        assert!(info.path.exists());
+        assert!(info.created_now);
+        assert_eq!(info.workspace_key, "NEW-1");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn test_create_or_reuse_existing() {
+        let tmp = unique_tmp("exist");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let config = test_config_with_root(tmp.clone());
+        let mgr = WorkspaceManager::new(&config).unwrap();
+        let info1 = mgr.create_or_reuse("EXIST-1", None).await.unwrap();
+        assert!(info1.created_now);
+        let info2 = mgr.create_or_reuse("EXIST-1", None).await.unwrap();
+        assert!(!info2.created_now);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn test_create_or_reuse_with_after_create_hook() {
+        let tmp = unique_tmp("hook");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let config = test_config_with_root(tmp.clone());
+        let mgr = WorkspaceManager::new(&config).unwrap();
+        let info = mgr.create_or_reuse("HOOK-1", Some("echo hello > created")).await.unwrap();
+        assert!(info.created_now);
+        assert!(info.path.join("created").exists());
+        let contents = std::fs::read_to_string(info.path.join("created")).unwrap();
+        assert_eq!(contents.trim(), "hello");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn test_run_hook_success() {
+        let tmp = unique_tmp("hook_ok");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let config = test_config_with_root(tmp.clone());
+        let mgr = WorkspaceManager::new(&config).unwrap();
+        let result = mgr.run_hook("test", "echo hello", &tmp).await;
+        assert!(result.is_ok());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn test_run_hook_failure() {
+        let tmp = unique_tmp("hook_fail");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let config = test_config_with_root(tmp.clone());
+        let mgr = WorkspaceManager::new(&config).unwrap();
+        let result = mgr.run_hook("test", "exit 1", &tmp).await;
+        assert!(result.is_err());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn test_run_hook_timeout() {
+        let tmp = unique_tmp("hook_timeout");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut raw = serde_yaml::Mapping::new();
+        let mut workspace = serde_yaml::Mapping::new();
+        workspace.insert(
+            serde_yaml::Value::String("root".into()),
+            serde_yaml::Value::String(tmp.to_string_lossy().to_string()),
+        );
+        raw.insert(
+            serde_yaml::Value::String("workspace".into()),
+            serde_yaml::Value::Mapping(workspace),
+        );
+        let mut hooks = serde_yaml::Mapping::new();
+        hooks.insert(
+            serde_yaml::Value::String("timeout_ms".into()),
+            serde_yaml::Value::Number(100.into()),
+        );
+        raw.insert(
+            serde_yaml::Value::String("hooks".into()),
+            serde_yaml::Value::Mapping(hooks),
+        );
+        let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
+        let mgr = WorkspaceManager::new(&config).unwrap();
+        let result = mgr.run_hook("test", "sleep 5", &tmp).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("timed out"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn test_remove_workspace() {
+        let tmp = unique_tmp("rem");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let config = test_config_with_root(tmp.clone());
+        let mgr = WorkspaceManager::new(&config).unwrap();
+        let info = mgr.create_or_reuse("REM-1", None).await.unwrap();
+        assert!(info.path.exists());
+        mgr.remove_workspace("REM-1", None).await;
+        assert!(!info.path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_remove_workspace_with_before_remove_hook() {
+        let tmp = unique_tmp("remhook");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let config = test_config_with_root(tmp.clone());
+        let mgr = WorkspaceManager::new(&config).unwrap();
+        let info = mgr.create_or_reuse("REM-2", None).await.unwrap();
+        assert!(info.path.exists());
+        mgr.remove_workspace("REM-2", Some("echo bye")).await;
+        assert!(!info.path.exists());
+    }
+
+    #[test]
+    fn test_validate_inside_root_ok() {
+        let tmp = unique_tmp("validate");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let config = test_config_with_root(tmp.clone());
+        let mgr = WorkspaceManager::new(&config).unwrap();
+        mgr.validate_inside_root(&tmp.join("sub")).unwrap();
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn test_create_or_reuse_dir_create_error() {
+        let tmp = unique_tmp("readonly_parent");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let readonly = tmp.join("readonly");
+        std::fs::create_dir_all(&readonly).unwrap();
+        let mut perms = std::fs::metadata(&readonly).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&readonly, perms).unwrap();
+
+        let config = test_config_with_root(readonly.clone());
+        let mgr = WorkspaceManager::new(&config).unwrap();
+        let result = mgr.create_or_reuse("FAIL-1", None).await;
+        assert!(result.is_err());
+
+        let mut perms = std::fs::metadata(&readonly).unwrap().permissions();
+        perms.set_readonly(false);
+        std::fs::set_permissions(&readonly, perms).unwrap();
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn test_remove_workspace_hook_failure() {
+        let tmp = unique_tmp("remhookfail");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let config = test_config_with_root(tmp.clone());
+        let mgr = WorkspaceManager::new(&config).unwrap();
+        let info = mgr.create_or_reuse("REM-FAIL", None).await.unwrap();
+        assert!(info.path.exists());
+        mgr.remove_workspace("REM-FAIL", Some("exit 1")).await;
+        assert!(!info.path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_remove_workspace_rm_error() {
+        let tmp = unique_tmp("rmfail");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let config = test_config_with_root(tmp.clone());
+        let mgr = WorkspaceManager::new(&config).unwrap();
+        let info = mgr.create_or_reuse("RM-FAIL", None).await.unwrap();
+        assert!(info.path.exists());
+        // Create a file inside
+        std::fs::write(info.path.join("file.txt"), "data").unwrap();
+        // Make workspace read-only to block removal of contents
+        let mut perms = std::fs::metadata(&info.path).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&info.path, perms).unwrap();
+        mgr.remove_workspace("RM-FAIL", None).await;
+        // The workspace should still exist because removal failed
+        assert!(info.path.exists());
+        // Cleanup: restore permissions
+        let mut perms = std::fs::metadata(&info.path).unwrap().permissions();
+        perms.set_readonly(false);
+        std::fs::set_permissions(&info.path, perms).unwrap();
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_validate_inside_root_fail() {
+        let tmp = unique_tmp("validate_fail");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let config = test_config_with_root(tmp.clone());
+        let mgr = WorkspaceManager::new(&config).unwrap();
+        let result = mgr.validate_inside_root(Path::new("/etc"));
+        assert!(result.is_err());
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

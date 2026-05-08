@@ -12,22 +12,22 @@ use tokio::sync::RwLock;
 
 pub type SharedState = Arc<RwLock<OrchestratorState>>;
 
-pub async fn start_server(port: u16, state: SharedState) -> Result<(), crate::error::SymphonyError> {
+pub async fn start_server(port: u16, state: SharedState) -> Result<(), crate::error::SympheoError> {
     let app = Router::new()
         .route("/", get(dashboard))
         .route("/api/v1/state", get(api_state))
         .route("/api/v1/refresh", post(api_refresh))
-        .route("/api/v1/:issue_identifier", get(api_issue))
+        .route("/api/v1/{issue_identifier}", get(api_issue))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port))
         .await
-        .map_err(|e| crate::error::SymphonyError::Io(e.to_string()))?;
+        .map_err(|e| crate::error::SympheoError::Io(e.to_string()))?;
     let actual_port = listener.local_addr().map(|a| a.port()).unwrap_or(port);
     tracing::info!(port = actual_port, "HTTP server listening");
     axum::serve(listener, app)
         .await
-        .map_err(|e| crate::error::SymphonyError::Io(e.to_string()))?;
+        .map_err(|e| crate::error::SympheoError::Io(e.to_string()))?;
     Ok(())
 }
 

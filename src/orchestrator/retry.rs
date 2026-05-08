@@ -26,3 +26,97 @@ pub fn schedule_retry(
         error,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn make_config() -> ServiceConfig {
+        ServiceConfig::new(serde_yaml::Mapping::new(), PathBuf::from("/tmp"), "".into())
+    }
+
+    #[test]
+    fn test_schedule_retry_continuation() {
+        let config = make_config();
+        let before = Instant::now();
+        let entry = schedule_retry(
+            "id1".into(),
+            "ISSUE-1".into(),
+            1,
+            None,
+            &config,
+            true,
+        );
+        let after = Instant::now();
+        assert_eq!(entry.issue_id, "id1");
+        assert_eq!(entry.identifier, "ISSUE-1");
+        assert_eq!(entry.attempt, 1);
+        assert!(entry.error.is_none());
+        assert!(entry.due_at >= before + Duration::from_millis(1000));
+        assert!(entry.due_at <= after + Duration::from_millis(1000));
+    }
+
+    #[test]
+    fn test_schedule_retry_failure_first_attempt() {
+        let config = make_config();
+        let before = Instant::now();
+        let entry = schedule_retry(
+            "id1".into(),
+            "ISSUE-1".into(),
+            1,
+            Some("error".into()),
+            &config,
+            false,
+        );
+        let after = Instant::now();
+        assert_eq!(entry.attempt, 1);
+        assert_eq!(entry.error, Some("error".into()));
+        assert!(entry.due_at >= before + Duration::from_millis(10000));
+        assert!(entry.due_at <= after + Duration::from_millis(10000));
+    }
+
+    #[test]
+    fn test_schedule_retry_failure_exponential() {
+        let config = make_config();
+        let before = Instant::now();
+        let entry = schedule_retry(
+            "id1".into(),
+            "ISSUE-1".into(),
+            3,
+            Some("err".into()),
+            &config,
+            false,
+        );
+        let after = Instant::now();
+        assert!(entry.due_at >= before + Duration::from_millis(40000));
+        assert!(entry.due_at <= after + Duration::from_millis(40000));
+    }
+
+    #[test]
+    fn test_schedule_retry_max_backoff() {
+        let mut raw = serde_yaml::Mapping::new();
+        let mut agent = serde_yaml::Mapping::new();
+        agent.insert(
+            serde_yaml::Value::String("max_retry_backoff_ms".into()),
+            serde_yaml::Value::Number(15000.into()),
+        );
+        raw.insert(
+            serde_yaml::Value::String("agent".into()),
+            serde_yaml::Value::Mapping(agent),
+        );
+        let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
+        let before = Instant::now();
+        let entry = schedule_retry(
+            "id1".into(),
+            "ISSUE-1".into(),
+            10,
+            Some("err".into()),
+            &config,
+            false,
+        );
+        let after = Instant::now();
+        assert!(entry.due_at >= before + Duration::from_millis(15000));
+        assert!(entry.due_at <= after + Duration::from_millis(15000));
+    }
+}

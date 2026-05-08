@@ -1,5 +1,5 @@
 use crate::config::typed::ServiceConfig;
-use crate::error::SymphonyError;
+use crate::error::SympheoError;
 use crate::tracker::model::Issue;
 use crate::tracker::IssueTracker;
 use async_trait::async_trait;
@@ -16,31 +16,31 @@ pub struct GithubTracker {
 }
 
 impl GithubTracker {
-    pub fn new(config: &ServiceConfig) -> Result<Self, SymphonyError> {
+    pub fn new(config: &ServiceConfig) -> Result<Self, SympheoError> {
         let api_key = config
             .tracker_api_key()
-            .ok_or(SymphonyError::MissingTrackerApiKey)?;
+            .ok_or(SympheoError::MissingTrackerApiKey)?;
         let project = config
             .tracker_project_slug()
-            .ok_or(SymphonyError::MissingTrackerProjectSlug)?;
+            .ok_or(SympheoError::MissingTrackerProjectSlug)?;
         let project_number = config
             .tracker_project_number()
-            .ok_or_else(|| SymphonyError::InvalidConfiguration(
+            .ok_or_else(|| SympheoError::InvalidConfiguration(
                 "tracker.project_number is required for github projects".into(),
             ))?;
         let parts: Vec<&str> = project.split('/').collect();
         if parts.len() != 2 {
-            return Err(SymphonyError::InvalidConfiguration(
+            return Err(SympheoError::InvalidConfiguration(
                 "tracker.project_slug must be owner/repo".into(),
             ));
         }
         let mut headers = HeaderMap::new();
         let auth = HeaderValue::from_str(&format!("Bearer {api_key}"))
-            .map_err(|e| SymphonyError::InvalidConfiguration(e.to_string()))?;
+            .map_err(|e| SympheoError::InvalidConfiguration(e.to_string()))?;
         headers.insert(AUTHORIZATION, auth);
         headers.insert(
             USER_AGENT,
-            HeaderValue::from_static("symphonie/0.1.0"),
+            HeaderValue::from_static("sympheo/0.1.0"),
         );
         headers.insert(
             ACCEPT,
@@ -50,7 +50,7 @@ impl GithubTracker {
             .default_headers(headers)
             .timeout(std::time::Duration::from_secs(30))
             .build()
-            .map_err(|e| SymphonyError::TrackerApiRequest(e.to_string()))?;
+            .map_err(|e| SympheoError::TrackerApiRequest(e.to_string()))?;
         Ok(Self {
             client,
             owner: parts[0].to_string(),
@@ -64,7 +64,7 @@ impl GithubTracker {
         &self,
         query: &str,
         variables: serde_json::Value,
-    ) -> Result<serde_json::Value, SymphonyError> {
+    ) -> Result<serde_json::Value, SympheoError> {
         let body = json!({ "query": query, "variables": variables });
         let resp = self
             .client
@@ -72,20 +72,20 @@ impl GithubTracker {
             .json(&body)
             .send()
             .await
-            .map_err(|e| SymphonyError::TrackerApiRequest(e.to_string()))?;
+            .map_err(|e| SympheoError::TrackerApiRequest(e.to_string()))?;
         let status = resp.status();
         let json: serde_json::Value = resp
             .json()
             .await
-            .map_err(|e| SymphonyError::TrackerMalformedPayload(e.to_string()))?;
+            .map_err(|e| SympheoError::TrackerMalformedPayload(e.to_string()))?;
         if let Some(errors) = json.get("errors") {
-            return Err(SymphonyError::TrackerApiStatus(format!(
+            return Err(SympheoError::TrackerApiStatus(format!(
                 "GraphQL errors: {}",
                 errors
             )));
         }
         if !status.is_success() {
-            return Err(SymphonyError::TrackerApiStatus(format!(
+            return Err(SympheoError::TrackerApiStatus(format!(
                 "HTTP {}: {}",
                 status, json
             )));
@@ -93,7 +93,7 @@ impl GithubTracker {
         Ok(json["data"].clone())
     }
 
-    async fn fetch_project_items(&self) -> Result<Vec<serde_json::Value>, SymphonyError> {
+    async fn fetch_project_items(&self) -> Result<Vec<serde_json::Value>, SympheoError> {
         // Determine if owner is an organization or a user
         let org_query = r#"
             query($owner: String!, $projectNumber: Int!) {
@@ -256,9 +256,7 @@ impl GithubTracker {
 
     fn normalize_item(&self, item: &serde_json::Value) -> Option<Issue> {
         let content = item.get("content")?;
-        if content.get("number").is_none() {
-            return None;
-        }
+        content.get("number")?;
 
         let repo_name = content
             .get("repository")
@@ -329,15 +327,286 @@ impl GithubTracker {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn make_config(slug: &str, number: i64, api_key: &str) -> ServiceConfig {
+        let mut raw = serde_yaml::Mapping::new();
+        let mut tracker = serde_yaml::Mapping::new();
+        tracker.insert(
+            serde_yaml::Value::String("kind".into()),
+            serde_yaml::Value::String("github".into()),
+        );
+        tracker.insert(
+            serde_yaml::Value::String("api_key".into()),
+            serde_yaml::Value::String(api_key.into()),
+        );
+        tracker.insert(
+            serde_yaml::Value::String("project_slug".into()),
+            serde_yaml::Value::String(slug.into()),
+        );
+        tracker.insert(
+            serde_yaml::Value::String("project_number".into()),
+            serde_yaml::Value::Number(number.into()),
+        );
+        raw.insert(
+            serde_yaml::Value::String("tracker".into()),
+            serde_yaml::Value::Mapping(tracker),
+        );
+        ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into())
+    }
+
+    #[test]
+    fn test_github_tracker_new_ok() {
+        let config = make_config("owner/repo", 1, "key");
+        let tracker = GithubTracker::new(&config).unwrap();
+        assert_eq!(tracker.owner, "owner");
+        assert_eq!(tracker.repo, "repo");
+        assert_eq!(tracker.project_number, 1);
+    }
+
+    #[test]
+    fn test_github_tracker_new_invalid_slug() {
+        let config = make_config("invalid", 1, "key");
+        let result = GithubTracker::new(&config);
+        assert!(matches!(result, Err(SympheoError::InvalidConfiguration(_))));
+    }
+
+    #[test]
+    fn test_github_tracker_new_missing_api_key() {
+        let mut raw = serde_yaml::Mapping::new();
+        let mut tracker = serde_yaml::Mapping::new();
+        tracker.insert(
+            serde_yaml::Value::String("kind".into()),
+            serde_yaml::Value::String("github".into()),
+        );
+        raw.insert(
+            serde_yaml::Value::String("tracker".into()),
+            serde_yaml::Value::Mapping(tracker),
+        );
+        let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
+        let result = GithubTracker::new(&config);
+        assert!(matches!(result, Err(SympheoError::MissingTrackerApiKey)));
+    }
+
+    #[test]
+    fn test_extract_status_found() {
+        let config = make_config("owner/repo", 1, "key");
+        let tracker = GithubTracker::new(&config).unwrap();
+        let item = serde_json::json!({
+            "fieldValues": {
+                "nodes": [
+                    {
+                        "field": { "name": "Status" },
+                        "name": "In Progress"
+                    },
+                    {
+                        "field": { "name": "Priority" },
+                        "name": "High"
+                    }
+                ]
+            }
+        });
+        assert_eq!(tracker.extract_status(&item), Some("in progress".to_string()));
+    }
+
+    #[test]
+    fn test_extract_status_no_match() {
+        let config = make_config("owner/repo", 1, "key");
+        let tracker = GithubTracker::new(&config).unwrap();
+        let item = serde_json::json!({
+            "fieldValues": {
+                "nodes": [
+                    {
+                        "field": { "name": "Priority" },
+                        "name": "High"
+                    }
+                ]
+            }
+        });
+        assert_eq!(tracker.extract_status(&item), None);
+    }
+
+    #[test]
+    fn test_extract_status_missing_field_values() {
+        let config = make_config("owner/repo", 1, "key");
+        let tracker = GithubTracker::new(&config).unwrap();
+        let item = serde_json::json!({});
+        assert_eq!(tracker.extract_status(&item), None);
+    }
+
+    #[test]
+    fn test_normalize_item_ok() {
+        let config = make_config("owner/repo", 1, "key");
+        let tracker = GithubTracker::new(&config).unwrap();
+        let item = serde_json::json!({
+            "content": {
+                "number": 42,
+                "title": "Fix bug",
+                "body": "Description here",
+                "state": "OPEN",
+                "labels": { "nodes": [{ "name": "bug" }, { "name": "urgent" }] },
+                "createdAt": "2024-01-15T10:00:00Z",
+                "updatedAt": "2024-01-16T12:00:00Z",
+                "url": "https://github.com/owner/repo/issues/42",
+                "repository": { "name": "repo", "owner": { "login": "owner" } }
+            },
+            "fieldValues": {
+                "nodes": [
+                    { "field": { "name": "Status" }, "name": "In Progress" }
+                ]
+            }
+        });
+        let issue = tracker.normalize_item(&item).unwrap();
+        assert_eq!(issue.id, "42");
+        assert_eq!(issue.identifier, "REPO-42");
+        assert_eq!(issue.title, "Fix bug");
+        assert_eq!(issue.description, Some("Description here".to_string()));
+        assert_eq!(issue.state, "in progress");
+        assert_eq!(issue.labels, vec!["bug", "urgent"]);
+        assert_eq!(issue.url, Some("https://github.com/owner/repo/issues/42".to_string()));
+        assert!(issue.created_at.is_some());
+        assert!(issue.updated_at.is_some());
+    }
+
+    #[test]
+    fn test_normalize_item_wrong_repo() {
+        let config = make_config("owner/repo", 1, "key");
+        let tracker = GithubTracker::new(&config).unwrap();
+        let item = serde_json::json!({
+            "content": {
+                "number": 42,
+                "title": "Fix bug",
+                "repository": { "name": "other-repo", "owner": { "login": "owner" } }
+            }
+        });
+        assert!(tracker.normalize_item(&item).is_none());
+    }
+
+    #[test]
+    fn test_normalize_item_missing_number() {
+        let config = make_config("owner/repo", 1, "key");
+        let tracker = GithubTracker::new(&config).unwrap();
+        let item = serde_json::json!({
+            "content": {
+                "title": "Fix bug",
+                "repository": { "name": "repo", "owner": { "login": "owner" } }
+            }
+        });
+        assert!(tracker.normalize_item(&item).is_none());
+    }
+
+    #[test]
+    fn test_normalize_item_no_status_field() {
+        let config = make_config("owner/repo", 1, "key");
+        let tracker = GithubTracker::new(&config).unwrap();
+        let item = serde_json::json!({
+            "content": {
+                "number": 1,
+                "title": "T",
+                "state": "CLOSED",
+                "repository": { "name": "repo", "owner": { "login": "owner" } }
+            }
+        });
+        let issue = tracker.normalize_item(&item).unwrap();
+        assert_eq!(issue.state, "closed");
+    }
+
+    #[test]
+    fn test_normalize_item_no_body() {
+        let config = make_config("owner/repo", 1, "key");
+        let tracker = GithubTracker::new(&config).unwrap();
+        let item = serde_json::json!({
+            "content": {
+                "number": 1,
+                "title": "T",
+                "state": "OPEN",
+                "labels": { "nodes": [] },
+                "repository": { "name": "repo", "owner": { "login": "owner" } }
+            }
+        });
+        let issue = tracker.normalize_item(&item).unwrap();
+        assert_eq!(issue.description, None);
+    }
+
+    #[test]
+    fn test_normalize_item_no_labels() {
+        let config = make_config("owner/repo", 1, "key");
+        let tracker = GithubTracker::new(&config).unwrap();
+        let item = serde_json::json!({
+            "content": {
+                "number": 1,
+                "title": "T",
+                "state": "OPEN",
+                "repository": { "name": "repo", "owner": { "login": "owner" } }
+            }
+        });
+        let issue = tracker.normalize_item(&item).unwrap();
+        assert!(issue.labels.is_empty());
+    }
+
+    #[test]
+    fn test_github_tracker_new_missing_project_slug() {
+        let mut raw = serde_yaml::Mapping::new();
+        let mut tracker = serde_yaml::Mapping::new();
+        tracker.insert(
+            serde_yaml::Value::String("kind".into()),
+            serde_yaml::Value::String("github".into()),
+        );
+        tracker.insert(
+            serde_yaml::Value::String("api_key".into()),
+            serde_yaml::Value::String("key".into()),
+        );
+        tracker.insert(
+            serde_yaml::Value::String("project_number".into()),
+            serde_yaml::Value::Number(1.into()),
+        );
+        raw.insert(
+            serde_yaml::Value::String("tracker".into()),
+            serde_yaml::Value::Mapping(tracker),
+        );
+        let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
+        let result = GithubTracker::new(&config);
+        assert!(matches!(result, Err(SympheoError::MissingTrackerProjectSlug)));
+    }
+
+    #[test]
+    fn test_github_tracker_new_missing_project_number() {
+        let mut raw = serde_yaml::Mapping::new();
+        let mut tracker = serde_yaml::Mapping::new();
+        tracker.insert(
+            serde_yaml::Value::String("kind".into()),
+            serde_yaml::Value::String("github".into()),
+        );
+        tracker.insert(
+            serde_yaml::Value::String("api_key".into()),
+            serde_yaml::Value::String("key".into()),
+        );
+        tracker.insert(
+            serde_yaml::Value::String("project_slug".into()),
+            serde_yaml::Value::String("owner/repo".into()),
+        );
+        raw.insert(
+            serde_yaml::Value::String("tracker".into()),
+            serde_yaml::Value::Mapping(tracker),
+        );
+        let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
+        let result = GithubTracker::new(&config);
+        assert!(matches!(result, Err(SympheoError::InvalidConfiguration(_))));
+    }
+}
+
 #[async_trait]
 impl IssueTracker for GithubTracker {
-    async fn fetch_candidate_issues(&self) -> Result<Vec<Issue>, SymphonyError> {
+    async fn fetch_candidate_issues(&self) -> Result<Vec<Issue>, SympheoError> {
         let items = self.fetch_project_items().await?;
         let issues: Vec<Issue> = items.iter().filter_map(|i| self.normalize_item(i)).collect();
         Ok(issues)
     }
 
-    async fn fetch_issues_by_states(&self, states: &[String]) -> Result<Vec<Issue>, SymphonyError> {
+    async fn fetch_issues_by_states(&self, states: &[String]) -> Result<Vec<Issue>, SympheoError> {
         if states.is_empty() {
             return Ok(vec![]);
         }
@@ -350,7 +619,7 @@ impl IssueTracker for GithubTracker {
         Ok(issues)
     }
 
-    async fn fetch_issue_states_by_ids(&self, ids: &[String]) -> Result<Vec<Issue>, SymphonyError> {
+    async fn fetch_issue_states_by_ids(&self, ids: &[String]) -> Result<Vec<Issue>, SympheoError> {
         let items = self.fetch_project_items().await?;
         let issues: Vec<Issue> = items
             .iter()

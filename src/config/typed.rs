@@ -416,6 +416,72 @@ impl ServiceConfig {
     pub fn skill_mapping(&self) -> crate::skills::SkillMapping {
         crate::skills::SkillMapping::from_config(self)
     }
+
+    // PRD-v2 §5.2 — parse the `phases[]` block from front matter into typed
+    // Phase entries. Returns Vec::new() when the block is absent so callers
+    // that haven't migrated yet (skills-based) keep working unchanged.
+    pub fn phases(&self) -> Vec<crate::tracker::model::Phase> {
+        let arr = match self.raw.get("phases").and_then(|v| v.as_array()) {
+            Some(a) => a,
+            None => return Vec::new(),
+        };
+        arr.iter()
+            .filter_map(|v| v.as_object())
+            .map(|m| crate::tracker::model::Phase {
+                name: resolver::get_string(m, "name").unwrap_or_default(),
+                state: resolver::get_string(m, "state").unwrap_or_default(),
+                prompt: resolver::get_string(m, "prompt").unwrap_or_default(),
+                verifications: resolver::get_str_list(m, "verifications")
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|s| !s.trim().is_empty())
+                    .collect(),
+                cli_options: resolver::get_string_map(m, "cli_options").unwrap_or_default(),
+            })
+            .collect()
+    }
+
+    // PRD-v2 §5.3 — validation of the `phases[]` block:
+    //   * required fields (name, state, prompt) present and non-empty
+    //   * each phase.state belongs to tracker.active_states (case-insensitive)
+    //   * no two phases declare the same state (case-insensitive)
+    // active_states without a matching phase are NOT errors per PRD-v2 §5.3
+    // (warn at boot only); that warning is emitted by the orchestrator.
+    pub fn validate_phases(&self) -> Result<(), SympheoError> {
+        let phases = self.phases();
+        if phases.is_empty() {
+            return Ok(());
+        }
+        let active = self.active_states();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for p in &phases {
+            if p.name.trim().is_empty() {
+                return Err(SympheoError::WorkflowPhaseMissingField("name".into()));
+            }
+            if p.state.trim().is_empty() {
+                return Err(SympheoError::WorkflowPhaseMissingField("state".into()));
+            }
+            if p.prompt.trim().is_empty() {
+                return Err(SympheoError::WorkflowPhaseMissingField("prompt".into()));
+            }
+            let state_lc = p.state.to_lowercase();
+            if !active.contains(&state_lc) {
+                return Err(SympheoError::WorkflowPhaseUnknownState(p.state.clone()));
+            }
+            if !seen.insert(state_lc) {
+                return Err(SympheoError::WorkflowPhaseDuplicateState(p.state.clone()));
+            }
+        }
+        Ok(())
+    }
+
+    // Look up the Phase whose state matches `issue_state` case-insensitively.
+    pub fn phase_for_state(&self, issue_state: &str) -> Option<crate::tracker::model::Phase> {
+        let target = issue_state.to_lowercase();
+        self.phases()
+            .into_iter()
+            .find(|p| p.state.to_lowercase() == target)
+    }
 }
 
 #[cfg(test)]
@@ -1049,5 +1115,130 @@ mod tests {
             config.validate_for_dispatch(),
             Err(SympheoError::InvalidConfiguration(_))
         ));
+    }
+
+    fn phases_config(phases: serde_json::Value) -> ServiceConfig {
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut tracker = serde_json::Map::<String, serde_json::Value>::new();
+        tracker.insert(
+            "active_states".into(),
+            serde_json::Value::Array(vec![
+                serde_json::Value::String("Spec".into()),
+                serde_json::Value::String("In Progress".into()),
+                serde_json::Value::String("Review".into()),
+            ]),
+        );
+        raw.insert("tracker".into(), serde_json::Value::Object(tracker));
+        raw.insert("phases".into(), phases);
+        config_with(raw)
+    }
+
+    #[test]
+    fn test_phases_empty_when_block_absent() {
+        assert!(empty_config().phases().is_empty());
+    }
+
+    #[test]
+    fn test_phases_parses_full_entry() {
+        let cfg = phases_config(serde_json::json!([
+            {
+                "name": "build",
+                "state": "In Progress",
+                "prompt": "Implement the LLD",
+                "verifications": ["cargo fmt --all -- --check", "cargo test"],
+                "cli_options": { "permissions": { "edit": true } }
+            }
+        ]));
+        let phases = cfg.phases();
+        assert_eq!(phases.len(), 1);
+        let p = &phases[0];
+        assert_eq!(p.name, "build");
+        assert_eq!(p.state, "In Progress");
+        assert_eq!(p.prompt, "Implement the LLD");
+        assert_eq!(p.verifications.len(), 2);
+        assert!(p.cli_options.contains_key("permissions"));
+    }
+
+    #[test]
+    fn test_phases_drops_empty_string_verifications() {
+        let cfg = phases_config(serde_json::json!([
+            {
+                "name": "spec",
+                "state": "Spec",
+                "prompt": "p",
+                "verifications": ["cargo check", "  ", ""]
+            }
+        ]));
+        let phases = cfg.phases();
+        assert_eq!(phases[0].verifications, vec!["cargo check".to_string()]);
+    }
+
+    #[test]
+    fn test_validate_phases_ok_when_absent() {
+        assert!(empty_config().validate_phases().is_ok());
+    }
+
+    #[test]
+    fn test_validate_phases_ok_full() {
+        let cfg = phases_config(serde_json::json!([
+            { "name": "spec", "state": "Spec", "prompt": "go" },
+            { "name": "build", "state": "In Progress", "prompt": "go" }
+        ]));
+        assert!(cfg.validate_phases().is_ok());
+    }
+
+    #[test]
+    fn test_validate_phases_unknown_state_errors() {
+        let cfg = phases_config(serde_json::json!([
+            { "name": "x", "state": "NotInActive", "prompt": "p" }
+        ]));
+        assert!(matches!(
+            cfg.validate_phases(),
+            Err(SympheoError::WorkflowPhaseUnknownState(_))
+        ));
+    }
+
+    #[test]
+    fn test_validate_phases_duplicate_state_errors() {
+        let cfg = phases_config(serde_json::json!([
+            { "name": "a", "state": "Spec", "prompt": "p" },
+            { "name": "b", "state": "spec", "prompt": "p" }
+        ]));
+        assert!(matches!(
+            cfg.validate_phases(),
+            Err(SympheoError::WorkflowPhaseDuplicateState(_))
+        ));
+    }
+
+    #[test]
+    fn test_validate_phases_missing_name_errors() {
+        let cfg = phases_config(serde_json::json!([
+            { "name": "", "state": "Spec", "prompt": "p" }
+        ]));
+        assert!(matches!(
+            cfg.validate_phases(),
+            Err(SympheoError::WorkflowPhaseMissingField(_))
+        ));
+    }
+
+    #[test]
+    fn test_validate_phases_missing_prompt_errors() {
+        let cfg = phases_config(serde_json::json!([
+            { "name": "spec", "state": "Spec", "prompt": "" }
+        ]));
+        assert!(matches!(
+            cfg.validate_phases(),
+            Err(SympheoError::WorkflowPhaseMissingField(_))
+        ));
+    }
+
+    #[test]
+    fn test_phase_for_state_case_insensitive() {
+        let cfg = phases_config(serde_json::json!([
+            { "name": "build", "state": "In Progress", "prompt": "p" }
+        ]));
+        let p = cfg.phase_for_state("in progress").unwrap();
+        assert_eq!(p.name, "build");
+        assert!(cfg.phase_for_state("Done").is_none());
     }
 }

@@ -7,7 +7,7 @@ use crate::orchestrator::retry::schedule_retry;
 use crate::orchestrator::state::{OrchestratorState, RunningEntry};
 use crate::skills::Skill;
 use crate::tracker::IssueTracker;
-use crate::tracker::model::{AttemptStatus, Issue, LiveSession, RunAttempt};
+use crate::tracker::model::{AttemptStatus, Issue, LiveSession, Phase, RunAttempt};
 use crate::workspace::manager::WorkspaceManager;
 use chrono::Utc;
 use std::collections::HashMap;
@@ -724,8 +724,13 @@ async fn run_worker(
             .or_else(|| skills.get("default"))
             .map(|s| s.content.as_str());
 
+        // PRD-v2 §4.1 — phase is selected from the tracker state every turn,
+        // so a hot-reloaded WORKFLOW.md picks up the new phase fragment on
+        // the very next dispatch cycle without restarting in-flight workers.
+        let phase = config.phase_for_state(&issue.state);
+
         let prompt = if turn_number == 1 {
-            build_prompt_strict(config, &issue, attempt, skill_content)?
+            build_prompt_strict(config, &issue, attempt, skill_content, phase.as_ref())?
         } else {
             config.continuation_prompt()
         };
@@ -888,6 +893,33 @@ async fn run_worker(
             }
         }
 
+        // PRD-v2 §5.2.3 — after a Succeeded turn, run the phase verifications.
+        // Failure marks the turn Failed (verification_failed) and the worker
+        // returns Err so the existing retry path schedules backoff.
+        if let Some(ref ph) = phase
+            && !ph.verifications.is_empty()
+        {
+            let mut env = crate::workspace::manager::sympheo_hook_env(
+                &issue.identifier,
+                &issue.id,
+                &workspace.path,
+            );
+            env.insert("SYMPHEO_PHASE_NAME".into(), ph.name.clone());
+            let cmd_timeout = std::time::Duration::from_millis(config.hook_timeout_ms());
+            if let Err(e) = crate::workflow::verifications::run_verifications(
+                &ph.verifications,
+                &workspace.path,
+                &env,
+                cmd_timeout,
+            )
+            .await
+            {
+                let _ = runner.stop_session(&session_ctx).await;
+                attempt_record.transition(AttemptStatus::Failed);
+                return Err(e);
+            }
+        }
+
         // Refresh issue state
         let refreshed = tracker
             .fetch_issue_states_by_ids(std::slice::from_ref(&issue.id))
@@ -981,6 +1013,7 @@ fn build_prompt_strict(
     issue: &Issue,
     attempt: Option<u32>,
     skill_instructions: Option<&str>,
+    phase: Option<&Phase>,
 ) -> Result<String, SympheoError> {
     use liquid::model::Value;
     use std::collections::HashMap;
@@ -994,7 +1027,7 @@ fn build_prompt_strict(
     // Strict mode: validate root variables
     let re = regex::Regex::new(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}")
         .map_err(|e| SympheoError::TemplateParseError(e.to_string()))?;
-    let available_vars = ["issue", "attempt"];
+    let available_vars = ["issue", "attempt", "phase"];
     for cap in re.captures_iter(&template_str) {
         let var_name = cap.get(1).unwrap().as_str();
         if !available_vars.contains(&var_name) {
@@ -1022,6 +1055,19 @@ fn build_prompt_strict(
     if let Some(a) = attempt {
         globals.insert("attempt".to_string(), Value::Scalar(a.into()));
     }
+    // PRD-v2 §5.2.2 — expose `phase` to the template so the body can
+    // interpolate `{{ phase.prompt }}`, `{{ phase.name }}`, etc. Always
+    // present (empty strings when no phase matched) so templates that
+    // reference `phase.*` don't blow up during transition periods.
+    let mut phase_obj = liquid::model::Object::new();
+    let (pname, pstate, pprompt) = match phase {
+        Some(p) => (p.name.clone(), p.state.clone(), p.prompt.clone()),
+        None => (String::new(), String::new(), String::new()),
+    };
+    phase_obj.insert("name".into(), Value::Scalar(pname.into()));
+    phase_obj.insert("state".into(), Value::Scalar(pstate.into()));
+    phase_obj.insert("prompt".into(), Value::Scalar(pprompt.into()));
+    globals.insert("phase".to_string(), Value::Object(phase_obj));
 
     let output = template
         .render(&globals)
@@ -1090,7 +1136,7 @@ mod tests {
             blocked_by: vec![],
             ..Default::default()
         };
-        let prompt = build_prompt_strict(&config, &issue, None, None).unwrap();
+        let prompt = build_prompt_strict(&config, &issue, None, None, None).unwrap();
         assert_eq!(prompt, "Fix the bug");
     }
 
@@ -1115,7 +1161,7 @@ mod tests {
             blocked_by: vec![],
             ..Default::default()
         };
-        let prompt = build_prompt_strict(&config, &issue, None, None).unwrap();
+        let prompt = build_prompt_strict(&config, &issue, None, None, None).unwrap();
         assert_eq!(prompt, "You are working on an issue from the tracker.");
     }
 
@@ -1140,7 +1186,7 @@ mod tests {
             blocked_by: vec![],
             ..Default::default()
         };
-        let prompt = build_prompt_strict(&config, &issue, Some(2), None).unwrap();
+        let prompt = build_prompt_strict(&config, &issue, Some(2), None, None).unwrap();
         assert_eq!(prompt, "Attempt 2");
     }
 
@@ -1231,7 +1277,7 @@ mod tests {
             blocked_by: vec![],
             ..Default::default()
         };
-        let result = build_prompt_strict(&config, &issue, None, None);
+        let result = build_prompt_strict(&config, &issue, None, None, None);
         assert!(matches!(result, Err(SympheoError::TemplateRenderError(_))));
     }
 
@@ -1257,7 +1303,7 @@ mod tests {
             blocked_by: vec![],
             ..Default::default()
         };
-        let result = build_prompt_strict(&config, &issue, None, None);
+        let result = build_prompt_strict(&config, &issue, None, None, None);
         assert!(matches!(result, Err(SympheoError::TemplateRenderError(_))));
     }
 
@@ -1282,7 +1328,7 @@ mod tests {
             blocked_by: vec![],
             ..Default::default()
         };
-        let result = build_prompt_strict(&config, &issue, None, None);
+        let result = build_prompt_strict(&config, &issue, None, None, None);
         assert!(matches!(result, Err(SympheoError::TemplateParseError(_))));
     }
 
@@ -1307,11 +1353,70 @@ mod tests {
             blocked_by: vec![],
             ..Default::default()
         };
-        let prompt =
-            build_prompt_strict(&config, &issue, None, Some("Analyze the issue first.")).unwrap();
+        let prompt = build_prompt_strict(
+            &config,
+            &issue,
+            None,
+            Some("Analyze the issue first."),
+            None,
+        )
+        .unwrap();
         assert!(prompt.contains("Analyze the issue first."));
         assert!(prompt.contains("Fix the bug"));
         assert!(prompt.contains("---"));
+    }
+
+    // PRD-v2 §5.2.2 — `{{ phase.prompt }}` interpolated into the body.
+    #[test]
+    fn test_build_prompt_interpolates_phase() {
+        let mut raw = serde_json::Map::new();
+        raw.insert(
+            "tracker".into(),
+            serde_json::Value::Object(serde_json::Map::new()),
+        );
+        let config = ServiceConfig::new(
+            raw,
+            PathBuf::from("/tmp"),
+            "Issue: {{ issue.title }}\n{{ phase.prompt }}".into(),
+        );
+        let issue = Issue {
+            id: "1".into(),
+            identifier: "TEST-1".into(),
+            title: "bug".into(),
+            state: "in progress".into(),
+            ..Default::default()
+        };
+        let phase = Phase {
+            name: "build".into(),
+            state: "In Progress".into(),
+            prompt: "Implement the LLD then move to Review.".into(),
+            verifications: vec![],
+            cli_options: serde_json::Map::new(),
+        };
+        let prompt = build_prompt_strict(&config, &issue, None, None, Some(&phase)).unwrap();
+        assert!(prompt.contains("Issue: bug"));
+        assert!(prompt.contains("Implement the LLD then move to Review."));
+    }
+
+    // Phase var is allowed but absent at render time — should not error
+    // since it is a known root variable.
+    #[test]
+    fn test_build_prompt_phase_var_allowed_when_absent() {
+        let mut raw = serde_json::Map::new();
+        raw.insert(
+            "tracker".into(),
+            serde_json::Value::Object(serde_json::Map::new()),
+        );
+        let config =
+            ServiceConfig::new(raw, PathBuf::from("/tmp"), "Hello {{ phase.name }}".into());
+        let issue = Issue {
+            id: "1".into(),
+            identifier: "TEST-1".into(),
+            ..Default::default()
+        };
+        // No phase passed; liquid renders missing var as empty string.
+        let prompt = build_prompt_strict(&config, &issue, None, None, None).unwrap();
+        assert_eq!(prompt, "Hello ");
     }
 
     #[tokio::test]

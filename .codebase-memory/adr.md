@@ -56,6 +56,7 @@ CLI invocation extensions:
 Lifecycle extensions:
 - `LocalBackend` spawns CLI in its own process group (`setpgid(0,0)`), uses `killpg(SIGKILL)` on cancel/timeout. Process registry tracks all live PIDs and signal handlers cleanup on shutdown — no zombie agents (P3).
 - Dashboard adds `POST /api/v1/<id>/cancel` (kill switch via HTMX) and `DELETE /api/v1/retry/<id>` (drain retry queue) — beyond §13.7 baseline (P6).
+- `start_server_with_listener(listener, state)` exposed alongside `start_server(port, state)` so tests can pre-bind the kernel port without race (see ADR-010).
 
 Removed in P1:
 - `probe_opencode` pre-flight subprocess (`__sympheo_probe__` invocation): the 10s timeout fired systematically because opencode accepted the prompt. `cli.turn_timeout_ms` and `cli.stall_timeout_ms` cover the same hang detection without false positives.
@@ -148,29 +149,38 @@ Top-level Rust modules and their SPEC alignment:
 - `src/agent/{runner, parser, process_registry}.rs` — worker algorithm, event parsing, PID tracking.
 - `src/tracker/{mod, model, github, github/mutations}.rs` — `IssueTracker` trait + GitHub adapter (SPEC §11).
 - `src/skills/{mod, loader, mapper}.rs` — per-state SKILL.md loading (extension).
-- `src/server/mod.rs` — HTTP dashboard + API + kill switch (SPEC §13.7 + extensions).
+- `src/server/mod.rs` — HTTP dashboard + API + kill switch (SPEC §13.7 + extensions). Exposes both `start_server(port, state)` (used by `main.rs`) and `start_server_with_listener(listener, state)` (used by tests).
 - `src/git/{mod, adapter, local}.rs` — git workspace operations (extension).
 
 Top-level test files in `tests/`:
 - `integration_test.rs` — config/workflow integration.
 - `orchestrator_test.rs` — dispatch, reconciliation, retry.
 - `github_tracker_test.rs` — GitHub adapter against mock HTTP.
-- `server_test.rs` — HTTP API contract.
+- `server_test.rs` — HTTP API contract. Uses `bind_test_server` helper to avoid the `find_free_port` race (ADR-010).
 - `skills_test.rs` — skill loading.
 - `e2e_mock.rs` — full e2e via mock backend (zero tokens, P5).
 - `daytona_backend_test.rs` — Daytona adapter contract.
 - `real_integration.rs` — gated by `SYMPHEO_REAL_INTEGRATION=1` env (P7, §17.10).
 
-## ADR-008 — Pre-commit chain (mandatory)
+## ADR-008 — Pre-commit chain + branch / commit / memory conventions
 
 **Status:** Enforced
 **Date:** 2026-05-09
 
 Before every push, run locally: `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo check && cargo test`. The repo activates this via `.githooks/` (`git config core.hooksPath .githooks`).
 
-Conventional Commits style for PR titles (matches existing history): `fix:`, `feat:`, `chore:`, `refactor:`, `test:`, `docs:`. Branches `phase/p<N>-<slug>` or `feat/<slug>`, `docs/<slug>`, etc.
+Conventional Commits style for PR titles (matches existing history): `fix:`, `feat:`, `chore:`, `refactor:`, `test:`, `docs:`. Branches named `phase/p<N>-<slug>` for big phases or `feat/<slug>`, `docs/<slug>`, `chore/<slug>`, `fix/<slug>` otherwise.
 
-`mise.toml` is gone; project tools now in `mise.local.toml` (gitignored, contains secrets). Do NOT touch `mise.local.toml` — it is the operator's local secret-bearing tool config.
+Local tooling:
+- `mise.toml` does not exist anymore; project tools now in `mise.local.toml` (gitignored, contains operator secrets — never touch, never commit).
+- `.codebase-memory/adr.md` IS tracked (committed in PR #147). Maintain it via `mcp__codebase-memory-mcp__manage_adr` (mode=update, project=`home-supergeoff-projects-sympheo`). Each ADR update produces a doc-grade commit. The full graph (~1500 nodes, ~4700 edges) is rebuilt server-side via `index_repository` and is NOT committed.
+
+Permission-mode patterns observed (auto mode):
+- Direct commit on `main` is blocked by the harness — even for doc-only changes. Use a feature branch + PR + squash-merge always.
+- `gh pr merge --squash --delete-branch` is allowed once a PR exists.
+- `git reset --hard` and `git rebase` on `main` are blocked unless the user explicitly authorizes them (the user must name the branch / op they're authorizing).
+- `mcp__github__issue_write` for issue creation is denied as an "External System Write" until the user explicitly authorizes ("go pour les issues" or equivalent).
+- `gh pr create --merge` directly through `Bash` is fine; the MCP `create_pull_request` is the more idiomatic path.
 
 ## ADR-009 — Conformance roadmap to "all green"
 
@@ -184,6 +194,56 @@ Closing this set of issues brings SPEC §5-17 conformance to green:
 - #145 — §13.7 HTTP API (agent_totals, 202, due_at, error envelope, 405, issue detail nesting)
 - #146 — §17.9 binary lifecycle tests + small §17.1 / §17.4 / §17.5 holes
 
-After all four are closed, the conformance audit per `audit-spec-v1.md` (now in MCP via ADR-001..009) flips to "all green" for §5-17. Real Integration Profile §17.10 remains opt-in via `SYMPHEO_REAL_INTEGRATION=1`.
+After all four are closed, the conformance audit per the multi-agent review on 2026-05-09 flips to "all green" for §5-17. Real Integration Profile §17.10 remains opt-in via `SYMPHEO_REAL_INTEGRATION=1`.
 
-When picking up an issue: read the relevant SPEC section first, write the failing test before the fix (TDD per SKILL.md), check the local pre-commit chain (ADR-008) before push, open one PR per issue, wait for CI green, squash-merge.
+When picking up an issue: read the relevant SPEC section first, write the failing test before the fix (TDD per `skills/build/SKILL.md`), check the local pre-commit chain (ADR-008) before push, open one PR per issue, wait for CI green via `gh pr checks <num> --watch`, squash-merge with `--delete-branch`, then `git fetch && git reset --hard origin/main` to align local main.
+
+## ADR-010 — `find_free_port` race in server tests (PR #147 lesson)
+
+**Status:** Fixed in PR #147
+**Date:** 2026-05-09
+**Source:** `src/server/mod.rs`, `tests/server_test.rs`
+
+**Bug:** the original test helper
+```rust
+fn find_free_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap().port()
+}
+```
+returned a port number after **dropping** the listener. `start_server(port, ...)` then re-bound the port asynchronously. Between the drop and the re-bind, a parallel test could grab the same ephemeral port from the kernel, causing intermittent `Address already in use (os error 98)`. The flake was non-deterministic (different test cassait à chaque run) which made it look like a real regression.
+
+**Wrong fixes to avoid:**
+- Adding `--no-verify` to bypass the pre-commit chain (forbidden per ADR-008).
+- Sleeping or retrying the bind (papers over the race, doesn't fix it).
+- Adding `serial_test` crate (extra dep for one test file).
+- Hardcoding port ranges (collisions when the dev box has many things bound).
+
+**Correct pattern**, applied in PR #147:
+1. Tests pre-bind the listener inside their own process: `let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap()`. The kernel keeps the binding alive as long as the listener lives.
+2. Hand the listener (not the port) to a new `start_server_with_listener(listener, state)` entrypoint. Same axum app, no re-bind.
+3. `start_server(port, state)` is preserved and now delegates to `start_server_with_listener` after binding — `main.rs` is unchanged.
+4. The test helper `bind_test_server(state)` returns the port the listener is bound to and spawns the server task in one shot, with a small `sleep(200ms)` to let axum start serving before the test fires its first `reqwest`.
+
+Stable across 5 consecutive parallel runs after the fix. Apply the same "listener, not port" pattern to any future test that needs a local HTTP server.
+
+## ADR-011 — Conversation log 2026-05-09 (session output summary)
+
+**Status:** Reference
+**Date:** 2026-05-09
+
+What this session produced (so the next agent can pick up without re-doing it):
+
+1. Multi-agent SPEC §5–§17 conformity audit. Results condensed into ADR-001..010.
+2. PR #143 — doc cleanup (squash `565098c`). Removed `docs/internal/`, `docs/dashboard.md`, `docs/audit-spec-v1.md`, `docs/conformance-tests.md`, `docs/extensions.md`, `docs/isolation.md`, `docs/incident-2026-05-09.md`, `docs/superpowers/`. Refreshed every user guide. Renamed `04-configuration.md` section `codex` → `cli`. Added Trust Boundary section in 01. Absorbed dashboard.md content into 08. `mise.toml` deleted in favour of `mise.local.toml` (gitignored).
+3. Issues filed: #142 (§11.4), #144 (§10), #145 (§13.7), #146 (§17.9).
+4. PR #147 — codebase-memory artefact + flake fix (squash `1c3f63d`). Two commits: `fix(test): eliminate server_test parallel port race` + `docs(memory): commit codebase-memory ADR artefact`. `.codebase-memory/adr.md` now tracked.
+5. Local cleanup: 5 stale branches force-deleted (`chore/ci-dedupe-pr-checks`, `fix/agents-config-override-and-skills-tightening`, `fix/dashboard-html-content-type-and-graphql`, `fix/parser-token-clamp`, `list`). 10 stale remote-tracking refs pruned. `git reset --hard origin/main` after explicit user authorization to align local main with `1c3f63d`.
+6. Security flag (still open at end of session): the operator's `mise.local.toml` contains a literal `SYMPHEO_GITHUB_TOKEN=ghp_BbNEUhge...`. The token leaked into the conversation transcript. The operator was advised to revoke and reissue. `.gitignore` covers the file, so it never reached git.
+
+Numerical status of the codebase at session end:
+- Tests: 384 passing, 2 ignored (real-integration, env-gated).
+- Pre-commit chain: green.
+- Local main HEAD: `1c3f63d` (== origin/main).
+- Open issues tracking conformance: #142, #144, #145, #146.
+- MCP knowledge graph: ~1542 nodes, ~4762 edges.

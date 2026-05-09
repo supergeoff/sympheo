@@ -1,9 +1,18 @@
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-fn find_free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.local_addr().unwrap().port()
+async fn bind_test_server(
+    state: Arc<RwLock<sympheo::orchestrator::state::OrchestratorState>>,
+) -> u16 {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        sympheo::server::start_server_with_listener(listener, state)
+            .await
+            .unwrap();
+    });
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    port
 }
 
 #[tokio::test]
@@ -11,13 +20,7 @@ async fn test_server_dashboard() {
     let state = Arc::new(RwLock::new(
         sympheo::orchestrator::state::OrchestratorState::new(30000, 10),
     ));
-    let port = find_free_port();
-
-    tokio::spawn(async move {
-        sympheo::server::start_server(port, state).await.unwrap();
-    });
-
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    let port = bind_test_server(state).await;
 
     let resp = reqwest::get(format!("http://127.0.0.1:{}/", port))
         .await
@@ -36,13 +39,7 @@ async fn test_server_api_state() {
     let state = Arc::new(RwLock::new(
         sympheo::orchestrator::state::OrchestratorState::new(30000, 10),
     ));
-    let port = find_free_port();
-
-    tokio::spawn(async move {
-        sympheo::server::start_server(port, state).await.unwrap();
-    });
-
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    let port = bind_test_server(state).await;
 
     let resp = reqwest::get(format!("http://127.0.0.1:{}/api/v1/state", port))
         .await
@@ -108,13 +105,7 @@ async fn test_server_api_state_with_data() {
         },
     );
     let state = Arc::new(RwLock::new(orch_state));
-    let port = find_free_port();
-
-    tokio::spawn(async move {
-        sympheo::server::start_server(port, state).await.unwrap();
-    });
-
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    let port = bind_test_server(state).await;
 
     let resp = reqwest::get(format!("http://127.0.0.1:{}/api/v1/state", port))
         .await
@@ -148,13 +139,7 @@ async fn test_server_api_refresh() {
     let state = Arc::new(RwLock::new(
         sympheo::orchestrator::state::OrchestratorState::new(30000, 10),
     ));
-    let port = find_free_port();
-
-    tokio::spawn(async move {
-        sympheo::server::start_server(port, state).await.unwrap();
-    });
-
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    let port = bind_test_server(state).await;
 
     let client = reqwest::Client::new();
     let resp = client
@@ -197,13 +182,7 @@ async fn test_server_api_issue_found() {
         },
     );
     let state = Arc::new(RwLock::new(orch_state));
-    let port = find_free_port();
-
-    tokio::spawn(async move {
-        sympheo::server::start_server(port, state).await.unwrap();
-    });
-
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    let port = bind_test_server(state).await;
 
     let resp = reqwest::get(format!("http://127.0.0.1:{}/api/v1/TEST-1", port))
         .await
@@ -221,13 +200,7 @@ async fn test_server_api_refresh_triggers_notify() {
     let orch_state = sympheo::orchestrator::state::OrchestratorState::new(30000, 10);
     let notify = orch_state.refresh_notify.clone();
     let state = Arc::new(RwLock::new(orch_state));
-    let port = find_free_port();
-
-    tokio::spawn(async move {
-        sympheo::server::start_server(port, state).await.unwrap();
-    });
-
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    let port = bind_test_server(state).await;
 
     let client = reqwest::Client::new();
     let resp = client
@@ -250,13 +223,7 @@ async fn test_server_api_issue_not_found() {
     let state = Arc::new(RwLock::new(
         sympheo::orchestrator::state::OrchestratorState::new(30000, 10),
     ));
-    let port = find_free_port();
-
-    tokio::spawn(async move {
-        sympheo::server::start_server(port, state).await.unwrap();
-    });
-
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    let port = bind_test_server(state).await;
 
     let resp = reqwest::get(format!("http://127.0.0.1:{}/api/v1/UNKNOWN", port))
         .await

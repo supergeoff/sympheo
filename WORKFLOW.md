@@ -40,6 +40,7 @@ agent:
 
 cli:
   command: opencode run
+  env:
   # Hard ceiling for a single agent turn. Set well above the longest
   # plausible spec/build session.
   turn_timeout_ms: 3600000

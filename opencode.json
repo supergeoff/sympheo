@@ -11,16 +11,5 @@
       }
     }
   },
-  "instructions": [],
-  "mcp": {
-    "github": { "enabled": false },
-    "context7": { "enabled": false },
-    "tavily": { "enabled": false },
-    "honcho": { "enabled": false },
-    "browser-use": { "enabled": false },
-    "serena": { "enabled": false },
-    "sequential-thinking": { "enabled": false },
-    "codebase-memory-mcp": { "enabled": false },
-    "cocoindex-code": { "enabled": false }
-  }
+  "instructions": []
 }

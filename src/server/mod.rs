@@ -29,6 +29,12 @@ pub async fn start_server_with_listener(
 ) -> Result<(), crate::error::SympheoError> {
     let app = Router::new()
         .route("/", get(dashboard))
+        .route("/fragments/stats", get(fragment_stats))
+        .route("/fragments/summary", get(fragment_summary))
+        .route("/fragments/recent", get(fragment_recent))
+        .route("/fragments/blocked", get(fragment_blocked))
+        .route("/fragments/sessions", get(fragment_sessions))
+        .route("/fragments/retries", get(fragment_retries))
         .route("/api/v1/state", get(api_state))
         .route("/api/v1/refresh", post(api_refresh))
         .route("/api/v1/{issue_identifier}", get(api_issue))
@@ -74,10 +80,499 @@ async fn method_not_allowed() -> impl IntoResponse {
     )
 }
 
+/// SPEC §13.7.1 — human-readable status surface at `GET /`. The page applies
+/// the Everyday AI design system (flat ink-on-paper, organic radii, monochrome
+/// status indicators) layered on Pico CSS, and uses HTMX fragment polling
+/// (`hx-get` / `hx-trigger="every Ns"`) instead of full-page reloads — so a
+/// long `last_message` cell stays expanded while the surrounding table swaps.
 async fn dashboard(State(state): State<SharedState>) -> (StatusCode, Html<String>) {
     let st = state.read().await;
     let now = chrono::Utc::now();
+    let last_tick = format_last_tick(st.last_tick_at, now);
 
+    let stat_grid = render_stat_grid(&st, now);
+    let summary_grid = render_summary_grid(&st);
+    let recent_rows = render_recent_rows(&st, now);
+    let blocked_rows = render_blocked_rows(&st);
+    let session_rows = render_session_rows(&st);
+    let retry_rows = render_retry_rows(&st);
+
+    let body = format!(
+        r#"<main class="container">
+    <header class="topline">
+      <div>
+        <p class="eyebrow">Sympheo · orchestrator</p>
+        <h1>Status</h1>
+      </div>
+      <div class="topline-meta">
+        <span class="meta">Last tick: {last_tick}</span>
+        <button class="btn-primary"
+                hx-post="/api/v1/refresh"
+                hx-swap="none">
+          Refresh
+        </button>
+      </div>
+    </header>
+
+    <div id="stat-grid" class="stat-grid"
+         hx-get="/fragments/stats"
+         hx-trigger="every 3s"
+         hx-swap="outerHTML">
+{stat_grid}
+    </div>
+
+    <section>
+      <h2>Ticket summary</h2>
+      <div id="summary-grid" class="summary-grid"
+           hx-get="/fragments/summary"
+           hx-trigger="every 5s"
+           hx-swap="outerHTML">
+{summary_grid}
+      </div>
+    </section>
+
+    <section>
+      <h2>Recent movements</h2>
+      <article class="table-card">
+        <table>
+          <thead>
+            <tr><th>Issue</th><th>State</th><th>Last changed</th></tr>
+          </thead>
+          <tbody hx-get="/fragments/recent"
+                 hx-trigger="every 5s"
+                 hx-swap="innerHTML">
+{recent_rows}
+          </tbody>
+        </table>
+      </article>
+    </section>
+
+    <section>
+      <h2>Blocked or delayed</h2>
+      <article class="table-card">
+        <table>
+          <thead>
+            <tr><th>Issue</th><th>State</th><th>Reason</th></tr>
+          </thead>
+          <tbody hx-get="/fragments/blocked"
+                 hx-trigger="every 5s"
+                 hx-swap="innerHTML">
+{blocked_rows}
+          </tbody>
+        </table>
+      </article>
+    </section>
+
+    <section>
+      <h2>Active sessions</h2>
+      <article class="table-card">
+        <table>
+          <thead>
+            <tr>
+              <th></th>
+              <th>Issue</th>
+              <th>State</th>
+              <th>Session</th>
+              <th>Turns</th>
+              <th>Started</th>
+              <th>Last event</th>
+              <th>Last message</th>
+              <th>Tokens (in / out)</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody hx-get="/fragments/sessions"
+                 hx-trigger="every 3s"
+                 hx-swap="innerHTML">
+{session_rows}
+          </tbody>
+        </table>
+      </article>
+    </section>
+
+    <section>
+      <h2>Retry queue</h2>
+      <article class="table-card">
+        <table>
+          <thead>
+            <tr>
+              <th></th>
+              <th>Issue</th>
+              <th>Attempt</th>
+              <th>Error</th>
+              <th>Due in</th>
+            </tr>
+          </thead>
+          <tbody hx-get="/fragments/retries"
+                 hx-trigger="every 3s"
+                 hx-swap="innerHTML">
+{retry_rows}
+          </tbody>
+        </table>
+      </article>
+    </section>
+  </main>"#
+    );
+
+    let html = format!("{}{}{}", DASHBOARD_HEAD, body, DASHBOARD_FOOT);
+    (StatusCode::OK, Html(html))
+}
+
+// ============================================================================
+// Dashboard chrome — head and foot. The Everyday AI design system
+// (flat black on white, organic radii, monochrome status, no hue) is
+// expressed as overrides on Pico CSS variables so Pico still owns layout
+// and form primitives.
+// ============================================================================
+
+const DASHBOARD_HEAD: &str = r#"<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sympheo · orchestrator</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Poppins:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+  <script src="https://unpkg.com/htmx.org@2.0.4" integrity="sha384-HGfztofotfshcF7+8n44JQL2oJmowVChPTg48S+jvZoztPfvwD79OC/LTtG6dMp+" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <style>
+    /* --------------------------------------------------------------
+       Everyday AI design tokens — flat black on white. No hue, no
+       gradients. Value-based status (filled vs outlined ink rings).
+       -------------------------------------------------------------- */
+    :root,
+    [data-theme="light"] {
+      --ink:            #0A0A0A;
+      --paper:          #FFFFFF;
+      --paper-warm:     #FAFAF7;
+      --gray-50:        #F8F8F8;
+      --gray-100:       #F3F3F3;
+      --gray-150:       #EEEEEE;
+      --gray-200:       #E5E5E5;
+      --gray-300:       #C9C9C9;
+      --gray-400:       #A3A3A3;
+      --gray-500:       #7A7A7A;
+      --gray-600:       #5C5C5C;
+      --gray-700:       #3D3D3D;
+      --gray-800:       #2A2A2A;
+      --gray-900:       #141414;
+
+      --fg-1: var(--ink);
+      --fg-2: var(--gray-700);
+      --fg-3: var(--gray-500);
+      --fg-4: var(--gray-400);
+      --bg-1: var(--paper);
+      --bg-2: var(--gray-50);
+      --bg-3: var(--gray-100);
+      --border-default: var(--gray-200);
+      --border-subtle:  var(--gray-150);
+      --shadow-ink:     0 2px 0 0 var(--ink);
+
+      --radius-md:   12px;
+      --radius-lg:   18px;
+      --radius-xl:   28px;
+      --radius-pill: 999px;
+
+      /* Pico overrides — strip hue, monochrome only */
+      --pico-background-color: var(--paper);
+      --pico-color: var(--ink);
+      --pico-h1-color: var(--ink);
+      --pico-h2-color: var(--ink);
+      --pico-h3-color: var(--ink);
+      --pico-h4-color: var(--ink);
+      --pico-h5-color: var(--ink);
+      --pico-muted-color: var(--gray-500);
+      --pico-muted-border-color: var(--border-default);
+      --pico-card-background-color: var(--paper);
+      --pico-card-border-color: var(--border-default);
+      --pico-card-sectioning-background-color: var(--paper);
+      --pico-primary: var(--ink);
+      --pico-primary-background: var(--ink);
+      --pico-primary-border: var(--ink);
+      --pico-primary-hover: var(--gray-800);
+      --pico-primary-hover-background: var(--gray-800);
+      --pico-primary-hover-border: var(--gray-800);
+      --pico-primary-inverse: var(--paper);
+      --pico-table-border-color: var(--border-subtle);
+      --pico-form-element-border-color: var(--border-default);
+      --pico-form-element-active-border-color: var(--ink);
+      --pico-border-radius: 12px;
+      --pico-font-family-sans-serif: 'Poppins', system-ui, sans-serif;
+      --pico-font-family: 'Poppins', system-ui, sans-serif;
+      --pico-font-family-headings: 'Manrope', 'Reglo', system-ui, sans-serif;
+      --pico-font-family-monospace: 'JetBrains Mono', ui-monospace, monospace;
+    }
+
+    body {
+      font-family: 'Poppins', system-ui, sans-serif;
+      background: var(--paper);
+      color: var(--ink);
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    h1, h2, h3, h4, h5 {
+      font-family: 'Manrope', 'Reglo', system-ui, sans-serif;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: var(--ink);
+    }
+    h1 { font-size: 36px; line-height: 1.1; margin: 0; }
+    h2 { font-size: 22px; line-height: 1.2; margin: 0 0 16px; }
+
+    main.container {
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 32px 24px 96px;
+    }
+
+    .eyebrow {
+      font-family: 'Poppins', sans-serif;
+      font-size: 12px;
+      font-weight: 500;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--gray-500);
+      margin: 0 0 4px;
+    }
+    .meta {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      color: var(--gray-500);
+    }
+    .display {
+      font-family: 'Manrope', 'Reglo', system-ui, sans-serif;
+      font-weight: 700;
+      font-size: 36px;
+      line-height: 1.05;
+      letter-spacing: -0.02em;
+      margin: 0;
+      color: var(--ink);
+    }
+
+    .topline {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 24px;
+      margin-bottom: 32px;
+      padding-bottom: 24px;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    .topline-meta {
+      display: inline-flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    /* Primary CTA — pill, ink shadow ("physical button" feel without hue) */
+    .btn-primary {
+      font-family: 'Manrope', system-ui, sans-serif;
+      font-weight: 600;
+      font-size: 13px;
+      padding: 8px 18px;
+      border-radius: var(--radius-pill);
+      border: 1.5px solid var(--ink);
+      background: var(--ink);
+      color: var(--paper);
+      cursor: pointer;
+      box-shadow: var(--shadow-ink);
+      transition: background 200ms cubic-bezier(0.2, 0.8, 0.2, 1),
+                  transform 120ms cubic-bezier(0.2, 0.8, 0.2, 1),
+                  box-shadow 120ms cubic-bezier(0.2, 0.8, 0.2, 1);
+      line-height: 1.2;
+    }
+    .btn-primary:hover { background: var(--gray-800); }
+    .btn-primary:active { transform: translate(0, 2px); box-shadow: none; }
+
+    /* Ghost — outlined ink, used for destructive Kill action */
+    .btn-ghost {
+      font-family: 'Manrope', system-ui, sans-serif;
+      font-weight: 600;
+      font-size: 12px;
+      padding: 5px 14px;
+      border-radius: var(--radius-pill);
+      border: 1.5px solid var(--ink);
+      background: transparent;
+      color: var(--ink);
+      cursor: pointer;
+      transition: background 200ms, color 200ms;
+    }
+    .btn-ghost:hover { background: var(--ink); color: var(--paper); }
+
+    /* KPI row — 4 stat cards across the top */
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+      margin-bottom: 40px;
+    }
+    .stat-grid article {
+      margin: 0;
+      padding: 20px 22px;
+      background: var(--paper);
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-lg);
+      box-shadow: none;
+    }
+    .stat-grid article.ink {
+      background: var(--ink);
+      color: var(--paper);
+      border-color: var(--ink);
+    }
+    .stat-grid article.ink .eyebrow,
+    .stat-grid article.ink .display { color: var(--paper); }
+    @media (max-width: 760px) {
+      .stat-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+
+    /* Per-state count cards */
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 12px;
+      margin-bottom: 8px;
+    }
+    .summary-grid article {
+      margin: 0;
+      padding: 16px 18px;
+      background: var(--paper);
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-lg);
+    }
+    .summary-grid article .display { font-size: 28px; }
+
+    section { margin-bottom: 40px; }
+
+    /* Tables wrapped in a card so the radius applies to the surface */
+    .table-card {
+      margin: 0;
+      padding: 0;
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-lg);
+      overflow: hidden;
+      background: var(--paper);
+    }
+    .table-card table { margin: 0; font-size: 14px; }
+    .table-card th {
+      font-family: 'Manrope', system-ui, sans-serif;
+      font-weight: 600;
+      font-size: 11px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--gray-700);
+      background: var(--bg-2);
+      border-bottom: 1px solid var(--border-default);
+      padding: 12px 14px;
+      text-align: left;
+    }
+    .table-card td {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--border-subtle);
+      vertical-align: middle;
+    }
+    .table-card tr:last-child td { border-bottom: none; }
+    .table-card td.empty {
+      text-align: center;
+      color: var(--gray-500);
+      font-style: italic;
+      padding: 20px 14px;
+    }
+    .table-card td.mono,
+    .mono { font-family: 'JetBrains Mono', monospace; font-size: 13px; }
+
+    /* Status indicators — value-based, no hue (per design system) */
+    .indicator {
+      width: 14px;
+      height: 14px;
+      border-radius: 999px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      box-sizing: border-box;
+    }
+    .indicator.running  { background: var(--ink); }
+    .indicator.retrying { border: 1.5px solid var(--ink); }
+    .indicator.warn     { border: 1.5px solid var(--ink); }
+    .indicator.loading  {
+      border: 1.5px solid var(--ink);
+      border-right-color: transparent;
+      animation: dash-spin 1s linear infinite;
+    }
+    @keyframes dash-spin { to { transform: rotate(360deg); } }
+
+    .row-id-cell {
+      width: 22px;
+      padding-right: 0 !important;
+    }
+
+    /* Long messages — keep <details> readable */
+    .table-card td details { margin: 0; }
+    .table-card td details summary {
+      cursor: pointer;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 13px;
+      color: var(--ink);
+    }
+    .table-card td details pre {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      background: var(--bg-2);
+      border-radius: var(--radius-md);
+      padding: 12px;
+      margin-top: 8px;
+      max-width: 50ch;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    /* HTMX request indicator — soft pulse on swap target */
+    [hx-get].htmx-request,
+    [hx-post].htmx-request {
+      opacity: 0.65;
+      transition: opacity 200ms;
+    }
+  </style>
+</head>
+<body>
+"#;
+
+const DASHBOARD_FOOT: &str = r#"
+  <script>
+    if (window.lucide) lucide.createIcons();
+    document.body.addEventListener('htmx:afterSwap', () => {
+      if (window.lucide) lucide.createIcons();
+    });
+  </script>
+</body>
+</html>"#;
+
+// ============================================================================
+// Fragment renderers — pure functions of `OrchestratorState`. Used by the
+// initial SSR (full dashboard) and by the `/fragments/*` endpoints that HTMX
+// swaps in periodically.
+// ============================================================================
+
+fn format_last_tick(
+    last_tick_at: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    last_tick_at
+        .map(|t| {
+            let secs = (now - t).num_seconds();
+            if secs < 60 {
+                format!("{}s ago", secs)
+            } else {
+                format!("{}m ago", secs / 60)
+            }
+        })
+        .unwrap_or_else(|| "never".to_string())
+}
+
+fn render_stat_grid(st: &OrchestratorState, now: chrono::DateTime<chrono::Utc>) -> String {
     let running_count = st.running.len();
     let retrying_count = st.retry_attempts.len();
     let total_tokens = st.cli_totals.total_tokens;
@@ -88,120 +583,82 @@ async fn dashboard(State(state): State<SharedState>) -> (StatusCode, Html<String
         .sum();
     let runtime_secs = (st.cli_totals.seconds_running as i64 + live_running_secs).max(0) as u64;
 
-    let running_rows: String = st
-        .running
-        .values()
-        .map(|e| {
-            let sess = e.session.as_ref();
-            let last_event = sess
-                .and_then(|s| s.last_event.as_ref())
-                .map(|s| s.as_str())
-                .unwrap_or("-");
-            // SPEC §13.7: render the FULL last_message (no truncation). The
-            // operator needs the complete content to spot a stuck or
-            // misbehaving turn quickly. Wrap in a <details> for long messages
-            // so the table stays readable.
-            let last_msg = sess
-                .and_then(|s| s.last_message.as_ref())
-                .map(|s| render_last_message(s))
-                .unwrap_or_else(|| "-".to_string());
-            let tokens = sess
-                .map(|s| format!("{} / {}", s.input_tokens, s.output_tokens))
-                .unwrap_or_else(|| "-".to_string());
-            let started = e.started_at.format("%H:%M:%S").to_string();
-            // Operator kill switch (P6): HTMX-style POST, no page reload required.
-            // The button calls POST /api/v1/<identifier>/cancel; the orchestrator's
-            // watchdog will SIGKILL the subprocess group within ~1s and the next
-            // tick converts the exit to a retry per §7.3 / §8.4.
-            let identifier_url_safe = url_encode(&e.issue.identifier);
-            let kill_button = format!(
-                r#"<button class="contrast outline" style="padding:0.2rem 0.5rem; font-size:0.8rem;" hx-post="/api/v1/{}/cancel" hx-confirm="Kill worker {}? Will be retried after backoff." hx-swap="none">Kill</button>"#,
-                identifier_url_safe,
-                html_escape(&e.issue.identifier)
-            );
-            format!(
-                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
-                html_escape(&e.issue.identifier),
-                html_escape(&e.issue.state),
-                sess.map(|s| html_escape(&s.session_id)).unwrap_or_else(|| "-".to_string()),
-                e.turn_count,
-                started,
-                html_escape(last_event),
-                last_msg,
-                tokens,
-                kill_button
-            )
-        })
-        .collect();
+    format!(
+        r#"<div id="stat-grid" class="stat-grid"
+     hx-get="/fragments/stats"
+     hx-trigger="every 3s"
+     hx-swap="outerHTML">
+  <article class="ink">
+    <p class="eyebrow">Running</p>
+    <p class="display">{running_count}</p>
+  </article>
+  <article>
+    <p class="eyebrow">Retrying</p>
+    <p class="display">{retrying_count}</p>
+  </article>
+  <article>
+    <p class="eyebrow">Tokens</p>
+    <p class="display">{total_tokens}</p>
+  </article>
+  <article>
+    <p class="eyebrow">Runtime</p>
+    <p class="display">{runtime_secs}s</p>
+  </article>
+</div>"#
+    )
+}
 
-    let retry_rows: String = st
-        .retry_attempts
-        .values()
-        .map(|r| {
-            let error_text = r
-                .error
-                .as_ref()
-                .map(|e| {
-                    let mut txt = e.clone();
-                    if txt.len() > 50 {
-                        txt.truncate(50);
-                        txt.push_str("...");
-                    }
-                    html_escape(&txt)
-                })
-                .unwrap_or_else(|| "-".to_string());
-            format!(
-                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{:.0}s</td></tr>",
-                html_escape(&r.identifier),
-                r.attempt,
-                error_text,
-                r.due_at
-                    .saturating_duration_since(std::time::Instant::now())
-                    .as_secs_f64()
-            )
-        })
-        .collect();
-
-    let last_tick = st
-        .last_tick_at
-        .map(|t| {
-            let secs = (now - t).num_seconds();
-            if secs < 60 {
-                format!("{}s ago", secs)
-            } else {
-                format!("{}m ago", secs / 60)
-            }
-        })
-        .unwrap_or_else(|| "never".to_string());
-
-    let terminal_states = vec!["done".to_string(), "closed".to_string()];
+fn render_summary_grid(st: &OrchestratorState) -> String {
     let mut state_counts: std::collections::BTreeMap<String, usize> =
         std::collections::BTreeMap::new();
-    let mut recent_changes: Vec<&RunningEntry> = Vec::new();
-    let mut blocked_entries: Vec<&RunningEntry> = Vec::new();
-
     for entry in st.running.values() {
         *state_counts.entry(entry.issue.state.clone()).or_insert(0) += 1;
-        recent_changes.push(entry);
-        if entry.issue.is_blocked(&terminal_states) {
-            blocked_entries.push(entry);
-        }
     }
 
-    recent_changes.sort_by_key(|b| std::cmp::Reverse(b.last_state_change_at));
-
-    let state_summary_cards: String = state_counts
+    let cards: String = state_counts
         .iter()
         .map(|(state, count)| {
             format!(
-                r#"<article><h5>{}</h5><p class="display">{}</p></article>"#,
+                r#"  <article>
+    <p class="eyebrow">{}</p>
+    <p class="display">{}</p>
+  </article>
+"#,
                 html_escape(state),
                 count
             )
         })
         .collect();
 
-    let recent_rows: String = recent_changes
+    let inner = if cards.is_empty() {
+        r#"  <article>
+    <p class="eyebrow">No active tickets</p>
+    <p class="display">0</p>
+  </article>
+"#
+        .to_string()
+    } else {
+        cards
+    };
+
+    format!(
+        r#"<div id="summary-grid" class="summary-grid"
+     hx-get="/fragments/summary"
+     hx-trigger="every 5s"
+     hx-swap="outerHTML">
+{inner}</div>"#
+    )
+}
+
+fn render_recent_rows(st: &OrchestratorState, now: chrono::DateTime<chrono::Utc>) -> String {
+    let mut recent: Vec<&RunningEntry> = st.running.values().collect();
+    recent.sort_by_key(|b| std::cmp::Reverse(b.last_state_change_at));
+
+    if recent.is_empty() {
+        return r#"<tr><td colspan="3" class="empty">No recent changes</td></tr>"#.to_string();
+    }
+
+    recent
         .iter()
         .take(10)
         .map(|e| {
@@ -212,16 +669,22 @@ async fn dashboard(State(state): State<SharedState>) -> (StatusCode, Html<String
                 format!("{}m ago", secs / 60)
             };
             format!(
-                "<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
+                "<tr><td class=\"mono\">{}</td><td>{}</td><td>{}</td></tr>",
                 html_escape(&e.issue.identifier),
                 html_escape(&e.issue.state),
                 ago
             )
         })
-        .collect();
+        .collect()
+}
 
-    let blocked_rows: String = blocked_entries
-        .iter()
+fn render_blocked_rows(st: &OrchestratorState) -> String {
+    let terminal_states = vec!["done".to_string(), "closed".to_string()];
+
+    let blocked_rows: String = st
+        .running
+        .values()
+        .filter(|e| e.issue.is_blocked(&terminal_states))
         .map(|e| {
             let blockers = e
                 .issue
@@ -232,7 +695,7 @@ async fn dashboard(State(state): State<SharedState>) -> (StatusCode, Html<String
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(
-                "<tr><td>{}</td><td>{}</td><td>Blocked by: {}</td></tr>",
+                "<tr><td class=\"mono\">{}</td><td>{}</td><td>Blocked by: {}</td></tr>",
                 html_escape(&e.issue.identifier),
                 html_escape(&e.issue.state),
                 if blockers.is_empty() {
@@ -249,7 +712,7 @@ async fn dashboard(State(state): State<SharedState>) -> (StatusCode, Html<String
         .values()
         .map(|r| {
             format!(
-                "<tr><td>{}</td><td>{}</td><td>Retry attempt #{}</td></tr>",
+                "<tr><td class=\"mono\">{}</td><td>{}</td><td>Retry attempt #{}</td></tr>",
                 html_escape(&r.identifier),
                 "retrying",
                 r.attempt
@@ -257,137 +720,134 @@ async fn dashboard(State(state): State<SharedState>) -> (StatusCode, Html<String
         })
         .collect();
 
-    let html = format!(
-        r#"<!DOCTYPE html>
-<html lang="en" data-theme="dark">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Sympheo Dashboard</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
-  <script src="https://unpkg.com/htmx.org@2.0.4" integrity="sha384-HGfztofotfshcF7+8n44JQL2oJmowVChPTg48S+jvZoztPfvwD79OC/LTtG6dMp+" crossorigin="anonymous"></script>
-  <style>
-    .status-dot {{ width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 6px; }}
-    .status-running {{ background: var(--pico-color-green-500); }}
-    .status-retrying {{ background: var(--pico-color-amber-500); }}
-    .status-error {{ background: var(--pico-color-red-500); }}
-    .display {{ font-size: 2rem; font-weight: bold; margin: 0; }}
-    .card article {{ margin-bottom: 0; }}
-  </style>
-</head>
-<body>
-  <main class="container">
-    <h1>🔧 Sympheo Orchestrator</h1>
-    <p style="font-size:0.85rem; color:var(--pico-muted-color);">Last tick: {}</p>
-    <div class="grid">
-      <article>
-        <h3>Running</h3>
-        <p class="display">{}</p>
-      </article>
-      <article>
-        <h3>Retrying</h3>
-        <p class="display">{}</p>
-      </article>
-      <article>
-        <h3>Tokens</h3>
-        <p class="display">{}</p>
-      </article>
-      <article>
-        <h3>Runtime</h3>
-        <p class="display">{}s</p>
-      </article>
-    </div>
+    if blocked_rows.is_empty() && delayed_rows.is_empty() {
+        r#"<tr><td colspan="3" class="empty">No blocked or delayed tickets</td></tr>"#.to_string()
+    } else {
+        blocked_rows + &delayed_rows
+    }
+}
 
-    <h2>Ticket Summary</h2>
-    <div class="grid">
-      {}
-    </div>
+fn render_session_rows(st: &OrchestratorState) -> String {
+    if st.running.is_empty() {
+        return r#"<tr><td colspan="10" class="empty">No active sessions</td></tr>"#.to_string();
+    }
 
-    <h3>Recent Movements</h3>
-    <table>
-      <thead>
-        <tr><th>Issue</th><th>State</th><th>Last Changed</th></tr>
-      </thead>
-      <tbody>{}</tbody>
-    </table>
+    st.running
+        .values()
+        .map(|e| {
+            let sess = e.session.as_ref();
+            let last_event = sess
+                .and_then(|s| s.last_event.as_ref())
+                .map(|s| s.as_str())
+                .unwrap_or("-");
+            // SPEC §13.7: render the FULL last_message (no truncation).
+            // <details> keeps the table readable while preserving content.
+            let last_msg = sess
+                .and_then(|s| s.last_message.as_ref())
+                .map(|s| render_last_message(s))
+                .unwrap_or_else(|| "-".to_string());
+            let tokens = sess
+                .map(|s| format!("{} / {}", s.input_tokens, s.output_tokens))
+                .unwrap_or_else(|| "-".to_string());
+            let started = e.started_at.format("%H:%M:%S").to_string();
+            let identifier_url_safe = url_encode(&e.issue.identifier);
+            // P6 kill switch: HTMX POST, no reload. Watchdog will SIGKILL the
+            // subprocess group within ~1s and the next tick converts the exit
+            // to a retry per §7.3 / §8.4.
+            let kill_button = format!(
+                r#"<button class="btn-ghost" hx-post="/api/v1/{}/cancel" hx-confirm="Kill worker {}? It will be retried after backoff." hx-swap="none">Kill</button>"#,
+                identifier_url_safe,
+                html_escape(&e.issue.identifier)
+            );
+            // Indicator: filled ink ring while a session is attached, spinning
+            // ring while we're between events (no live session yet).
+            let indicator_class = if sess.is_some() { "running" } else { "loading" };
+            format!(
+                "<tr><td class=\"row-id-cell\"><span class=\"indicator {indicator}\"></span></td><td class=\"mono\">{id}</td><td>{state}</td><td class=\"mono\">{session}</td><td>{turns}</td><td class=\"mono\">{started}</td><td>{event}</td><td>{msg}</td><td class=\"mono\">{tokens}</td><td>{kill}</td></tr>",
+                indicator = indicator_class,
+                id = html_escape(&e.issue.identifier),
+                state = html_escape(&e.issue.state),
+                session = sess
+                    .map(|s| html_escape(&s.session_id))
+                    .unwrap_or_else(|| "-".to_string()),
+                turns = e.turn_count,
+                started = started,
+                event = html_escape(last_event),
+                msg = last_msg,
+                tokens = tokens,
+                kill = kill_button
+            )
+        })
+        .collect()
+}
 
-    <h3>Blocked or Delayed</h3>
-    <table>
-      <thead>
-        <tr><th>Issue</th><th>State</th><th>Reason</th></tr>
-      </thead>
-      <tbody>{}</tbody>
-    </table>
+fn render_retry_rows(st: &OrchestratorState) -> String {
+    if st.retry_attempts.is_empty() {
+        return r#"<tr><td colspan="5" class="empty">No retries queued</td></tr>"#.to_string();
+    }
 
-    <h2>Active Sessions</h2>
-    <table>
-      <thead>
-        <tr>
-          <th>Issue</th>
-          <th>State</th>
-          <th>Session</th>
-          <th>Turns</th>
-          <th>Started</th>
-          <th>Last Event</th>
-          <th>Last Message</th>
-          <th>Tokens (in/out)</th>
-          <th>Actions</th>
-        </tr>
-      </thead>
-      <tbody>{}</tbody>
-    </table>
+    st.retry_attempts
+        .values()
+        .map(|r| {
+            let error_text = r
+                .error
+                .as_ref()
+                .map(|e| {
+                    let mut txt = e.clone();
+                    if txt.len() > 50 {
+                        txt.truncate(50);
+                        txt.push_str("...");
+                    }
+                    html_escape(&txt)
+                })
+                .unwrap_or_else(|| "-".to_string());
+            let due_in = r
+                .due_at
+                .saturating_duration_since(std::time::Instant::now())
+                .as_secs_f64();
+            format!(
+                "<tr><td class=\"row-id-cell\"><span class=\"indicator retrying\"></span></td><td class=\"mono\">{id}</td><td>{attempt}</td><td>{err}</td><td class=\"mono\">{due:.0}s</td></tr>",
+                id = html_escape(&r.identifier),
+                attempt = r.attempt,
+                err = error_text,
+                due = due_in
+            )
+        })
+        .collect()
+}
 
-    <h2>Retry Queue</h2>
-    <table>
-      <thead>
-        <tr>
-          <th>Issue</th>
-          <th>Attempt</th>
-          <th>Error</th>
-          <th>Due In</th>
-        </tr>
-      </thead>
-      <tbody>{}</tbody>
-    </table>
-  </main>
-  <script>
-    setInterval(() => location.reload(), 5000);
-  </script>
-</body>
-</html>"#,
-        last_tick,
-        running_count,
-        retrying_count,
-        total_tokens,
-        runtime_secs,
-        if state_summary_cards.is_empty() {
-            "<p>No active tickets</p>".to_string()
-        } else {
-            state_summary_cards
-        },
-        if recent_rows.is_empty() {
-            "<tr><td colspan=3 style='text-align:center;'>No recent changes</td></tr>".to_string()
-        } else {
-            recent_rows
-        },
-        if blocked_rows.is_empty() && delayed_rows.is_empty() {
-            "<tr><td colspan=3 style='text-align:center;'>No blocked or delayed tickets</td></tr>"
-                .to_string()
-        } else {
-            blocked_rows + &delayed_rows
-        },
-        if running_rows.is_empty() {
-            "<tr><td colspan=9 style='text-align:center;'>No active sessions</td></tr>".to_string()
-        } else {
-            running_rows
-        },
-        if retry_rows.is_empty() {
-            "<tr><td colspan=4 style='text-align:center;'>No retries queued</td></tr>".to_string()
-        } else {
-            retry_rows
-        }
-    );
-    (StatusCode::OK, Html(html))
+// ============================================================================
+// HTMX fragment endpoints — return inner-HTML for the surrounding container.
+// ============================================================================
+
+async fn fragment_stats(State(state): State<SharedState>) -> Html<String> {
+    let st = state.read().await;
+    Html(render_stat_grid(&st, chrono::Utc::now()))
+}
+
+async fn fragment_summary(State(state): State<SharedState>) -> Html<String> {
+    let st = state.read().await;
+    Html(render_summary_grid(&st))
+}
+
+async fn fragment_recent(State(state): State<SharedState>) -> Html<String> {
+    let st = state.read().await;
+    Html(render_recent_rows(&st, chrono::Utc::now()))
+}
+
+async fn fragment_blocked(State(state): State<SharedState>) -> Html<String> {
+    let st = state.read().await;
+    Html(render_blocked_rows(&st))
+}
+
+async fn fragment_sessions(State(state): State<SharedState>) -> Html<String> {
+    let st = state.read().await;
+    Html(render_session_rows(&st))
+}
+
+async fn fragment_retries(State(state): State<SharedState>) -> Html<String> {
+    let st = state.read().await;
+    Html(render_retry_rows(&st))
 }
 
 fn html_escape(s: &str) -> String {
@@ -1167,9 +1627,10 @@ mod tests {
         let shared = Arc::new(RwLock::new(state));
         let (status, Html(body)) = dashboard(State(shared)).await;
         assert_eq!(status, StatusCode::OK);
-        assert!(body.contains("Ticket Summary"));
-        assert!(body.contains("Recent Movements"));
-        assert!(body.contains("Blocked or Delayed"));
+        // Sentence case across the design system — no title case.
+        assert!(body.contains("Ticket summary"));
+        assert!(body.contains("Recent movements"));
+        assert!(body.contains("Blocked or delayed"));
         assert!(body.contains("todo") && body.contains("in progress"));
         assert!(body.contains("TEST-2"));
         assert!(body.contains("Blocked by: TEST-3"));

@@ -41,6 +41,13 @@ agent:
 cli:
   command: opencode run
   env:
+    # Forwarded from the env of the process that launched sympheo.
+    # The worker runs under a scrubbed env (HOME / XDG_*_HOME redirected to
+    # the per-issue workspace), so anything the agent CLI needs from the host
+    # MUST be declared here. PATH itself is auto-built from mise's shims +
+    # binary dirs — every tool you install via mise is automatically reachable.
+    GITHUB_TOKEN: $GITHUB_TOKEN
+    OPENROUTER_API_KEY: $OPENROUTER_API_KEY
   # Hard ceiling for a single agent turn. Set well above the longest
   # plausible spec/build session.
   turn_timeout_ms: 3600000

@@ -7,8 +7,11 @@
 //!   `~/.local/share/opencode`, etc.
 //! - PATH is restricted to a minimal whitelist so the agent inherits only the
 //!   binaries needed to run (bash, coreutils, git, gh, opencode if installed
-//!   system-wide). Operators MAY extend this whitelist via `cli.env.PATH` in
-//!   `WORKFLOW.md`.
+//!   system-wide). When `mise` is detected on the host, its binary dir and
+//!   shims dir are auto-prepended so any tool the operator installs via mise
+//!   (gh, opencode, bun, ...) becomes resolvable inside the worker without
+//!   per-tool configuration. Operators MAY override the whole PATH via
+//!   `cli.env.PATH` in `WORKFLOW.md`.
 //! - All other env vars are scrubbed except a small whitelist of locale / TTY
 //!   variables that are safe and useful (LANG, LC_*, TERM, TZ, USER, LOGNAME).
 //! - Any explicit `cli.env` entries declared in WORKFLOW.md (§5.3.6) override
@@ -22,6 +25,63 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// Locations that mise uses on the host. Both must be on the worker PATH:
+/// the shims dispatch to the right tool versions, and each shim invokes
+/// `mise` itself to resolve which version to run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MisePaths {
+    /// Directory containing the `mise` binary.
+    pub bin_dir: PathBuf,
+    /// Directory containing the per-tool shims (gh, opencode, bun, ...).
+    pub shims_dir: PathBuf,
+}
+
+/// Locate `mise` on the host. Returns `None` when the binary is absent.
+///
+/// Resolution order for the data dir (where `shims/` lives) follows mise's
+/// own convention: `MISE_DATA_DIR` → `XDG_DATA_HOME/mise` →
+/// `$HOME/.local/share/mise`.
+pub fn find_mise_paths() -> Option<MisePaths> {
+    let bin = find_in_host_path("mise")?;
+    let bin_dir = bin.parent()?.to_path_buf();
+    let data_dir = mise_data_dir()?;
+    Some(MisePaths {
+        bin_dir,
+        shims_dir: data_dir.join("shims"),
+    })
+}
+
+fn mise_data_dir() -> Option<PathBuf> {
+    if let Ok(d) = std::env::var("MISE_DATA_DIR")
+        && !d.is_empty()
+    {
+        return Some(PathBuf::from(d));
+    }
+    if let Ok(x) = std::env::var("XDG_DATA_HOME")
+        && !x.is_empty()
+    {
+        return Some(PathBuf::from(x).join("mise"));
+    }
+    let home = std::env::var("HOME").ok()?;
+    Some(
+        PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join("mise"),
+    )
+}
+
+fn find_in_host_path(bin: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(bin);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 /// Subdirectories created under `<workspace>/.sympheo-home/` for the scoped
 /// HOME and XDG_*_HOME env vars. Stable on disk so reuse across turns is cheap.
 pub const HOME_SUBDIR: &str = ".sympheo-home";
@@ -32,20 +92,26 @@ pub const STATE_SUBDIR: &str = ".sympheo-home/.local/state";
 
 /// Minimal PATH used when the operator hasn't provided one via `cli.env.PATH`.
 /// Includes the system bin dirs so bash, git, and opencode (if installed
-/// system-wide) are discoverable, plus `~/.local/bin` mapped INTO the
-/// scoped HOME.
-fn default_path(home: &Path) -> String {
-    let local_bin = home.join(".local").join("bin");
-    [
-        local_bin.display().to_string(),
+/// system-wide) are discoverable, plus `~/.local/bin` mapped INTO the scoped
+/// HOME. When `mise` is available on the host its shims dir and binary dir
+/// are prepended so mise-managed tools (gh, opencode, bun, ...) resolve
+/// without per-tool configuration.
+fn default_path(home: &Path, mise: Option<&MisePaths>) -> String {
+    let mut entries: Vec<String> = Vec::new();
+    if let Some(m) = mise {
+        entries.push(m.shims_dir.display().to_string());
+        entries.push(m.bin_dir.display().to_string());
+    }
+    entries.push(home.join(".local").join("bin").display().to_string());
+    entries.extend([
         "/usr/local/sbin".to_string(),
         "/usr/local/bin".to_string(),
         "/usr/sbin".to_string(),
         "/usr/bin".to_string(),
         "/sbin".to_string(),
         "/bin".to_string(),
-    ]
-    .join(":")
+    ]);
+    entries.join(":")
 }
 
 /// Allowlist of env vars passed through from the host process verbatim
@@ -97,8 +163,10 @@ pub fn build_isolated_env(
     env.insert("XDG_CACHE_HOME".to_string(), cache.display().to_string());
     env.insert("XDG_STATE_HOME".to_string(), state.display().to_string());
 
-    // 3. Default PATH
-    env.insert("PATH".to_string(), default_path(&home));
+    // 3. Default PATH (with mise paths prepended when available so the
+    //    worker can resolve mise-managed CLIs by name).
+    let mise = find_mise_paths();
+    env.insert("PATH".to_string(), default_path(&home, mise.as_ref()));
 
     // 4. Operator overrides — always wins
     for (k, v) in cli_env_overrides {
@@ -175,6 +243,34 @@ mod tests {
         assert!(path.contains(".sympheo-home/.local/bin"));
         // No leakage of arbitrary host PATH entries (best-effort: we only set
         // the minimal whitelist here).
+    }
+
+    #[test]
+    fn test_default_path_with_mise_prepends_shims_and_bin() {
+        let home = PathBuf::from("/tmp/ws/.sympheo-home");
+        let mise = MisePaths {
+            bin_dir: PathBuf::from("/opt/mise/bin"),
+            shims_dir: PathBuf::from("/opt/mise/shims"),
+        };
+        let path = default_path(&home, Some(&mise));
+        let entries: Vec<&str> = path.split(':').collect();
+        assert_eq!(
+            entries[0], "/opt/mise/shims",
+            "shims must be the first PATH entry so mise-managed CLIs win"
+        );
+        assert_eq!(
+            entries[1], "/opt/mise/bin",
+            "mise binary dir comes second so shims can call back into mise"
+        );
+        assert!(entries.contains(&"/usr/bin"));
+    }
+
+    #[test]
+    fn test_default_path_without_mise_omits_shims() {
+        let home = PathBuf::from("/tmp/ws/.sympheo-home");
+        let path = default_path(&home, None);
+        assert!(!path.contains("shims"));
+        assert!(path.starts_with(&home.join(".local").join("bin").display().to_string()));
     }
 
     #[test]

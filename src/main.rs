@@ -69,6 +69,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
+    // Local backend uses mise to resolve `cli.command` and any other tools the
+    // operator declared in their workspace (gh, opencode, bun, ...). Fail fast
+    // with a clear message when mise isn't installed; otherwise the worker
+    // would just emit `command not found` once a turn starts.
+    if !config.daytona_enabled() && sympheo::workspace::isolation::find_mise_paths().is_none() {
+        error!(
+            "startup validation failed: `mise` not found on host PATH. \
+             The local backend uses mise to resolve worker tools (gh, opencode, ...). \
+             Install mise (https://mise.jdx.dev) or enable the daytona backend."
+        );
+        std::process::exit(1);
+    }
+
     info!("startup validation passed");
 
     // Startup terminal workspace cleanup

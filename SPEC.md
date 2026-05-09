@@ -1267,7 +1267,7 @@ This subsection defines the reference adapter behavior for `tracker.kind = githu
   - Default: `https://api.github.com/graphql`.
   - Permits targeting GitHub Enterprise Server.
 - `auth_token` (string, OPTIONAL)
-  - Default: `$SYMPHEO_GITHUB_TOKEN`.
+  - Default: `$GITHUB_TOKEN`.
   - MAY be a literal token or `$VAR_NAME`. If `$VAR_NAME` resolves to an empty string, treat as
     missing.
 - `active_states` (list of strings)
@@ -1397,7 +1397,7 @@ Contract:
 - Reuse the configured GitHub endpoint and auth from the active Sympheo workflow/runtime config;
   do not require the coding agent to read raw tokens from disk.
 - No additional scope restriction is imposed by this extension; the available scope matches the
-  scopes granted to `SYMPHEO_GITHUB_TOKEN`.
+  scopes granted to `GITHUB_TOKEN`.
 - Tool result semantics:
   - transport success + no top-level GraphQL `errors` -> `success=true`
   - top-level GraphQL `errors` present -> `success=false`, but preserve the GraphQL response body
@@ -2202,7 +2202,7 @@ These tests apply to every tracker adapter the implementation ships.
 - `tracker.kind = github` selects the GitHub adapter
 - Validation requires `org`, `project_number`, `status_field`, and a non-empty resolved
   `auth_token`
-- `auth_token` defaults to `$SYMPHEO_GITHUB_TOKEN` when not specified
+- `auth_token` defaults to `$GITHUB_TOKEN` when not specified
 - Identifier format is `<repo>#<number>`
 - `branch_name` is generated from `<number>-<slugified-title>` and respects the 60-char truncation
 - `state` is read from the configured `status_field` single-select option
@@ -2288,7 +2288,7 @@ These checks are RECOMMENDED for production readiness and MAY be skipped in CI w
 network access, or external service permissions are unavailable.
 
 - A real GitHub tracker smoke test can be run with valid credentials supplied by
-  `SYMPHEO_GITHUB_TOKEN` or a documented local bootstrap mechanism.
+  `GITHUB_TOKEN` or a documented local bootstrap mechanism.
 - A real OpenCode CLI smoke test runs `opencode run` end-to-end on a throwaway issue.
 - Real integration tests SHOULD use isolated test identifiers/workspaces and clean up tracker
   artifacts when practical.
@@ -2334,7 +2334,7 @@ Use the same validation profiles as Section 17:
 GitHub tracker adapter:
 
 - Validates `org`, `project_number`, `status_field`, and resolved `auth_token`
-- Default `auth_token` resolves from `$SYMPHEO_GITHUB_TOKEN`
+- Default `auth_token` resolves from `$GITHUB_TOKEN`
 - Identifier format `<repo>#<number>` and workspace key `<repo>-<number>`
 - Branch name generated from `<number>-<slugified-title>`
 - Status read from configured single-select field

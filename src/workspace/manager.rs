@@ -1,11 +1,31 @@
 use crate::config::typed::ServiceConfig;
 use crate::error::SympheoError;
 use crate::tracker::model::WorkspaceInfo;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
+
+/// SPEC §9.4 (RECOMMENDED): build the standard SYMPHEO_* env vars exposed to hooks.
+pub fn sympheo_hook_env(
+    issue_identifier: &str,
+    issue_id: &str,
+    workspace_path: &Path,
+) -> HashMap<String, String> {
+    let mut env = HashMap::new();
+    env.insert(
+        "SYMPHEO_ISSUE_IDENTIFIER".to_string(),
+        issue_identifier.to_string(),
+    );
+    env.insert("SYMPHEO_ISSUE_ID".to_string(), issue_id.to_string());
+    env.insert(
+        "SYMPHEO_WORKSPACE_PATH".to_string(),
+        workspace_path.display().to_string(),
+    );
+    env
+}
 
 pub struct WorkspaceManager {
     root: PathBuf,
@@ -33,6 +53,18 @@ impl WorkspaceManager {
         &self.git_adapter
     }
 
+    /// SPEC §4.2 + §9.2 + §15.2: workspace key = identifier with any character outside
+    /// `[A-Za-z0-9._]` replaced by `-`. Examples:
+    ///   sympheo#42      -> sympheo-42
+    ///   ABC-123         -> ABC-123        (hyphen kept; outside [.A-Za-z0-9_] but spec sample)
+    ///   feat/new_thing  -> feat-new_thing
+    ///
+    /// Note: SPEC §4.2 lists `[A-Za-z0-9._]` strictly; the GitHub example
+    /// `sympheo#42 -> sympheo-42` shows hyphen as the replacement char. The Linear example
+    /// `ABC-123 -> ABC-123` shows hyphen survives (because spec text says "not in" the
+    /// allowed set, but the result preserves the hyphen). We interpret the conformance
+    /// requirement as: replace any character outside `[A-Za-z0-9._-]` with `-`,
+    /// matching both example mappings.
     pub fn sanitize_identifier(identifier: &str) -> String {
         identifier
             .chars()
@@ -40,7 +72,7 @@ impl WorkspaceManager {
                 if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
                     c
                 } else {
-                    '_'
+                    '-'
                 }
             })
             .collect()
@@ -54,6 +86,7 @@ impl WorkspaceManager {
     pub async fn create_or_reuse(
         &self,
         identifier: &str,
+        issue_id: &str,
         after_create_hook: Option<&str>,
     ) -> Result<WorkspaceInfo, SympheoError> {
         let path = self.workspace_path(identifier);
@@ -72,7 +105,8 @@ impl WorkspaceManager {
                     .await
                     .map_err(|e| SympheoError::WorkspaceError(format!("git clone failed: {e}")))?;
             } else if let Some(script) = after_create_hook {
-                self.run_hook("after_create", script, &path).await?;
+                let env = sympheo_hook_env(identifier, issue_id, &path);
+                self.run_hook("after_create", script, &path, &env).await?;
             }
         }
 
@@ -83,14 +117,27 @@ impl WorkspaceManager {
         })
     }
 
-    pub async fn run_hook(&self, name: &str, script: &str, cwd: &Path) -> Result<(), SympheoError> {
+    /// SPEC §9.4: hooks run in shell context with workspace as cwd, with timeout.
+    /// Standard SYMPHEO_* env vars (RECOMMENDED) are passed through `env`.
+    pub async fn run_hook(
+        &self,
+        name: &str,
+        script: &str,
+        cwd: &Path,
+        env: &HashMap<String, String>,
+    ) -> Result<(), SympheoError> {
         tracing::info!(hook = name, cwd = %cwd.display(), "running workspace hook");
-        let mut child = Command::new("bash")
+        let mut command = Command::new("bash");
+        command
             .arg("-lc")
             .arg(script)
             .current_dir(cwd)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        for (k, v) in env {
+            command.env(k, v);
+        }
+        let mut child = command
             .spawn()
             .map_err(|e| SympheoError::HookFailed(format!("spawn failed for {name}: {e}")))?;
 
@@ -118,13 +165,19 @@ impl WorkspaceManager {
         }
     }
 
-    pub async fn remove_workspace(&self, identifier: &str, before_remove: Option<&str>) {
+    pub async fn remove_workspace(
+        &self,
+        identifier: &str,
+        issue_id: &str,
+        before_remove: Option<&str>,
+    ) {
         let path = self.workspace_path(identifier);
         if path.exists() {
-            if let Some(script) = before_remove
-                && let Err(e) = self.run_hook("before_remove", script, &path).await
-            {
-                tracing::warn!(error = %e, "before_remove hook failed");
+            if let Some(script) = before_remove {
+                let env = sympheo_hook_env(identifier, issue_id, &path);
+                if let Err(e) = self.run_hook("before_remove", script, &path, &env).await {
+                    tracing::warn!(error = %e, "before_remove hook failed");
+                }
             }
             if let Err(e) = tokio::fs::remove_dir_all(&path).await {
                 tracing::warn!(path = %path.display(), error = %e, "failed to remove workspace");
@@ -174,20 +227,31 @@ mod tests {
 
     #[test]
     fn test_sanitize_identifier_basic() {
+        // SPEC §4.2 examples
+        assert_eq!(
+            WorkspaceManager::sanitize_identifier("sympheo#42"),
+            "sympheo-42"
+        );
         assert_eq!(WorkspaceManager::sanitize_identifier("ABC-123"), "ABC-123");
         assert_eq!(
             WorkspaceManager::sanitize_identifier("feat/new_thing"),
-            "feat_new_thing"
+            "feat-new_thing"
         );
         assert_eq!(
             WorkspaceManager::sanitize_identifier("bug: crash!"),
-            "bug__crash_"
+            "bug--crash-"
         );
     }
 
     #[test]
     fn test_sanitize_identifier_preserves_dots() {
         assert_eq!(WorkspaceManager::sanitize_identifier("v1.2.3"), "v1.2.3");
+    }
+
+    #[test]
+    fn test_sanitize_identifier_replaces_with_hyphen() {
+        // any char outside [A-Za-z0-9._-] becomes '-'
+        assert_eq!(WorkspaceManager::sanitize_identifier("a@b/c d"), "a-b-c-d");
     }
 
     #[test]
@@ -206,7 +270,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         let config = test_config_with_root(tmp.clone());
         let mgr = WorkspaceManager::new(&config).unwrap();
-        let info = mgr.create_or_reuse("NEW-1", None).await.unwrap();
+        let info = mgr
+            .create_or_reuse("NEW-1", "id-NEW-1", None)
+            .await
+            .unwrap();
         assert!(info.path.exists());
         assert!(info.created_now);
         assert_eq!(info.workspace_key, "NEW-1");
@@ -219,9 +286,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         let config = test_config_with_root(tmp.clone());
         let mgr = WorkspaceManager::new(&config).unwrap();
-        let info1 = mgr.create_or_reuse("EXIST-1", None).await.unwrap();
+        let info1 = mgr
+            .create_or_reuse("EXIST-1", "id-EXIST-1", None)
+            .await
+            .unwrap();
         assert!(info1.created_now);
-        let info2 = mgr.create_or_reuse("EXIST-1", None).await.unwrap();
+        let info2 = mgr
+            .create_or_reuse("EXIST-1", "id-EXIST-1", None)
+            .await
+            .unwrap();
         assert!(!info2.created_now);
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -233,7 +306,7 @@ mod tests {
         let config = test_config_with_root(tmp.clone());
         let mgr = WorkspaceManager::new(&config).unwrap();
         let info = mgr
-            .create_or_reuse("HOOK-1", Some("echo hello > created"))
+            .create_or_reuse("HOOK-1", "id-HOOK-1", Some("echo hello > created"))
             .await
             .unwrap();
         assert!(info.created_now);
@@ -250,7 +323,8 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         let config = test_config_with_root(tmp.clone());
         let mgr = WorkspaceManager::new(&config).unwrap();
-        let result = mgr.run_hook("test", "echo hello", &tmp).await;
+        let env = HashMap::new();
+        let result = mgr.run_hook("test", "echo hello", &tmp, &env).await;
         assert!(result.is_ok());
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -262,7 +336,8 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         let config = test_config_with_root(tmp.clone());
         let mgr = WorkspaceManager::new(&config).unwrap();
-        let result = mgr.run_hook("test", "exit 1", &tmp).await;
+        let env = HashMap::new();
+        let result = mgr.run_hook("test", "exit 1", &tmp, &env).await;
         assert!(result.is_err());
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -284,10 +359,29 @@ mod tests {
         raw.insert("hooks".into(), serde_json::Value::Object(hooks));
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
         let mgr = WorkspaceManager::new(&config).unwrap();
-        let result = mgr.run_hook("test", "sleep 5", &tmp).await;
+        let env = HashMap::new();
+        let result = mgr.run_hook("test", "sleep 5", &tmp, &env).await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("timed out"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn test_run_hook_env_vars_exposed() {
+        // SPEC §9.4 (RECOMMENDED): SYMPHEO_* env vars exposed to hook
+        let tmp = unique_tmp("hook_env");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let config = test_config_with_root(tmp.clone());
+        let mgr = WorkspaceManager::new(&config).unwrap();
+        let env = sympheo_hook_env("sympheo#42", "I_kwDOABCD12345", &tmp);
+        let script = r#"echo "$SYMPHEO_ISSUE_IDENTIFIER|$SYMPHEO_ISSUE_ID|$SYMPHEO_WORKSPACE_PATH" > out.txt"#;
+        let result = mgr.run_hook("test", script, &tmp, &env).await;
+        assert!(result.is_ok());
+        let contents = std::fs::read_to_string(tmp.join("out.txt")).unwrap();
+        let expected = format!("sympheo#42|I_kwDOABCD12345|{}\n", tmp.display());
+        assert_eq!(contents, expected);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -297,9 +391,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         let config = test_config_with_root(tmp.clone());
         let mgr = WorkspaceManager::new(&config).unwrap();
-        let info = mgr.create_or_reuse("REM-1", None).await.unwrap();
+        let info = mgr
+            .create_or_reuse("REM-1", "id-REM-1", None)
+            .await
+            .unwrap();
         assert!(info.path.exists());
-        mgr.remove_workspace("REM-1", None).await;
+        mgr.remove_workspace("REM-1", "id-REM-1", None).await;
         assert!(!info.path.exists());
     }
 
@@ -309,9 +406,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         let config = test_config_with_root(tmp.clone());
         let mgr = WorkspaceManager::new(&config).unwrap();
-        let info = mgr.create_or_reuse("REM-2", None).await.unwrap();
+        let info = mgr
+            .create_or_reuse("REM-2", "id-REM-2", None)
+            .await
+            .unwrap();
         assert!(info.path.exists());
-        mgr.remove_workspace("REM-2", Some("echo bye")).await;
+        mgr.remove_workspace("REM-2", "id-REM-2", Some("echo bye"))
+            .await;
         assert!(!info.path.exists());
     }
 
@@ -339,7 +440,7 @@ mod tests {
 
         let config = test_config_with_root(readonly.clone());
         let mgr = WorkspaceManager::new(&config).unwrap();
-        let result = mgr.create_or_reuse("FAIL-1", None).await;
+        let result = mgr.create_or_reuse("FAIL-1", "id-FAIL-1", None).await;
         assert!(result.is_err());
 
         use std::os::unix::fs::PermissionsExt;
@@ -353,9 +454,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         let config = test_config_with_root(tmp.clone());
         let mgr = WorkspaceManager::new(&config).unwrap();
-        let info = mgr.create_or_reuse("REM-FAIL", None).await.unwrap();
+        let info = mgr
+            .create_or_reuse("REM-FAIL", "id-REM-FAIL", None)
+            .await
+            .unwrap();
         assert!(info.path.exists());
-        mgr.remove_workspace("REM-FAIL", Some("exit 1")).await;
+        mgr.remove_workspace("REM-FAIL", "id-REM-FAIL", Some("exit 1"))
+            .await;
         assert!(!info.path.exists());
     }
 
@@ -365,7 +470,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         let config = test_config_with_root(tmp.clone());
         let mgr = WorkspaceManager::new(&config).unwrap();
-        let info = mgr.create_or_reuse("RM-FAIL", None).await.unwrap();
+        let info = mgr
+            .create_or_reuse("RM-FAIL", "id-RM-FAIL", None)
+            .await
+            .unwrap();
         assert!(info.path.exists());
         // Create a file inside
         std::fs::write(info.path.join("file.txt"), "data").unwrap();
@@ -373,7 +481,7 @@ mod tests {
         let mut perms = std::fs::metadata(&info.path).unwrap().permissions();
         perms.set_readonly(true);
         std::fs::set_permissions(&info.path, perms).unwrap();
-        mgr.remove_workspace("RM-FAIL", None).await;
+        mgr.remove_workspace("RM-FAIL", "id-RM-FAIL", None).await;
         // The workspace should still exist because removal failed
         assert!(info.path.exists());
         // Cleanup: restore permissions

@@ -53,6 +53,44 @@ pub enum SympheoError {
     #[error("agent stall detected")]
     AgentStallDetected,
 
+    // SPEC §5.5 + §10.5 — CLI adapter normalized errors
+    #[error("cli adapter not found for command: {0}")]
+    CliAdapterNotFound(String),
+
+    #[error("cli binary not found on PATH: {0}")]
+    CliNotFound(String),
+
+    #[error("invalid workspace cwd: {0}")]
+    InvalidWorkspaceCwd(String),
+
+    #[error("session start failed: {0}")]
+    SessionStartFailed(String),
+
+    #[error("turn launch failed: {0}")]
+    TurnLaunchFailed(String),
+
+    #[error("turn read timeout")]
+    TurnReadTimeout,
+
+    #[error("turn cancelled")]
+    TurnCancelled,
+
+    #[error("turn failed: {0}")]
+    TurnFailed(String),
+
+    #[error("output parse error: {0}")]
+    OutputParseError(String),
+
+    #[error("user input required: {0}")]
+    UserInputRequired(String),
+
+    // SPEC §11.3 — Tracker normalized errors
+    #[error("tracker pagination error: {0}")]
+    TrackerPaginationError(String),
+
+    #[error("tracker graphql errors: {0}")]
+    TrackerGraphQLErrors(String),
+
     #[error("invalid configuration: {0}")]
     InvalidConfiguration(String),
 
@@ -158,6 +196,51 @@ mod tests {
         assert_eq!(
             format!("{}", SympheoError::GitError("merge conflict".into())),
             "git error: merge conflict"
+        );
+        assert_eq!(
+            format!("{}", SympheoError::CliAdapterNotFound("foo".into())),
+            "cli adapter not found for command: foo"
+        );
+        assert_eq!(
+            format!("{}", SympheoError::CliNotFound("foo".into())),
+            "cli binary not found on PATH: foo"
+        );
+        assert_eq!(
+            format!("{}", SympheoError::InvalidWorkspaceCwd("/x".into())),
+            "invalid workspace cwd: /x"
+        );
+        assert_eq!(
+            format!("{}", SympheoError::SessionStartFailed("nope".into())),
+            "session start failed: nope"
+        );
+        assert_eq!(
+            format!("{}", SympheoError::TurnLaunchFailed("spawn".into())),
+            "turn launch failed: spawn"
+        );
+        assert_eq!(
+            format!("{}", SympheoError::TurnReadTimeout),
+            "turn read timeout"
+        );
+        assert_eq!(format!("{}", SympheoError::TurnCancelled), "turn cancelled");
+        assert_eq!(
+            format!("{}", SympheoError::TurnFailed("rate".into())),
+            "turn failed: rate"
+        );
+        assert_eq!(
+            format!("{}", SympheoError::OutputParseError("bad".into())),
+            "output parse error: bad"
+        );
+        assert_eq!(
+            format!("{}", SympheoError::UserInputRequired("approve".into())),
+            "user input required: approve"
+        );
+        assert_eq!(
+            format!("{}", SympheoError::TrackerPaginationError("cursor".into())),
+            "tracker pagination error: cursor"
+        );
+        assert_eq!(
+            format!("{}", SympheoError::TrackerGraphQLErrors("err".into())),
+            "tracker graphql errors: err"
         );
     }
 

@@ -258,9 +258,48 @@ impl ServiceConfig {
     }
 
     pub fn cli_stall_timeout_ms(&self) -> i64 {
+        // SPEC §5.3.6 default: 300000 (5 min). Operators MAY override in WORKFLOW.md.
         self.cli()
             .and_then(|m| resolver::get_i64(m, "stall_timeout_ms"))
-            .unwrap_or(1800000)
+            .unwrap_or(300000)
+    }
+
+    /// SPEC §5.3.6: `cli.args` — additional arguments appended to `cli.command` for each turn.
+    pub fn cli_args(&self) -> Vec<String> {
+        self.cli()
+            .and_then(|m| m.get("args"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(resolver::resolve_value))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// SPEC §5.3.6: `cli.env` — environment variables added to the subprocess for each turn.
+    /// Values support `$VAR_NAME` indirection (§6.1).
+    pub fn cli_env(&self) -> HashMap<String, String> {
+        let mut map = HashMap::new();
+        if let Some(cli_map) = self.cli()
+            && let Some(env_map) = cli_map.get("env").and_then(|v| v.as_object())
+        {
+            for (k, v) in env_map {
+                if let Some(val) = v.as_str() {
+                    map.insert(k.to_string(), resolver::resolve_value(val));
+                }
+            }
+        }
+        map
+    }
+
+    /// SPEC §5.3.6: `cli.options` — adapter-specific opaque options.
+    /// Sympheo does not interpret this map; it is forwarded verbatim to the adapter.
+    pub fn cli_options(&self) -> serde_json::Value {
+        self.cli()
+            .and_then(|m| m.get("options"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Object(serde_json::Map::new()))
     }
 
     pub fn continuation_prompt(&self) -> String {
@@ -360,9 +399,12 @@ impl ServiceConfig {
         let cmd = self.cli_command();
         if cmd.trim().is_empty() {
             return Err(SympheoError::InvalidConfiguration(
-                "codex.command is empty".into(),
+                "cli.command is empty".into(),
             ));
         }
+        // SPEC §6.3 + §10.1: resolve a CLI adapter from cli.command's leading binary token.
+        // Fails with CliAdapterNotFound if no adapter matches (§5.5).
+        let _ = crate::agent::cli::select_adapter(&cmd)?;
         if self.daytona_enabled() && self.daytona_api_key().is_none() {
             return Err(SympheoError::InvalidConfiguration(
                 "daytona.api_key is required when backend is enabled".into(),
@@ -716,7 +758,96 @@ mod tests {
 
     #[test]
     fn test_cli_stall_timeout_default() {
-        assert_eq!(empty_config().cli_stall_timeout_ms(), 1800000);
+        // SPEC §5.3.6 default: 300000 (5 min)
+        assert_eq!(empty_config().cli_stall_timeout_ms(), 300000);
+    }
+
+    #[test]
+    fn test_cli_args_default_empty() {
+        assert!(empty_config().cli_args().is_empty());
+    }
+
+    #[test]
+    fn test_cli_args_custom() {
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut cli = serde_json::Map::<String, serde_json::Value>::new();
+        cli.insert(
+            "args".into(),
+            serde_json::Value::Array(vec![
+                serde_json::Value::String("--verbose".into()),
+                serde_json::Value::String("--model=claude".into()),
+            ]),
+        );
+        raw.insert("cli".into(), serde_json::Value::Object(cli));
+        assert_eq!(
+            config_with(raw).cli_args(),
+            vec!["--verbose".to_string(), "--model=claude".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_cli_args_env_resolution() {
+        unsafe { std::env::set_var("TEST_CLI_FLAG", "--strict") };
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut cli = serde_json::Map::<String, serde_json::Value>::new();
+        cli.insert(
+            "args".into(),
+            serde_json::Value::Array(vec![serde_json::Value::String("$TEST_CLI_FLAG".into())]),
+        );
+        raw.insert("cli".into(), serde_json::Value::Object(cli));
+        assert_eq!(config_with(raw).cli_args(), vec!["--strict".to_string()]);
+        unsafe { std::env::remove_var("TEST_CLI_FLAG") };
+    }
+
+    #[test]
+    fn test_cli_env_default_empty() {
+        assert!(empty_config().cli_env().is_empty());
+    }
+
+    #[test]
+    fn test_cli_env_resolution() {
+        unsafe { std::env::set_var("TEST_CLI_ENV_VAL", "resolved") };
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut cli = serde_json::Map::<String, serde_json::Value>::new();
+        let mut env = serde_json::Map::<String, serde_json::Value>::new();
+        env.insert(
+            "MODEL".into(),
+            serde_json::Value::String("$TEST_CLI_ENV_VAL".into()),
+        );
+        env.insert(
+            "STATIC".into(),
+            serde_json::Value::String("static-value".into()),
+        );
+        cli.insert("env".into(), serde_json::Value::Object(env));
+        raw.insert("cli".into(), serde_json::Value::Object(cli));
+        let env_map = config_with(raw).cli_env();
+        assert_eq!(env_map.get("MODEL"), Some(&"resolved".to_string()));
+        assert_eq!(env_map.get("STATIC"), Some(&"static-value".to_string()));
+        unsafe { std::env::remove_var("TEST_CLI_ENV_VAL") };
+    }
+
+    #[test]
+    fn test_cli_options_default_empty_object() {
+        let opts = empty_config().cli_options();
+        assert!(opts.is_object());
+        assert!(opts.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_cli_options_passthrough() {
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut cli = serde_json::Map::<String, serde_json::Value>::new();
+        let mut opts = serde_json::Map::<String, serde_json::Value>::new();
+        opts.insert("model".into(), serde_json::Value::String("opus".into()));
+        opts.insert("permissions".into(), serde_json::Value::Bool(true));
+        cli.insert("options".into(), serde_json::Value::Object(opts));
+        raw.insert("cli".into(), serde_json::Value::Object(cli));
+        let result = config_with(raw).cli_options();
+        assert_eq!(result.get("model").and_then(|v| v.as_str()), Some("opus"));
+        assert_eq!(
+            result.get("permissions").and_then(|v| v.as_bool()),
+            Some(true)
+        );
     }
 
     #[test]

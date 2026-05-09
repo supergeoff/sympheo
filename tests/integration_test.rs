@@ -26,19 +26,25 @@ fn test_service_config_defaults() {
     assert_eq!(config.max_concurrent_agents(), 10);
     assert_eq!(config.max_turns(), 20);
     assert_eq!(config.cli_command(), "opencode run");
-    assert_eq!(config.cli_stall_timeout_ms(), 1800000);
+    // SPEC §5.3.6 default: 300000 (5 min)
+    assert_eq!(config.cli_stall_timeout_ms(), 300000);
 }
 
 #[test]
 fn test_workspace_sanitization() {
+    // SPEC §4.2 + §9.2: chars outside [A-Za-z0-9._-] become '-'
     assert_eq!(WorkspaceManager::sanitize_identifier("ABC-123"), "ABC-123");
     assert_eq!(
+        WorkspaceManager::sanitize_identifier("sympheo#42"),
+        "sympheo-42"
+    );
+    assert_eq!(
         WorkspaceManager::sanitize_identifier("feat/new_thing"),
-        "feat_new_thing"
+        "feat-new_thing"
     );
     assert_eq!(
         WorkspaceManager::sanitize_identifier("bug: crash!"),
-        "bug__crash_"
+        "bug--crash-"
     );
 }
 

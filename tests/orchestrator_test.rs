@@ -334,7 +334,14 @@ async fn test_orchestrator_tick_dispatches_non_todo() {
 async fn test_orchestrator_tick_worker_completes() {
     let mut raw = valid_config().raw().clone();
     let mut cli = serde_json::Map::<String, serde_json::Value>::new();
-    cli.insert("command".into(), serde_json::Value::String("false".into()));
+    // Use the spec-recognized "opencode" leading binary so validate_for_dispatch
+    // (§6.3 + §10.1) accepts the command. opencode is unlikely to be on PATH in CI;
+    // if absent → bash exits 127; if present → the bogus flag causes a non-zero exit.
+    // Either path triggers the subprocess-failure → retry-queue path under test.
+    cli.insert(
+        "command".into(),
+        serde_json::Value::String("opencode --sympheo-test-fail-Q9zXp".into()),
+    );
     raw.insert("cli".into(), serde_json::Value::Object(cli));
     let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "prompt".into());
     let issue = make_issue("1", "TEST-1", "todo");
@@ -346,14 +353,23 @@ async fn test_orchestrator_tick_worker_completes() {
     let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
     orch.tick().await;
 
-    // Wait for worker to spawn and fail quickly
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
-    let state = orch.state.read().await;
-    assert!(!state.running.contains_key("1"));
-    assert!(state.retry_attempts.contains_key("1"));
-    let retry = state.retry_attempts.get("1").unwrap();
-    assert!(retry.error.is_some());
+    // Wait for worker to spawn and fail (subprocess returns non-zero or cannot be found)
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        let st = orch.state.read().await;
+        if !st.running.contains_key("1") && st.retry_attempts.contains_key("1") {
+            assert!(st.retry_attempts.get("1").unwrap().error.is_some());
+            return;
+        }
+        if std::time::Instant::now() > deadline {
+            panic!(
+                "worker did not transition to retry within 5s; running={:?} retry_keys={:?}",
+                st.running.keys().collect::<Vec<_>>(),
+                st.retry_attempts.keys().collect::<Vec<_>>()
+            );
+        }
+    }
 }
 
 #[tokio::test]

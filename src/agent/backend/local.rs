@@ -29,65 +29,6 @@ impl LocalBackend {
             workspace_manager: WorkspaceManager::new(config)?,
         })
     }
-
-    async fn probe_opencode(&self, workspace_path: &Path) -> Result<(), SympheoError> {
-        let probe_file = workspace_path.join(".sympheo_probe.txt");
-        tokio::fs::write(&probe_file, "__sympheo_probe__")
-            .await
-            .map_err(|e| SympheoError::AgentRunnerError(format!("probe write failed: {e}")))?;
-
-        let mut cmd = Command::new("bash");
-        cmd.arg("-lc");
-        let probe_cmd = format!(
-            r#"PROMPT=$(cat "{}"); {} "$PROMPT" --format json --dir "{}" --dangerously-skip-permissions"#,
-            shell_escape(&probe_file.to_string_lossy()),
-            self.command,
-            shell_escape(&workspace_path.to_string_lossy())
-        );
-        cmd.arg(&probe_cmd);
-        cmd.current_dir(workspace_path);
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
-
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| SympheoError::AgentRunnerError(format!("probe spawn failed: {e}")))?;
-
-        let probe_result = timeout(Duration::from_secs(10), async {
-            let stderr = child
-                .stderr
-                .take()
-                .ok_or_else(|| SympheoError::AgentRunnerError("probe missing stderr".into()))?;
-            let reader = BufReader::new(stderr);
-            let mut lines = reader.lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                let trimmed = line.trim();
-                if trimmed.contains("Usage:")
-                    || trimmed.starts_with("--")
-                    || trimmed.contains("error: unknown")
-                {
-                    return Err(SympheoError::AgentRunnerError(
-                        "OpenCode rejected arguments — check prompt length or special characters"
-                            .into(),
-                    ));
-                }
-            }
-            Ok(())
-        })
-        .await;
-
-        let _ = child.start_kill();
-        let _ = tokio::fs::remove_file(&probe_file).await;
-
-        match probe_result {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) => Err(e),
-            Err(_) => {
-                tracing::warn!("opencode pre-flight probe timed out, proceeding anyway");
-                Ok(())
-            }
-        }
-    }
 }
 
 #[async_trait]
@@ -111,14 +52,30 @@ impl AgentBackend for LocalBackend {
         let span_clone = span.clone();
 
         async move {
+            // SPEC §9.5 Inv 2 + Inv 3: workspace path inside root, sanitized
             self.workspace_manager
                 .validate_inside_root(workspace_path)?;
 
+            // SPEC §9.5 Inv 1: launch cwd MUST be the per-issue workspace path.
+            // Validate the canonical form matches the workspace_path the orchestrator
+            // intends (defends against silent mismatches if a caller passes a sibling
+            // path or a symlinked alias).
+            let canonical_ws = workspace_path
+                .canonicalize()
+                .map_err(|e| SympheoError::InvalidWorkspaceCwd(e.to_string()))?;
+            if canonical_ws != workspace_path
+                && !workspace_path.starts_with(&canonical_ws)
+                && !canonical_ws.starts_with(workspace_path)
+            {
+                return Err(SympheoError::InvalidWorkspaceCwd(format!(
+                    "expected cwd to be workspace_path {}; canonical {}",
+                    workspace_path.display(),
+                    canonical_ws.display()
+                )));
+            }
+
             let sanitized = sanitize_prompt_for_opencode(prompt);
             tracing::debug!(prompt_len = sanitized.len(), "prompt length");
-
-            // Pre-flight probe
-            self.probe_opencode(workspace_path).await?;
 
             // Write prompt to a temp file to avoid shell escaping and ARG_MAX issues
             let prompt_file = workspace_path.join(format!(".sympheo_prompt_{}.txt", issue.id));

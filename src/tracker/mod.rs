@@ -7,6 +7,12 @@ use model::Issue;
 
 #[async_trait]
 pub trait IssueTracker: Send + Sync {
+    /// SPEC §11.1.1: static configuration validation (required fields, auth resolution).
+    /// Does NOT perform network calls. Default impl returns Ok for backward-compat.
+    fn validate(&self) -> Result<(), SympheoError> {
+        Ok(())
+    }
+
     async fn fetch_candidate_issues(&self) -> Result<Vec<Issue>, SympheoError>;
     async fn fetch_issues_by_states(&self, states: &[String]) -> Result<Vec<Issue>, SympheoError>;
     async fn fetch_issue_states_by_ids(&self, ids: &[String]) -> Result<Vec<Issue>, SympheoError>;

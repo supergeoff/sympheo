@@ -130,6 +130,12 @@ impl AgentBackend for LocalBackend {
                 .spawn()
                 .map_err(|e| SympheoError::AgentRunnerError(format!("spawn failed: {e}")))?;
 
+            // Register in the global process registry so signal/panic handlers
+            // can reach this subprocess (and clean it up if Sympheo crashes).
+            // The guard is dropped at function exit / panic, which removes the
+            // entry — so terminated workers don't leave stale records.
+            let _registry_guard = crate::agent::process_registry::register(child.id().unwrap_or(0));
+
             // Track PID and start cancellation watchdog
             let child_pid = Arc::new(AtomicU32::new(child.id().unwrap_or(0)));
             let child_pid_watch = child_pid.clone();

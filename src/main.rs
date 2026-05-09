@@ -172,29 +172,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?);
     let state = orchestrator.state.clone();
 
-    // Global graceful shutdown handler
-    let state_for_shutdown = state.clone();
+    // Install panic hook so any unhandled panic still terminates spawned CLIs
+    // (no zombie opencode after a sympheo crash). Grace period is short here
+    // because by the time the hook fires, the runtime is dying.
+    sympheo::agent::process_registry::install_panic_hook(tokio::time::Duration::from_millis(500));
+
+    // Global graceful shutdown handler: SIGINT (Ctrl-C) or SIGTERM.
+    // Iterates the global process registry, sends SIGTERM, waits 3s grace,
+    // then SIGKILL. Drains zombies independently of the orchestrator state map
+    // so any process spawned by the local backend is reachable.
     tokio::spawn(async move {
-        if let Err(e) = tokio::signal::ctrl_c().await {
-            warn!(error = %e, "ctrl_c handler error");
-            return;
-        }
-        info!("shutdown signal received, terminating child processes");
-        let st = state_for_shutdown.read().await;
-        for (issue_id, entry) in st.running.iter() {
-            if let Some(pid) = entry.session.as_ref().and_then(|s| s.agent_pid) {
-                let pgid = pid as i32;
-                unsafe {
-                    let _ = libc::killpg(pgid, libc::SIGTERM);
+        let mut sigterm =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(error = %e, "failed to install SIGTERM handler");
+                    return;
                 }
-                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-                unsafe {
-                    let _ = libc::killpg(pgid, libc::SIGKILL);
-                    let _ = libc::kill(pgid, libc::SIGKILL);
+            };
+        tokio::select! {
+            res = tokio::signal::ctrl_c() => {
+                if let Err(e) = res {
+                    warn!(error = %e, "ctrl_c handler error");
+                    return;
                 }
-                info!(issue_id = %issue_id, pid = %pid, "sent SIGKILL to agent process");
+                info!("SIGINT received, terminating child processes");
+            }
+            _ = sigterm.recv() => {
+                info!("SIGTERM received, terminating child processes");
             }
         }
+        sympheo::agent::process_registry::terminate_all_async(tokio::time::Duration::from_secs(3))
+            .await;
         std::process::exit(0);
     });
 

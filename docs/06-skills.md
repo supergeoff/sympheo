@@ -14,7 +14,15 @@ The combined prompt is passed to the agent command (e.g., `opencode run`) via st
 
 ## Built-In Skills
 
-Sympheo ships with five default skills covering the full delivery lifecycle:
+Sympheo ships with six default skills covering the full delivery lifecycle (one per stage of the default board):
+
+### `triage-todo` (Todo stage)
+
+The agent acts as a Triage Lead. It verifies the issue is actionable, completes missing context (acceptance criteria, scope, links), and decides whether the ticket is ready to advance to Spec.
+
+Key directives:
+- Do NOT write code, run tests, or modify source files.
+- Only update the issue body and move it to the next column when ready.
 
 ### `architect-spec` (Spec stage)
 
@@ -155,6 +163,7 @@ skills:
 
 | Config Key | File Path | Stage |
 |------------|-----------|-------|
+| `todo` | `./skills/todo/SKILL.md` | Triage / readiness |
 | `spec` | `./skills/spec/SKILL.md` | Design / specification |
 | `in progress` | `./skills/build/SKILL.md` | Implementation |
 | `review` | `./skills/review/SKILL.md` | Code review |

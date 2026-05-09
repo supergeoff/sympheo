@@ -71,6 +71,7 @@ server:
 
 skills:
   mapping:
+    todo: ./skills/todo/SKILL.md
     spec: ./skills/spec/SKILL.md
     in progress: ./skills/build/SKILL.md
     review: ./skills/review/SKILL.md

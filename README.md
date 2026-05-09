@@ -46,20 +46,24 @@ This activates local pre-commit and commit-msg hooks enforcing:
 
 ## Documentation
 
-All user documentation lives in the [`docs/`](docs/) directory:
+The user-facing documentation lives in [`docs/`](docs/), in the order most readers want:
 
 | Document | What you'll learn |
 |----------|-----------------|
-| [`01-introduction.md`](docs/01-introduction.md) | What Sympheo is, key concepts, when to use it |
+| [`01-introduction.md`](docs/01-introduction.md) | What Sympheo is, key concepts, when to use it, **and what it explicitly does NOT do** |
 | [`02-quickstart.md`](docs/02-quickstart.md) | Prerequisites, full setup, and first run |
 | [`03-core-concepts.md`](docs/03-core-concepts.md) | How the issue lifecycle, polling, and workspaces work |
 | [`04-configuration.md`](docs/04-configuration.md) | Complete `WORKFLOW.md` reference |
 | [`05-workflow-states.md`](docs/05-workflow-states.md) | The state machine and how to customize it |
 | [`06-skills.md`](docs/06-skills.md) | How skills work and how to write your own |
 | [`07-execution-modes.md`](docs/07-execution-modes.md) | Local vs Daytona execution |
-| [`08-monitoring.md`](docs/08-monitoring.md) | Dashboard, REST API, logs, and metrics |
-| [`09-troubleshooting.md`](docs/09-troubleshooting.md) | Common issues and FAQ |
-| [`10-advanced-topics.md`](docs/10-advanced-topics.md) | CI hooks, multi-instance setup, custom backends |
+| [`08-monitoring.md`](docs/08-monitoring.md) | Dashboard, REST API, kill switch, logs, and metrics |
+| [`09-troubleshooting.md`](docs/09-troubleshooting.md) | Common issues, FAQ, and operational controls |
+| [`10-advanced-topics.md`](docs/10-advanced-topics.md) | Hooks, multi-instance, recovery, security checklist, error categories |
+
+### Authoritative contract
+
+[`SPEC.md`](SPEC.md) (Draft v1, language-agnostic, RFC 2119 normative) is the **contract** of the service. The user docs above describe how this Rust implementation satisfies (and extends) that contract; when the user docs and `SPEC.md` disagree, `SPEC.md` is the source of truth.
 
 ## Development
 

@@ -52,7 +52,7 @@ cat WORKFLOW.md | sed -n '/---/,/---/p' | head -n -1 | tail -n +2 | yq '.'
    ```bash
    which opencode
    ```
-2. Verify the `codex.command` in your config is correct.
+2. Verify the `cli.command` in your config is correct.
 3. Check the `after_create` hook output. If the repo failed to clone, the agent has no code to work on.
 4. Look at the retry queue in the dashboard for the error message.
 
@@ -62,11 +62,11 @@ The dashboard shows an agent stuck with no new events.
 
 **Causes:**
 - The agent is waiting for interactive input (it should not, but misconfigured agents might).
-- The build or test suite is taking longer than `codex.turn_timeout_ms`.
+- The build or test suite is taking longer than `cli.turn_timeout_ms`.
 - The agent entered an infinite loop.
 
 **Fixes:**
-- Increase `codex.stall_timeout_ms` or `codex.turn_timeout_ms` in `WORKFLOW.md`.
+- Increase `cli.stall_timeout_ms` or `cli.turn_timeout_ms` in `WORKFLOW.md`.
 - Add logging to your `before_run` hook to confirm the environment is correct.
 - Cancel the issue by moving it to a terminal state on the board.
 
@@ -139,4 +139,18 @@ A: Technically yes, but they will race for the same issues. It is safer to parti
 
 **Q: How do I stop Sympheo gracefully?**
 
-A: Send `SIGINT` (Ctrl+C). Sympheo will finish the current tick and then exit. Running agents may be orphaned depending on your backend.
+A: Send `SIGINT` (Ctrl+C). Sympheo finishes the current tick and exits. Running CLI subprocesses spawned by the local backend are tracked in a process registry and killed via their process group on shutdown so no zombie agent remains after the orchestrator exits.
+
+**Q: How do I cancel a single ticket without killing Sympheo?**
+
+A: From the dashboard, click the **Kill** button on the active session row. Programmatically:
+
+```bash
+curl -X POST http://localhost:9090/api/v1/<url-encoded-identifier>/cancel
+```
+
+The orchestrator sends `SIGKILL` to the worker's process group and converts the exit into a retry per SPEC §7.3 / §8.4.
+
+**Q: How do I drain a stuck retry entry?**
+
+A: Use `DELETE /api/v1/retry/<url-encoded-identifier>`. Sympheo removes the retry entry and releases the claim so the slot is freed.

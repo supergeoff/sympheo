@@ -8,7 +8,7 @@ The default workflow assumes the following columns on your GitHub Project:
 
 | State | Purpose | Skill Injected |
 |-------|---------|----------------|
-| **Todo** | Backlog / ready to start | None (base prompt only) |
+| **Todo** | Backlog / ready to start | `triage-todo` |
 | **Spec** | Technical design and specification | `architect-spec` |
 | **In Progress** | Implementation and coding | `techlead-build` |
 | **Review** | Code review and quality gate | `code-reviewer-review` |
@@ -36,7 +36,9 @@ Any state listed in `tracker.terminal_states` signals that work is complete:
 
 ### State Transitions
 
-Sympheo itself does **not** move issues on the board. The agent is expected to do this via the GitHub CLI (`gh`) or GitHub API, using the `GITHUB_TOKEN` provided in its environment.
+Sympheo itself does **not** move issues on the board. This is a deliberate boundary (SPEC §11.5): the orchestrator is a scheduler and tracker reader, never a writer. The agent transitions tickets using `gh`, the GitHub API, or any tool exposed via `cli.env`.
+
+A consequence of this boundary: Sympheo does not validate that the agent actually produced an artifact (PR, branch, commit, body update) before the column changes. If the agent transitions a ticket without delivering, Sympheo has no way to detect it. Bake validation into your prompt, your skills, or your downstream review process — see [`01-introduction.md`](01-introduction.md#what-sympheo-does-not-do-trust-boundary).
 
 A typical transition flow looks like this:
 

@@ -27,11 +27,16 @@ async fn test_server_dashboard() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body = resp.text().await.unwrap();
-    assert!(body.contains("Sympheo Orchestrator"));
+    // Title + KPI eyebrow labels come from the Everyday AI design system
+    // (sentence case throughout, `·` middle-dot as separator).
+    assert!(body.contains("Sympheo · orchestrator"));
     assert!(body.contains("Running"));
     assert!(body.contains("Retrying"));
     assert!(body.contains("picocss"));
-    assert!(body.contains("setInterval"));
+    // HTMX fragment polling replaces the legacy `setInterval(reload)` —
+    // the page only swaps changed sections and never re-paints the chrome.
+    assert!(body.contains("hx-get=\"/fragments/stats\""));
+    assert!(body.contains("hx-trigger=\"every 3s\""));
 }
 
 #[tokio::test]
@@ -235,6 +240,71 @@ async fn test_server_api_refresh_triggers_notify() {
         notified.is_ok(),
         "refresh_notify was not triggered within 2s"
     );
+}
+
+#[tokio::test]
+async fn test_server_fragment_stats_returns_kpi_card_partial() {
+    let state = Arc::new(RwLock::new(
+        sympheo::orchestrator::state::OrchestratorState::new(30000, 10),
+    ));
+    let port = bind_test_server(state).await;
+
+    let resp = reqwest::get(format!("http://127.0.0.1:{}/fragments/stats", port))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    // Fragment is a self-contained <div> that re-installs its hx-* attrs
+    // so HTMX rebinds it after each swap.
+    assert!(body.contains("id=\"stat-grid\""));
+    assert!(body.contains("hx-get=\"/fragments/stats\""));
+    assert!(body.contains("Running"));
+    assert!(body.contains("Retrying"));
+    // No HTML <head> / <body> chrome — fragments are inserted into the live page.
+    assert!(!body.contains("<!DOCTYPE"));
+    assert!(!body.contains("<html"));
+}
+
+#[tokio::test]
+async fn test_server_fragment_sessions_empty() {
+    let state = Arc::new(RwLock::new(
+        sympheo::orchestrator::state::OrchestratorState::new(30000, 10),
+    ));
+    let port = bind_test_server(state).await;
+
+    let resp = reqwest::get(format!("http://127.0.0.1:{}/fragments/sessions", port))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("No active sessions"));
+}
+
+#[tokio::test]
+async fn test_server_fragment_retries_renders_row() {
+    let mut orch_state = sympheo::orchestrator::state::OrchestratorState::new(30000, 10);
+    orch_state.retry_attempts.insert(
+        "1".into(),
+        sympheo::tracker::model::RetryEntry {
+            issue_id: "1".into(),
+            identifier: "TEST-1".into(),
+            attempt: 2,
+            due_at: std::time::Instant::now(),
+            error: Some("timeout".into()),
+        },
+    );
+    let state = Arc::new(RwLock::new(orch_state));
+    let port = bind_test_server(state).await;
+
+    let resp = reqwest::get(format!("http://127.0.0.1:{}/fragments/retries", port))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("TEST-1"));
+    assert!(body.contains("timeout"));
+    // Status indicator class — outlined ink ring (no hue) per design system.
+    assert!(body.contains("indicator retrying"));
 }
 
 #[tokio::test]

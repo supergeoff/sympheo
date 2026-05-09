@@ -197,19 +197,26 @@ impl Orchestrator {
 
         for id in to_kill {
             warn!(issue_id = %id, "stall detected, terminating");
-            let identifier = {
+            let id_and_identifier = {
                 let state = self.state.read().await;
-                state.running.get(&id).map(|e| e.issue.identifier.clone())
+                state
+                    .running
+                    .get(&id)
+                    .map(|e| (e.issue.id.clone(), e.issue.identifier.clone()))
             };
             self.handle_worker_exit(&id, false, Some("stalled".into()))
                 .await;
-            if let Some(ident) = identifier {
+            if let Some((issue_id, ident)) = id_and_identifier {
                 let ws_path = self.workspace_manager.workspace_path(&ident);
                 if let Err(e) = self.runner.cleanup_workspace(&ws_path).await {
                     warn!(error = %e, issue_id = %id, "cleanup failed for stalled worker");
                 }
                 self.workspace_manager
-                    .remove_workspace(&ident, config.hook_script("before_remove").as_deref())
+                    .remove_workspace(
+                        &ident,
+                        &issue_id,
+                        config.hook_script("before_remove").as_deref(),
+                    )
                     .await;
             }
         }
@@ -230,6 +237,7 @@ impl Orchestrator {
                 if let Some(entry) = state.running.remove(&issue.id) {
                     state.claimed.remove(&issue.id);
                     let identifier = entry.issue.identifier.clone();
+                    let issue_id = entry.issue.id.clone();
                     drop(state);
                     let ws_path = self.workspace_manager.workspace_path(&identifier);
                     if let Err(e) = self.runner.cleanup_workspace(&ws_path).await {
@@ -238,6 +246,7 @@ impl Orchestrator {
                     self.workspace_manager
                         .remove_workspace(
                             &identifier,
+                            &issue_id,
                             config.hook_script("before_remove").as_deref(),
                         )
                         .await;
@@ -608,6 +617,7 @@ async fn run_worker(
     let workspace = workspace_manager
         .create_or_reuse(
             &issue.identifier,
+            &issue.id,
             config.hook_script("after_create").as_deref(),
         )
         .await?;
@@ -650,8 +660,13 @@ async fn run_worker(
 
     if let Some(script) = config.hook_script("before_run") {
         attempt_record.transition(AttemptStatus::PreparingWorkspace);
+        let env = crate::workspace::manager::sympheo_hook_env(
+            &issue.identifier,
+            &issue.id,
+            &workspace.path,
+        );
         workspace_manager
-            .run_hook("before_run", &script, &workspace.path)
+            .run_hook("before_run", &script, &workspace.path, &env)
             .await?;
     }
 
@@ -879,12 +894,19 @@ async fn run_worker(
     }
 
     attempt_record.transition(AttemptStatus::Finishing);
-    if let Some(script) = config.hook_script("after_run")
-        && let Err(e) = workspace_manager
-            .run_hook("after_run", &script, &workspace.path)
+    if let Some(script) = config.hook_script("after_run") {
+        let env = crate::workspace::manager::sympheo_hook_env(
+            &issue.identifier,
+            &issue.id,
+            &workspace.path,
+        );
+        // SPEC §9.4: after_run failure is logged and ignored.
+        if let Err(e) = workspace_manager
+            .run_hook("after_run", &script, &workspace.path, &env)
             .await
-    {
-        warn!(error = %e, "after_run hook failed");
+        {
+            warn!(error = %e, "after_run hook failed");
+        }
     }
 
     // Cleanup Daytona sandbox if issue is now terminal

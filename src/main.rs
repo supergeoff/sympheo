@@ -99,6 +99,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             wm.remove_workspace(
                 &issue.identifier,
+                &issue.id,
                 config.hook_script("before_remove").as_deref(),
             )
             .await;

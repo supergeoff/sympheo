@@ -1,5 +1,5 @@
 use crate::agent::backend::AgentBackend;
-use crate::agent::backend::{daytona::DaytonaBackend, local::LocalBackend};
+use crate::agent::backend::{daytona::DaytonaBackend, local::LocalBackend, mock::MockBackend};
 use crate::agent::parser::{AgentEvent, TurnResult};
 use crate::config::typed::ServiceConfig;
 use crate::error::SympheoError;
@@ -15,7 +15,24 @@ pub struct AgentRunner {
 
 impl AgentRunner {
     pub fn new(config: &ServiceConfig) -> Result<Self, SympheoError> {
-        let backend: Arc<dyn AgentBackend> = if config.daytona_enabled() {
+        let cmd = config.cli_command();
+        let leading = cmd
+            .split_whitespace()
+            .next()
+            .map(|s| {
+                std::path::Path::new(s)
+                    .file_name()
+                    .and_then(|f| f.to_str())
+                    .unwrap_or(s)
+                    .to_string()
+            })
+            .unwrap_or_default();
+        let backend: Arc<dyn AgentBackend> = if leading == "mock-cli" {
+            // P5 mock adapter for tests / dry-runs (zero tokens). Selected by
+            // `cli.command = "mock-cli"`. Reads a YAML/JSON event script from
+            // cli.options.script and replays it.
+            Arc::new(MockBackend::new(config)?)
+        } else if config.daytona_enabled() {
             Arc::new(DaytonaBackend::new(config)?)
         } else {
             Arc::new(LocalBackend::new(config)?)

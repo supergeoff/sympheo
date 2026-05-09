@@ -14,6 +14,19 @@ use tokio::sync::RwLock;
 pub type SharedState = Arc<RwLock<OrchestratorState>>;
 
 pub async fn start_server(port: u16, state: SharedState) -> Result<(), crate::error::SympheoError> {
+    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port))
+        .await
+        .map_err(|e| crate::error::SympheoError::Io(e.to_string()))?;
+    start_server_with_listener(listener, state).await
+}
+
+// Tests pre-bind the listener to avoid the find_free_port → start_server race
+// where the kernel hands the same ephemeral port to two parallel test cases
+// between port discovery and server bind.
+pub async fn start_server_with_listener(
+    listener: tokio::net::TcpListener,
+    state: SharedState,
+) -> Result<(), crate::error::SympheoError> {
     let app = Router::new()
         .route("/", get(dashboard))
         .route("/api/v1/state", get(api_state))
@@ -23,10 +36,7 @@ pub async fn start_server(port: u16, state: SharedState) -> Result<(), crate::er
         .route("/api/v1/retry/{issue_identifier}", delete(api_retry_delete))
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port))
-        .await
-        .map_err(|e| crate::error::SympheoError::Io(e.to_string()))?;
-    let actual_port = listener.local_addr().map(|a| a.port()).unwrap_or(port);
+    let actual_port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
     tracing::info!(port = actual_port, "HTTP server listening");
     axum::serve(listener, app)
         .await

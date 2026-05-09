@@ -3,7 +3,7 @@ use axum::{
     Router,
     extract::{Path as AxumPath, State},
     http::StatusCode,
-    response::{Html, Json},
+    response::{Html, IntoResponse, Json},
     routing::{delete, get, post},
 };
 use serde_json::json;
@@ -34,6 +34,10 @@ pub async fn start_server_with_listener(
         .route("/api/v1/{issue_identifier}", get(api_issue))
         .route("/api/v1/{issue_identifier}/cancel", post(api_cancel))
         .route("/api/v1/retry/{issue_identifier}", delete(api_retry_delete))
+        // SPEC §13.7.2: unsupported methods on defined routes return 405 with
+        // the JSON error envelope. Without this, axum returns an empty 405
+        // body, which violates the documented error contract.
+        .method_not_allowed_fallback(method_not_allowed)
         .with_state(state);
 
     let actual_port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
@@ -42,6 +46,32 @@ pub async fn start_server_with_listener(
         .await
         .map_err(|e| crate::error::SympheoError::Io(e.to_string()))?;
     Ok(())
+}
+
+/// SPEC §13.7.2 error envelope: `{"error": {"code": ..., "message": ...}}`.
+/// Used by every error path so clients have a single shape to parse.
+fn json_error(
+    status: StatusCode,
+    code: &str,
+    message: impl Into<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        status,
+        Json(json!({
+            "error": {
+                "code": code,
+                "message": message.into(),
+            }
+        })),
+    )
+}
+
+async fn method_not_allowed() -> impl IntoResponse {
+    json_error(
+        StatusCode::METHOD_NOT_ALLOWED,
+        "method_not_allowed",
+        "Method not allowed for this route",
+    )
 }
 
 async fn dashboard(State(state): State<SharedState>) -> (StatusCode, Html<String>) {
@@ -429,6 +459,21 @@ async fn api_state(State(state): State<SharedState>) -> Json<serde_json::Value> 
             })
         })
         .collect();
+    // SPEC §13.7.2 requires `due_at` on retrying[] rows. RetryEntry stores
+    // due_at as a monotonic Instant; convert to wall-clock UTC by anchoring
+    // against `now` (the conversion is approximate but accurate within one
+    // tick of the Instant clock, which is fine for an observability surface).
+    let now_inst = std::time::Instant::now();
+    let now_utc_wall = chrono::Utc::now();
+    let instant_to_utc = |t: std::time::Instant| -> chrono::DateTime<chrono::Utc> {
+        if t >= now_inst {
+            now_utc_wall
+                + chrono::Duration::from_std(t - now_inst).unwrap_or(chrono::Duration::zero())
+        } else {
+            now_utc_wall
+                - chrono::Duration::from_std(now_inst - t).unwrap_or(chrono::Duration::zero())
+        }
+    };
     let retrying: Vec<serde_json::Value> = st
         .retry_attempts
         .values()
@@ -437,6 +482,7 @@ async fn api_state(State(state): State<SharedState>) -> Json<serde_json::Value> 
                 "issue_id": r.issue_id,
                 "issue_identifier": r.identifier,
                 "attempt": r.attempt,
+                "due_at": instant_to_utc(r.due_at).to_rfc3339(),
                 "error": r.error,
             })
         })
@@ -481,7 +527,8 @@ async fn api_state(State(state): State<SharedState>) -> Json<serde_json::Value> 
         "running": running,
         "retrying": retrying,
         "summary": summary,
-        "cli_totals": {
+        // SPEC §13.7.2: aggregate token/runtime totals are named `agent_totals`.
+        "agent_totals": {
             "input_tokens": st.cli_totals.input_tokens,
             "output_tokens": st.cli_totals.output_tokens,
             "total_tokens": st.cli_totals.total_tokens,
@@ -491,18 +538,23 @@ async fn api_state(State(state): State<SharedState>) -> Json<serde_json::Value> 
     }))
 }
 
-async fn api_refresh(State(state): State<SharedState>) -> Json<serde_json::Value> {
+async fn api_refresh(State(state): State<SharedState>) -> (StatusCode, Json<serde_json::Value>) {
     let notify = {
         let st = state.read().await;
         st.refresh_notify.clone()
     };
     notify.notify_one();
-    Json(json!({
-        "queued": true,
-        "coalesced": false,
-        "requested_at": chrono::Utc::now().to_rfc3339(),
-        "operations": ["poll", "reconcile"]
-    }))
+    // SPEC §13.7.2: refresh is a queued/best-effort trigger and SHOULD return
+    // 202 Accepted to convey that the work happens asynchronously.
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({
+            "queued": true,
+            "coalesced": false,
+            "requested_at": chrono::Utc::now().to_rfc3339(),
+            "operations": ["poll", "reconcile"]
+        })),
+    )
 }
 
 /// SPEC §13.7 extension: operational control endpoint to cancel a running worker.
@@ -515,7 +567,7 @@ async fn api_refresh(State(state): State<SharedState>) -> Json<serde_json::Value
 async fn api_cancel(
     State(state): State<SharedState>,
     AxumPath(issue_identifier): AxumPath<String>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let st = state.read().await;
     let entry = st
         .running
@@ -536,7 +588,11 @@ async fn api_cancel(
                 "requested_at": chrono::Utc::now().to_rfc3339(),
             })))
         }
-        None => Err(StatusCode::NOT_FOUND),
+        None => Err(json_error(
+            StatusCode::NOT_FOUND,
+            "issue_not_found",
+            format!("No running issue with identifier {issue_identifier:?}"),
+        )),
     }
 }
 
@@ -545,7 +601,7 @@ async fn api_cancel(
 async fn api_retry_delete(
     State(state): State<SharedState>,
     AxumPath(issue_identifier): AxumPath<String>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let mut st = state.write().await;
     // Find the entry by identifier (retry entries store identifier alongside id).
     let issue_id = st
@@ -569,14 +625,18 @@ async fn api_retry_delete(
                 "requested_at": chrono::Utc::now().to_rfc3339(),
             })))
         }
-        None => Err(StatusCode::NOT_FOUND),
+        None => Err(json_error(
+            StatusCode::NOT_FOUND,
+            "issue_not_found",
+            format!("No retry entry for identifier {issue_identifier:?}"),
+        )),
     }
 }
 
 async fn api_issue(
     State(state): State<SharedState>,
     AxumPath(issue_identifier): AxumPath<String>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let st = state.read().await;
     let entry = st
         .running
@@ -584,35 +644,61 @@ async fn api_issue(
         .find(|e| e.issue.identifier == issue_identifier);
     if let Some(entry) = entry {
         let sess = entry.session.as_ref();
+        // SPEC §13.7.2 nests: attempts.{restart_count, current_retry_attempt}
+        // and running.tokens.{input_tokens, output_tokens, total_tokens}.
+        // We add our extension fields under the running block (thread_id,
+        // turn_id) which is forward-compatible per §13.7.
+        let attempts = json!({
+            "restart_count": 0,
+            "current_retry_attempt": entry.retry_attempt.unwrap_or(0),
+        });
+        let running_block = sess.map(|s| {
+            json!({
+                "session_id": s.session_id,
+                "turn_count": entry.turn_count,
+                "state": entry.issue.state,
+                "started_at": entry.started_at.to_rfc3339(),
+                "last_event": s.last_event,
+                "last_message": s.last_message,
+                "last_event_at": s.last_timestamp.map(|t| t.to_rfc3339()),
+                "tokens": {
+                    "input_tokens": s.input_tokens,
+                    "output_tokens": s.output_tokens,
+                    "total_tokens": s.total_tokens,
+                },
+                "thread_id": s.thread_id,
+                "turn_id": s.turn_id,
+            })
+        });
+        let recent_events: Vec<serde_json::Value> = sess
+            .and_then(|s| {
+                s.last_event.as_ref().map(|e| {
+                    vec![json!({
+                        "at": s.last_timestamp.map(|t| t.to_rfc3339()),
+                        "event": e,
+                        "message": s.last_message,
+                    })]
+                })
+            })
+            .unwrap_or_default();
         Ok(Json(json!({
             "issue_identifier": entry.issue.identifier,
             "issue_id": entry.issue.id,
             "status": "running",
             "started_at": entry.started_at.to_rfc3339(),
-            "turn_count": entry.turn_count,
-            "retry_attempt": entry.retry_attempt,
-            "session": sess.map(|s| json!({
-                "session_id": s.session_id,
-                "thread_id": s.thread_id,
-                "turn_id": s.turn_id,
-                "last_event": s.last_event,
-                "last_message": s.last_message,
-                "last_timestamp": s.last_timestamp.map(|t| t.to_rfc3339()),
-                "input_tokens": s.input_tokens,
-                "output_tokens": s.output_tokens,
-                "total_tokens": s.total_tokens,
-                "turn_count": s.turn_count,
-            })),
-            "recent_events": sess.map(|s| {
-                let mut ev = vec![];
-                if let Some(ref e) = s.last_event {
-                    ev.push(json!({"event": e, "at": s.last_timestamp.map(|t| t.to_rfc3339())}));
-                }
-                ev
-            }).unwrap_or_default(),
+            "attempts": attempts,
+            "running": running_block,
+            "retry": serde_json::Value::Null,
+            "recent_events": recent_events,
+            "last_error": serde_json::Value::Null,
+            "tracked": {},
         })))
     } else {
-        Err(StatusCode::NOT_FOUND)
+        Err(json_error(
+            StatusCode::NOT_FOUND,
+            "issue_not_found",
+            format!("No running issue with identifier {issue_identifier:?}"),
+        ))
     }
 }
 
@@ -713,7 +799,10 @@ mod tests {
         let state = OrchestratorState::new(5000, 5);
         let shared = Arc::new(RwLock::new(state));
         let result = api_cancel(State(shared), AxumPath("nope#1".into())).await;
-        assert_eq!(result.unwrap_err(), StatusCode::NOT_FOUND);
+        let (status, Json(body)) = result.unwrap_err();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "issue_not_found");
+        assert!(body["error"]["message"].as_str().is_some());
     }
 
     #[tokio::test]
@@ -743,7 +832,10 @@ mod tests {
         let state = OrchestratorState::new(5000, 5);
         let shared = Arc::new(RwLock::new(state));
         let result = api_retry_delete(State(shared), AxumPath("nope#1".into())).await;
-        assert_eq!(result.unwrap_err(), StatusCode::NOT_FOUND);
+        let (status, Json(body)) = result.unwrap_err();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "issue_not_found");
+        assert!(body["error"]["message"].as_str().is_some());
     }
 
     #[tokio::test]
@@ -990,7 +1082,16 @@ mod tests {
         assert!(result.is_ok());
         let json = result.unwrap().0;
         assert_eq!(json["issue_identifier"], "TEST-1");
-        assert!(json["session"].is_object());
+        // SPEC §13.7.2: nested `running` object replaces the flat `session` block.
+        let running = json["running"].as_object().expect("running block");
+        assert_eq!(running["session_id"], "s1");
+        assert_eq!(running["state"], "todo");
+        assert_eq!(running["tokens"]["input_tokens"], 10);
+        assert_eq!(running["tokens"]["output_tokens"], 20);
+        assert_eq!(running["tokens"]["total_tokens"], 30);
+        let attempts = json["attempts"].as_object().expect("attempts block");
+        assert_eq!(attempts["restart_count"], 0);
+        assert_eq!(attempts["current_retry_attempt"], 0);
         assert!(!json["recent_events"].as_array().unwrap().is_empty());
     }
 

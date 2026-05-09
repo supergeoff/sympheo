@@ -95,6 +95,7 @@ Returns the full orchestrator state.
       "issue_id": "123457",
       "issue_identifier": "#43",
       "attempt": 2,
+      "due_at": "2024-01-15T09:31:00Z",
       "error": "Agent exited with code 1"
     }
   ],
@@ -125,7 +126,7 @@ Returns the full orchestrator state.
       }
     ]
   },
-  "cli_totals": {
+  "agent_totals": {
     "input_tokens": 45000,
     "output_tokens": 12000,
     "total_tokens": 57000,
@@ -143,7 +144,7 @@ Triggers an immediate poll and reconciliation cycle, bypassing the normal timer.
 curl -X POST http://localhost:9090/api/v1/refresh
 ```
 
-Response:
+Response (`202 Accepted` — the work is queued and runs asynchronously):
 
 ```json
 {
@@ -170,32 +171,59 @@ Response:
   "issue_id": "123456",
   "status": "running",
   "started_at": "2024-01-15T09:15:00Z",
-  "turn_count": 2,
-  "retry_attempt": 0,
-  "session": {
+  "attempts": {
+    "restart_count": 0,
+    "current_retry_attempt": 0
+  },
+  "running": {
     "session_id": "sess-abc",
-    "thread_id": "thread-1",
-    "turn_id": "turn-2",
+    "turn_count": 2,
+    "state": "in progress",
+    "started_at": "2024-01-15T09:15:00Z",
     "last_event": "step_finish",
     "last_message": "Refactored the parser module",
-    "last_timestamp": "2024-01-15T09:20:00Z",
-    "input_tokens": 15000,
-    "output_tokens": 4200,
-    "total_tokens": 19200,
-    "turn_count": 2
+    "last_event_at": "2024-01-15T09:20:00Z",
+    "tokens": {
+      "input_tokens": 15000,
+      "output_tokens": 4200,
+      "total_tokens": 19200
+    },
+    "thread_id": "thread-1",
+    "turn_id": "turn-2"
   },
+  "retry": null,
   "recent_events": [
     {
+      "at": "2024-01-15T09:20:00Z",
       "event": "step_finish",
-      "at": "2024-01-15T09:20:00Z"
+      "message": "Refactored the parser module"
     }
-  ]
+  ],
+  "last_error": null,
+  "tracked": {}
 }
 ```
 
-If the issue is not currently running, the API returns `404 Not Found`.
+If the issue is not currently running, the API returns `404 Not Found` with the JSON error envelope:
 
-> **Spec alignment note** — SPEC §13.7.2 names the aggregate field `agent_totals` and the response status of `POST /api/v1/refresh` as `202 Accepted`. The current implementation emits `cli_totals` and returns `200`. These are tracked nomenclature/status gaps; the field semantics match.
+```json
+{ "error": { "code": "issue_not_found", "message": "..." } }
+```
+
+### Error responses
+
+All `/api/v1/*` error responses use the SPEC §13.7.2 envelope:
+
+```json
+{ "error": { "code": "<machine-readable code>", "message": "<human-readable description>" } }
+```
+
+Defined codes:
+
+| Status | Code | When |
+|--------|------|------|
+| `404 Not Found` | `issue_not_found` | `GET /api/v1/<id>`, `POST /api/v1/<id>/cancel`, `DELETE /api/v1/retry/<id>` when no matching entry. |
+| `405 Method Not Allowed` | `method_not_allowed` | An unsupported method is used on a defined route (e.g. `GET /api/v1/refresh`). |
 
 ### `POST /api/v1/<issue_identifier>/cancel`
 
@@ -258,4 +286,4 @@ RUST_LOG=info cargo run -- --port 9090 2>&1 | jq .
 
 ## Metrics
 
-While there is no dedicated metrics endpoint yet, the dashboard exposes aggregate token usage and runtime counters since startup. For external monitoring, you can poll `/api/v1/state` periodically and forward the `cli_totals` object to your metrics stack.
+While there is no dedicated metrics endpoint yet, the dashboard exposes aggregate token usage and runtime counters since startup. For external monitoring, you can poll `/api/v1/state` periodically and forward the `agent_totals` object to your metrics stack.

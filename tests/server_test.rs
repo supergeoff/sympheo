@@ -124,6 +124,19 @@ async fn test_server_api_state_with_data() {
     assert_eq!(running[0]["tokens"]["output_tokens"], 50);
     let retrying = body["retrying"].as_array().unwrap();
     assert_eq!(retrying[0]["error"], "retry err");
+    // SPEC §13.7.2: retry rows include `due_at` (ISO-8601 UTC).
+    assert!(
+        retrying[0]["due_at"].as_str().is_some(),
+        "retry row must expose due_at: {:?}",
+        retrying[0]
+    );
+    // SPEC §13.7.2: aggregate totals are named `agent_totals` (not `cli_totals`).
+    assert!(
+        body["agent_totals"].is_object(),
+        "snapshot must expose agent_totals: {:?}",
+        body
+    );
+    assert!(body["cli_totals"].is_null());
     assert!(body["summary"].is_object());
     assert_eq!(body["summary"]["by_state"]["todo"], 1);
     assert_eq!(
@@ -147,7 +160,8 @@ async fn test_server_api_refresh() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200);
+    // SPEC §13.7.2: refresh returns 202 Accepted to convey async/queued work.
+    assert_eq!(resp.status(), 202);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["queued"], true);
     assert!(body["requested_at"].as_str().is_some());
@@ -191,8 +205,13 @@ async fn test_server_api_issue_found() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["issue_identifier"], "TEST-1");
     assert_eq!(body["status"], "running");
-    assert_eq!(body["turn_count"], 3);
-    assert_eq!(body["retry_attempt"], serde_json::Value::Null);
+    // SPEC §13.7.2: attempts.{restart_count, current_retry_attempt}
+    let attempts = body["attempts"].as_object().expect("attempts object");
+    assert_eq!(attempts["restart_count"], 0);
+    assert_eq!(attempts["current_retry_attempt"], 0);
+    // SPEC §13.7.2 envelope when no live session: `running` is null but the
+    // top-level shape (issue_id, status, attempts, recent_events) is present.
+    assert!(body["recent_events"].is_array());
 }
 
 #[tokio::test]
@@ -208,7 +227,7 @@ async fn test_server_api_refresh_triggers_notify() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.status(), 202);
 
     let timeout = tokio::time::Duration::from_secs(2);
     let notified = tokio::time::timeout(timeout, notify.notified()).await;
@@ -229,4 +248,60 @@ async fn test_server_api_issue_not_found() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 404);
+    // SPEC §13.7.2: errors use `{"error":{"code":..., "message":...}}`.
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "issue_not_found");
+    assert!(body["error"]["message"].as_str().is_some());
+}
+
+/// SPEC §13.7.2: unsupported methods on defined routes return 405 with the
+/// JSON error envelope. Cover each defined route with a method that isn't
+/// registered for it.
+#[tokio::test]
+async fn test_server_unsupported_methods_return_405() {
+    let state = Arc::new(RwLock::new(
+        sympheo::orchestrator::state::OrchestratorState::new(30000, 10),
+    ));
+    let port = bind_test_server(state).await;
+    let client = reqwest::Client::new();
+
+    let cases: &[(&str, &str)] = &[
+        // /api/v1/state is GET-only.
+        ("POST", "/api/v1/state"),
+        // /api/v1/refresh is POST-only.
+        ("GET", "/api/v1/refresh"),
+        // /api/v1/<id> is GET-only.
+        ("DELETE", "/api/v1/some-id"),
+        // /api/v1/<id>/cancel is POST-only.
+        ("GET", "/api/v1/some-id/cancel"),
+        // /api/v1/retry/<id> is DELETE-only.
+        ("POST", "/api/v1/retry/some-id"),
+    ];
+
+    for (method, path) in cases {
+        let url = format!("http://127.0.0.1:{}{}", port, path);
+        let req = match *method {
+            "GET" => client.get(&url),
+            "POST" => client.post(&url),
+            "DELETE" => client.delete(&url),
+            other => panic!("unexpected method in test case: {other}"),
+        };
+        let resp = req.send().await.unwrap();
+        assert_eq!(
+            resp.status(),
+            405,
+            "expected 405 for {method} {path}, got {}",
+            resp.status()
+        );
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(
+            body["error"]["code"], "method_not_allowed",
+            "wrong error envelope for {method} {path}: {:?}",
+            body
+        );
+        assert!(
+            body["error"]["message"].as_str().is_some(),
+            "missing message for {method} {path}"
+        );
+    }
 }

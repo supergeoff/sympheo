@@ -110,13 +110,68 @@ where
     Ok(v.max(0) as u64)
 }
 
+/// SPEC §10.2.2: outcome of a single agent turn. Replaces the previous
+/// `success: bool` so the orchestrator can branch on the specific failure
+/// mode (read timeout vs total timeout vs cancelled vs failed) rather than
+/// collapsing everything into a boolean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnOutcome {
+    Succeeded,
+    Failed,
+    Cancelled,
+    TimedOut,
+}
+
+impl TurnOutcome {
+    pub fn is_success(self) -> bool {
+        matches!(self, TurnOutcome::Succeeded)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TurnResult {
     pub session_id: String,
     pub turn_id: String,
-    pub success: bool,
-    pub text: String,
-    pub tokens: Option<TokenInfo>,
+    /// SPEC §10.2.2.
+    pub outcome: TurnOutcome,
+    /// SPEC §10.2.2 OPTIONAL `last_message`.
+    pub last_message: Option<String>,
+    /// SPEC §10.2.2 OPTIONAL `usage`.
+    pub usage: Option<TokenInfo>,
+    /// SPEC §10.2.2 OPTIONAL normalized error.
+    pub error: Option<String>,
+}
+
+impl TurnResult {
+    pub fn succeeded(&self) -> bool {
+        self.outcome.is_success()
+    }
+}
+
+/// SPEC §10.3 — event payload envelope. Adapters wrap each parsed
+/// `AgentEvent` with the active turn's subprocess PID (when known) so the
+/// orchestrator can correlate events with workers and operators can trace
+/// which subprocess emitted what.
+#[derive(Debug, Clone)]
+pub struct EmittedEvent {
+    pub event: AgentEvent,
+    pub agent_pid: Option<u32>,
+}
+
+impl EmittedEvent {
+    pub fn new(event: AgentEvent) -> Self {
+        Self {
+            event,
+            agent_pid: None,
+        }
+    }
+
+    pub fn with_pid(event: AgentEvent, pid: Option<u32>) -> Self {
+        Self {
+            event,
+            agent_pid: pid,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

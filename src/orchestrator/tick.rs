@@ -1,4 +1,4 @@
-use crate::agent::parser::AgentEvent;
+use crate::agent::parser::{AgentEvent, EmittedEvent, TurnOutcome};
 use crate::agent::runner::AgentRunner;
 use crate::config::typed::ServiceConfig;
 use crate::error::SympheoError;
@@ -670,13 +670,17 @@ async fn run_worker(
             .await?;
     }
 
-    let mut current_session: Option<String> = None;
     let mut turn_number = 0;
 
     let skills = {
         let st = state.read().await;
         st.skills.clone()
     };
+
+    // SPEC §10.2.1 + §10.7: allocate the adapter session once per worker run.
+    // The handle is reused across every turn; it doubles as the "current
+    // session id" the per-turn invocation passes back to the CLI for resume.
+    let session_ctx = runner.start_session(&workspace.path).await?;
 
     loop {
         if cancelled.load(Ordering::Relaxed) {
@@ -732,28 +736,49 @@ async fn run_worker(
         // update orchestrator state in real time. Sized for chatty turns
         // (text deltas, tool calls) without back-pressuring the backend
         // stdout reader during normal operation.
-        let (event_tx, event_rx) = tokio::sync::mpsc::channel(1024);
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel::<EmittedEvent>(1024);
 
         let state_for_events = state.clone();
         let issue_id_for_events = issue.id.clone();
         let event_consumer = tokio::spawn(async move {
             let mut rx = event_rx;
-            while let Some(event) = rx.recv().await {
-                apply_agent_event(&state_for_events, &issue_id_for_events, event).await;
+            while let Some(emitted) = rx.recv().await {
+                // SPEC §10.3: stamp the active turn PID onto LiveSession so it
+                // surfaces in the snapshot/status surface alongside the event.
+                if let Some(pid) = emitted.agent_pid {
+                    let mut st = state_for_events.write().await;
+                    if let Some(entry) = st.running.get_mut(&issue_id_for_events)
+                        && let Some(ref mut sess) = entry.session
+                    {
+                        sess.agent_pid = Some(pid);
+                    }
+                }
+                apply_agent_event(&state_for_events, &issue_id_for_events, emitted.event).await;
             }
         });
 
         attempt_record.transition(AttemptStatus::StreamingTurn);
-        let turn_result = runner
+        let turn_result = match runner
             .run_turn(
-                &issue,
+                &session_ctx,
                 &prompt,
-                current_session.as_deref(),
+                &issue,
+                turn_number,
                 &workspace.path,
                 cancelled.clone(),
                 event_tx,
             )
-            .await?;
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                // SPEC §10.2.3: stop_session MUST be safe to call after a
+                // run_turn failure. We swallow its error (best-effort
+                // teardown) so the original failure surfaces.
+                let _ = runner.stop_session(&session_ctx).await;
+                return Err(e);
+            }
+        };
 
         // run_turn dropped its sender on return — let the consumer drain
         // the remaining events queued in the channel before we proceed.
@@ -769,7 +794,7 @@ async fn run_worker(
                 .unwrap_or(false)
         };
 
-        if !already_counted && let Some(ref token_info) = turn_result.tokens {
+        if !already_counted && let Some(ref token_info) = turn_result.usage {
             let mut st = state.write().await;
             st.cli_totals.input_tokens += token_info.input;
             st.cli_totals.output_tokens += token_info.output;
@@ -796,8 +821,8 @@ async fn run_worker(
                     sess.turn_id = turn_result.turn_id.clone();
                     sess.last_event = Some("turn_completed".into());
                     sess.last_timestamp = Some(Utc::now());
-                    sess.last_message = Some(turn_result.text.clone());
-                    if let Some(ref t) = turn_result.tokens {
+                    sess.last_message = turn_result.last_message.clone();
+                    if let Some(ref t) = turn_result.usage {
                         sess.input_tokens = t.input;
                         sess.output_tokens = t.output;
                         sess.total_tokens = t.total;
@@ -811,22 +836,22 @@ async fn run_worker(
                         agent_pid: None,
                         last_event: Some("turn_completed".into()),
                         last_timestamp: Some(Utc::now()),
-                        last_message: Some(turn_result.text.clone()),
-                        input_tokens: turn_result.tokens.as_ref().map(|t| t.input).unwrap_or(0),
-                        output_tokens: turn_result.tokens.as_ref().map(|t| t.output).unwrap_or(0),
-                        total_tokens: turn_result.tokens.as_ref().map(|t| t.total).unwrap_or(0),
+                        last_message: turn_result.last_message.clone(),
+                        input_tokens: turn_result.usage.as_ref().map(|t| t.input).unwrap_or(0),
+                        output_tokens: turn_result.usage.as_ref().map(|t| t.output).unwrap_or(0),
+                        total_tokens: turn_result.usage.as_ref().map(|t| t.total).unwrap_or(0),
                         last_reported_input_tokens: turn_result
-                            .tokens
+                            .usage
                             .as_ref()
                             .map(|t| t.input)
                             .unwrap_or(0),
                         last_reported_output_tokens: turn_result
-                            .tokens
+                            .usage
                             .as_ref()
                             .map(|t| t.output)
                             .unwrap_or(0),
                         last_reported_total_tokens: turn_result
-                            .tokens
+                            .usage
                             .as_ref()
                             .map(|t| t.total)
                             .unwrap_or(0),
@@ -837,14 +862,31 @@ async fn run_worker(
             }
         }
 
-        if !turn_result.success {
-            attempt_record.transition(AttemptStatus::Failed);
-            return Err(SympheoError::AgentRunnerError(
-                "turn reported failure".into(),
-            ));
+        // SPEC §10.7: branch on the typed outcome rather than a boolean.
+        // Anything other than `Succeeded` exits the per-worker loop with a
+        // typed error so the orchestrator's retry policy gets accurate
+        // failure context.
+        match turn_result.outcome {
+            TurnOutcome::Succeeded => {}
+            TurnOutcome::Failed => {
+                let _ = runner.stop_session(&session_ctx).await;
+                attempt_record.transition(AttemptStatus::Failed);
+                let msg = turn_result
+                    .error
+                    .unwrap_or_else(|| "turn reported failure".into());
+                return Err(SympheoError::TurnFailed(msg));
+            }
+            TurnOutcome::Cancelled => {
+                let _ = runner.stop_session(&session_ctx).await;
+                attempt_record.transition(AttemptStatus::Failed);
+                return Err(SympheoError::TurnCancelled);
+            }
+            TurnOutcome::TimedOut => {
+                let _ = runner.stop_session(&session_ctx).await;
+                attempt_record.transition(AttemptStatus::Failed);
+                return Err(SympheoError::TurnTotalTimeout);
+            }
         }
-
-        current_session = Some(turn_result.session_id);
 
         // Refresh issue state
         let refreshed = tracker
@@ -891,6 +933,13 @@ async fn run_worker(
         if turn_number >= max_turns {
             break;
         }
+    }
+
+    // SPEC §10.7 step 5: per-worker-run teardown after the turn loop exits
+    // normally. Errors are logged and ignored — the worker has already done
+    // its productive work.
+    if let Err(e) = runner.stop_session(&session_ctx).await {
+        warn!(error = %e, "stop_session failed");
     }
 
     attempt_record.transition(AttemptStatus::Finishing);

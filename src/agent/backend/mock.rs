@@ -37,7 +37,8 @@
 
 use crate::agent::backend::AgentBackend;
 use crate::agent::parser::{
-    AgentEvent, StepFinishPart, StepStartPart, TextPart, TokenInfo, TurnResult,
+    AgentEvent, EmittedEvent, StepFinishPart, StepStartPart, TextPart, TokenInfo, TurnOutcome,
+    TurnResult,
 };
 use crate::config::typed::ServiceConfig;
 use crate::error::SympheoError;
@@ -125,6 +126,10 @@ impl MockBackend {
 
 #[async_trait]
 impl AgentBackend for MockBackend {
+    fn kind(&self) -> &'static str {
+        "mock"
+    }
+
     async fn run_turn(
         &self,
         issue: &Issue,
@@ -132,7 +137,7 @@ impl AgentBackend for MockBackend {
         _session_id: Option<&str>,
         workspace_path: &Path,
         cancelled: Arc<AtomicBool>,
-        event_tx: Sender<AgentEvent>,
+        event_tx: Sender<EmittedEvent>,
     ) -> Result<TurnResult, SympheoError> {
         let path = self.resolve_script_path(workspace_path);
         let raw = tokio::fs::read_to_string(&path).await.map_err(|e| {
@@ -271,16 +276,25 @@ impl AgentBackend for MockBackend {
             };
 
             if let Some(event) = agent_event {
-                let _ = event_tx.send(event).await;
+                // SPEC §10.3: the mock backend has no subprocess; emit
+                // `agent_pid = None` for transparency.
+                let _ = event_tx.send(EmittedEvent::with_pid(event, None)).await;
             }
         }
 
+        let outcome = if success {
+            TurnOutcome::Succeeded
+        } else {
+            TurnOutcome::Failed
+        };
+        let last_message = (!accumulated_text.is_empty()).then_some(accumulated_text);
         Ok(TurnResult {
             session_id: current_session,
             turn_id: current_turn,
-            success,
-            text: accumulated_text,
-            tokens,
+            outcome,
+            last_message,
+            usage: tokens,
+            error: None,
         })
     }
 }
@@ -385,11 +399,11 @@ events:
             )
             .await
             .unwrap();
-        assert!(result.success);
-        assert_eq!(result.text, "Hello, world");
+        assert!(result.succeeded());
+        assert_eq!(result.last_message.as_deref(), Some("Hello, world"));
         assert_eq!(result.session_id, "sess-1");
-        assert!(result.tokens.is_some());
-        let toks = result.tokens.unwrap();
+        assert!(result.usage.is_some());
+        let toks = result.usage.as_ref().unwrap();
         assert_eq!(toks.input, 10);
         assert_eq!(toks.output, 20);
         assert_eq!(toks.total, 30);
@@ -435,8 +449,8 @@ events:
             )
             .await
             .unwrap();
-        assert!(result.success);
-        assert_eq!(result.text, "");
+        assert!(result.succeeded());
+        assert!(result.last_message.is_none());
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -505,7 +519,7 @@ events:
             )
             .await
             .unwrap();
-        assert!(result.success);
+        assert!(result.succeeded());
         assert_eq!(result.session_id, "j-1");
         let _ = std::fs::remove_dir_all(&tmp);
     }

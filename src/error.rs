@@ -72,6 +72,9 @@ pub enum SympheoError {
     #[error("turn read timeout")]
     TurnReadTimeout,
 
+    #[error("turn total timeout")]
+    TurnTotalTimeout,
+
     #[error("turn cancelled")]
     TurnCancelled,
 
@@ -220,6 +223,10 @@ mod tests {
         assert_eq!(
             format!("{}", SympheoError::TurnReadTimeout),
             "turn read timeout"
+        );
+        assert_eq!(
+            format!("{}", SympheoError::TurnTotalTimeout),
+            "turn total timeout"
         );
         assert_eq!(format!("{}", SympheoError::TurnCancelled), "turn cancelled");
         assert_eq!(

@@ -6,6 +6,7 @@
 
 use crate::agent::cli::CliAdapter;
 use crate::error::SympheoError;
+use async_trait::async_trait;
 
 pub struct PiAdapter;
 
@@ -21,6 +22,7 @@ impl Default for PiAdapter {
     }
 }
 
+#[async_trait]
 impl CliAdapter for PiAdapter {
     fn kind(&self) -> &str {
         "pidev"

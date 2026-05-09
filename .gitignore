@@ -28,3 +28,9 @@ sympheo_workspaces/
 # Coverage
 lcov.info
 *.profraw
+
+#mise
+mise.local.toml
+
+# Local agent memory (codebase-memory-mcp)
+.codebase-memory/

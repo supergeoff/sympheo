@@ -22,10 +22,17 @@ Configures the issue tracker. Currently only GitHub is supported.
 |-------|------|----------|-------------|
 | `kind` | string | Yes | Tracker type. Must be `github`. |
 | `api_key` | string | Yes | GitHub token. Supports env var interpolation: `$GITHUB_TOKEN`. |
-| `project_slug` | string | Yes | Repository slug, e.g. `owner/repo`. |
-| `project_number` | integer | Yes | GitHub Project board number. |
+| `project_slug` | string | Yes | Repository slug, e.g. `owner/repo`. The `owner` becomes the project's GitHub org. |
+| `project_number` | integer | Yes | GitHub Project (v2) number. |
 | `active_states` | list of strings | Yes | Board columns Sympheo should poll. Case-insensitive. |
 | `terminal_states` | list of strings | Yes | Board columns that mean "done". Triggers cleanup. |
+| `fetch_blocked_by` | bool | No (default `false`) | When `true`, populate `issue.blocked_by` from GitHub linked items. Off by default — see notes below. |
+
+**Status field name** — the implementation currently reads the ProjectV2 single-select field named `Status` to determine each issue's state. Custom field names are not yet wired through configuration (planned alignment with SPEC §11.4.4). Make sure your project has a column named `Status`.
+
+**Issue priority** — `issue.priority` is always `null` in this release. The optional `priority_field` configured by SPEC §11.4.1 is not yet implemented.
+
+**Blockers** — by default `issue.blocked_by` is empty. Setting `tracker.fetch_blocked_by: true` enables the linked-items query, but the GraphQL `trackedInIssues` field and `Blocked by #N` body fallback (SPEC §11.4.6) are not yet implemented; tracking remains best-effort.
 
 Example:
 
@@ -82,39 +89,53 @@ Controls orchestrator-wide agent behavior.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `max_concurrent_agents` | integer | `5` | Maximum agents running at the same time. |
-| `max_turns` | integer | `10` | Maximum turns per issue before giving up. |
+| `max_concurrent_agents` | integer | `10` | Maximum agents running at the same time. |
+| `max_concurrent_agents_by_state` | map<string,int> | `{}` | Optional per-state concurrency caps. Keys are normalized to lowercase. |
+| `max_turns` | integer | `20` | Maximum turns per issue worker session. |
+| `max_turns_per_state` | map<string,int> | `{}` | Optional per-state turn caps inside one worker session. Extension. |
+| `max_retry_attempts` | integer | `5` | Maximum retry attempts per issue before the claim is released. Extension. |
 | `max_retry_backoff_ms` | integer | `300000` | Cap on retry backoff in milliseconds. |
+| `continuation_prompt` | string | implementation default | Override the short prompt sent on continuation turns (SPEC §10.2.2). Extension. |
 
-### `codex`
+### `cli`
 
-Configures the agent binary and its timeouts.
+Configures the coding-agent CLI adapter. Sympheo selects the adapter from the leading binary token of `cli.command` (per SPEC §10.1): `opencode` ⇒ OpenCode adapter, `pi` ⇒ pi.dev adapter, `mock-cli` ⇒ test adapter.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `command` | string | `opencode run` | The command used to launch the agent. |
+| `command` | string | `opencode run` | The command used to launch the agent. Run via `bash -lc` in the workspace cwd. |
+| `args` | list of strings | `[]` | Extra arguments appended to `command` for each turn. |
+| `env` | map<string,string> | `{}` | Environment variables added to the subprocess. Values support `$VAR`. Operator overrides always win over the isolated default env (see [10-advanced-topics](10-advanced-topics.md#trust-boundary)). |
+| `options` | map | `{}` | Adapter-specific opaque options (e.g. `model`, `permissions`). Forwarded verbatim to the adapter. Unknown keys are ignored. |
 | `turn_timeout_ms` | integer | `3600000` | Hard limit for a single turn (1 hour). |
-| `read_timeout_ms` | integer | `5000` | Timeout for reading output from the agent process. |
+| `read_timeout_ms` | integer | `5000` | Timeout for individual read operations on the agent stdout. |
 | `stall_timeout_ms` | integer | `300000` | Time without output before the agent is considered stalled (5 minutes). |
 
 ### `daytona` (optional)
 
-Enables Daytona sandbox execution.
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `enabled` | boolean | Yes | Set to `true` to use Daytona. |
-| `api_key` | string | Yes | Daytona API key. Supports env var interpolation. |
-| `server_url` | string | Yes | Daytona server URL. |
-| `target` | string | Yes | Daytona target name. |
-
-When `daytona.enabled` is `true`, Sympheo ignores the local `workspace.root` and creates Daytona sandboxes instead.
-
-### `server`
+Enables Daytona sandbox execution as an alternative to local subprocess.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `port` | integer | none | Port for the HTTP dashboard and API. If omitted, no server starts unless passed via `--port` CLI flag. |
+| `enabled` | boolean | `false` | Set to `true` to use Daytona for all workers. |
+| `api_key` | string | required when enabled | Daytona API key. Supports `$VAR` interpolation. |
+| `api_url` | string | `https://api.daytona.io` | Daytona control-plane URL. |
+| `target` | string | `us` | Daytona target region. |
+| `image` | string | none | Optional Docker image override for the sandbox. |
+| `timeout_sec` | integer | `3600` | Sandbox lifetime in seconds. |
+| `env` | map<string,string> | `{}` | Extra env vars injected into the sandbox. |
+| `mode` | string | `oneshot` | Sandbox lifecycle mode. |
+| `repo_url` | string | none | Git repo cloned on sandbox creation. |
+
+When `daytona.enabled` is `true`, Sympheo ignores the local `workspace.root` semantics and creates Daytona sandboxes instead. See [`07-execution-modes.md`](07-execution-modes.md) for the trade-offs.
+
+### `server` (optional extension)
+
+The HTTP dashboard and JSON API are an OPTIONAL extension (SPEC §13.7). When neither `server.port` nor `--port` is set, no HTTP server starts.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `port` | integer | none | Port for the HTTP dashboard and API. CLI `--port` takes precedence. The server binds loopback (`127.0.0.1`) by default. |
 
 ### `skills`
 
@@ -173,17 +194,29 @@ Labels: {{ issue.labels | join: ", " }}
 
 ## Environment Variable Interpolation
 
-Any value in the YAML that starts with `$` is resolved from the environment at startup:
+Per SPEC §6.1, only values that explicitly contain `$VAR_NAME` are resolved from the environment. Sympheo does not globally override YAML values from the environment.
 
 ```yaml
 api_key: $GITHUB_TOKEN
 ```
 
-If the variable is unset, startup fails with a validation error.
+If the variable is unset (or resolves to empty), Sympheo treats the field as missing and fails dispatch validation with an operator-visible error. The service keeps running with the last known good configuration.
+
+## Hot Reload
+
+Sympheo watches `WORKFLOW.md` for changes. When it changes, the new config and prompt template are re-applied without restart and affect future polls, dispatch decisions, and agent launches. In-flight agent sessions are not restarted.
+
+If the new file is invalid, Sympheo logs an operator-visible error and keeps running with the previous good configuration.
+
+Tracker-kind or CLI-adapter swaps may require a restart; in-flight sessions started under the previous adapter are allowed to finish.
 
 ## CLI Overrides
 
 | Flag | Description |
 |------|-------------|
-| `sympheo <path>` | Path to `WORKFLOW.md`. Defaults to `./WORKFLOW.md`. |
-| `--port <number>` | Overrides the `server.port` config value. |
+| `sympheo <path>` | Path to `WORKFLOW.md`. Defaults to `./WORKFLOW.md` in the current working directory. |
+| `--port <number>` | Overrides `server.port`. Enables the HTTP dashboard even when `server.port` is unset. |
+
+## Going Beyond the Spec
+
+Several front-matter fields extend `SPEC.md` Draft v1 and are part of this implementation only: `daytona`, `skills.mapping`, `workspace.repo_url`, `workspace.git_reset_strategy`, `agent.max_turns_per_state`, `agent.max_retry_attempts`, `agent.continuation_prompt`, `tracker.fetch_blocked_by`. They are documented inline in the relevant tables above and fall under SPEC §5.3 forward-compatibility ("Extensions SHOULD document their field schema, defaults, validation rules, and whether changes apply dynamically or require restart").

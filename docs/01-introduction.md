@@ -67,3 +67,14 @@ GitHub Project Board
 - Your workflow is highly unstructured or changes frequently.
 - You need human approval gates that cannot be automated.
 - Your repository requires secrets or credentials that cannot be provided to an agent safely.
+
+## What Sympheo Does Not Do (Trust Boundary)
+
+These are explicit non-goals from the [normative specification](../SPEC.md) (§2.2 / §11.5 / §15.1). Read them before relying on Sympheo in production:
+
+- **Sympheo does not transition tickets.** State changes (`Todo → Spec → … → Done`) are performed by the agent itself, using `gh`, the GitHub API, or another tracker tool exposed through the workflow prompt.
+- **Sympheo does not validate the agent's output.** It does not check that a PR was opened, that a branch exists, that tests pass, or that the body of an issue was updated before the agent advances the column. Guarantees of that kind are the job of your workflow prompt, your skills, and your downstream review process.
+- **Sympheo does not enforce a sandbox by default.** The local backend isolates the agent's filesystem-config (HOME, XDG, PATH) per worker, but it does not prevent absolute path access (`cat /etc/passwd`) or constrain network. Use the Daytona backend or run Sympheo inside a container for stronger isolation.
+- **Sympheo does not persist scheduler state.** Retry timers and live worker state are in-memory only. Restarts rebuild from the tracker; in-flight sessions are not recoverable.
+
+If you need any of these, you must encode them in the workflow prompt, in hooks, in skills, or in downstream review — not by expecting the orchestrator to enforce them.

@@ -4,7 +4,7 @@ Sympheo exposes a built-in HTTP dashboard and a REST API so you can observe what
 
 ## Dashboard
 
-When `server.port` is configured (or `--port` is passed on the CLI), Sympheo starts a web server.
+The HTTP dashboard and JSON API are an OPTIONAL extension (SPEC §13.7). When `server.port` is configured (or `--port` is passed on the CLI), Sympheo starts a web server bound to loopback (`127.0.0.1`) by default.
 
 Open your browser to:
 
@@ -12,7 +12,7 @@ Open your browser to:
 http://localhost:<port>/
 ```
 
-The dashboard auto-refreshes every 5 seconds and shows:
+The dashboard auto-refreshes every 5 seconds via JavaScript. HTMX is loaded so per-row controls (kill switch, etc.) update without a full reload. The dashboard shows:
 
 ### Summary Cards
 
@@ -43,8 +43,9 @@ Each row represents one running issue:
 | Turns | How many turns have been executed for this issue. |
 | Started | Timestamp when the current turn began. |
 | Last Event | The most recent event type from the agent stream. |
-| Last Message | Truncated text of the most recent message. |
+| Last Message | Full text of the most recent message. Long messages collapse into a `<details>` element instead of being silently truncated. |
 | Tokens (in/out) | Token counters for the current session. |
+| Kill | HTMX-driven button that cancels the active turn (see [`POST /api/v1/<id>/cancel`](#post-apiv1issue_identifiercancel)). |
 
 ### Retry Queue Table
 
@@ -193,6 +194,37 @@ Response:
 ```
 
 If the issue is not currently running, the API returns `404 Not Found`.
+
+> **Spec alignment note** — SPEC §13.7.2 names the aggregate field `agent_totals` and the response status of `POST /api/v1/refresh` as `202 Accepted`. The current implementation emits `cli_totals` and returns `200`. These are tracked nomenclature/status gaps; the field semantics match.
+
+### `POST /api/v1/<issue_identifier>/cancel`
+
+Operational kill switch. Sets the worker's `cancelled` atomic; the local backend's watchdog sends `SIGKILL` to the entire CLI process group within ~1s. The orchestrator converts the worker exit into a retry per SPEC §7.3 and §8.4.
+
+```bash
+curl -X POST http://localhost:9090/api/v1/repo%2342/cancel
+```
+
+Returns `404` if no running entry matches the identifier. On success:
+
+```json
+{
+  "cancelled": true,
+  "issue_identifier": "repo#42",
+  "issue_id": "I_kwDO...",
+  "requested_at": "2026-05-09T12:34:56Z"
+}
+```
+
+### `DELETE /api/v1/retry/<issue_identifier>`
+
+Removes an issue from the retry queue and releases its claim. Useful when retries are pointless (the tracker state needs a manual fix) and you want the slot freed.
+
+```bash
+curl -X DELETE http://localhost:9090/api/v1/retry/repo%2342
+```
+
+Returns `404` if no retry entry matches the identifier.
 
 ## Logs and Tracing
 

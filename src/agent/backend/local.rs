@@ -1,5 +1,7 @@
 use crate::agent::backend::AgentBackend;
-use crate::agent::parser::{AgentEvent, TokenInfo, TurnResult, parse_event_line};
+use crate::agent::parser::{
+    AgentEvent, EmittedEvent, TokenInfo, TurnOutcome, TurnResult, parse_event_line,
+};
 use crate::config::typed::ServiceConfig;
 use crate::error::SympheoError;
 use crate::tracker::model::Issue;
@@ -19,7 +21,10 @@ use tracing::Instrument;
 
 pub struct LocalBackend {
     command: String,
+    /// SPEC §10.2.2: total wall-clock per turn (default 3600000 ms).
     turn_timeout: Duration,
+    /// SPEC §10.2.2: per-stdout-read stall timeout (default 5000 ms).
+    read_timeout: Duration,
     workspace_manager: WorkspaceManager,
     cli_env: HashMap<String, String>,
 }
@@ -29,6 +34,7 @@ impl LocalBackend {
         Ok(Self {
             command: config.cli_command(),
             turn_timeout: Duration::from_millis(config.cli_turn_timeout_ms()),
+            read_timeout: Duration::from_millis(config.cli_read_timeout_ms()),
             workspace_manager: WorkspaceManager::new(config)?,
             cli_env: config.cli_env(),
         })
@@ -37,6 +43,10 @@ impl LocalBackend {
 
 #[async_trait]
 impl AgentBackend for LocalBackend {
+    fn kind(&self) -> &'static str {
+        "local"
+    }
+
     async fn run_turn(
         &self,
         issue: &Issue,
@@ -44,7 +54,7 @@ impl AgentBackend for LocalBackend {
         session_id: Option<&str>,
         workspace_path: &Path,
         cancelled: Arc<AtomicBool>,
-        event_tx: Sender<AgentEvent>,
+        event_tx: Sender<EmittedEvent>,
     ) -> Result<TurnResult, SympheoError> {
         let sid = session_id.unwrap_or("new");
         let span = tracing::info_span!(
@@ -128,7 +138,7 @@ impl AgentBackend for LocalBackend {
 
             let mut child = cmd
                 .spawn()
-                .map_err(|e| SympheoError::AgentRunnerError(format!("spawn failed: {e}")))?;
+                .map_err(|e| SympheoError::TurnLaunchFailed(format!("spawn failed: {e}")))?;
 
             // Register in the global process registry so signal/panic handlers
             // can reach this subprocess (and clean it up if Sympheo crashes).
@@ -136,7 +146,10 @@ impl AgentBackend for LocalBackend {
             // entry — so terminated workers don't leave stale records.
             let _registry_guard = crate::agent::process_registry::register(child.id().unwrap_or(0));
 
-            // Track PID and start cancellation watchdog
+            // Track PID and start cancellation watchdog. The PID is also stamped
+            // onto every emitted event per SPEC §10.3 so operators can correlate
+            // events with the subprocess that produced them.
+            let agent_pid: Option<u32> = child.id();
             let child_pid = Arc::new(AtomicU32::new(child.id().unwrap_or(0)));
             let child_pid_watch = child_pid.clone();
             let cancelled_watch = cancelled.clone();
@@ -205,48 +218,72 @@ impl AgentBackend for LocalBackend {
             let mut tokens: Option<TokenInfo> = None;
             let mut success = false;
 
+            // SPEC §10.2.2 + §10.5 timeout discipline:
+            // - `read_timeout_ms`  applies to each individual stdout-read; if no
+            //   line arrives within the window we map to `TurnReadTimeout`.
+            // - `turn_timeout_ms`  bounds the overall turn wall-clock; the
+            //   outer `timeout(..)` wraps the whole read loop and maps to
+            //   `TurnTotalTimeout`.
+            let read_timeout = self.read_timeout;
             let read_result = timeout(self.turn_timeout, async {
-                while let Ok(Some(line)) = lines.next_line().await {
-                    if line.trim().is_empty() {
-                        continue;
-                    }
-                    if let Some(event) = parse_event_line(&line) {
-                        tracing::debug!(event = ?event, "parsed agent event");
-                        match &event {
-                            AgentEvent::StepStart { session_id, part, .. } => {
-                                current_session = Some(session_id.clone());
-                                current_turn = Some(part.message_id.clone());
-                                tracing::debug!(session = %part.session_id, message = %part.message_id, "step_start");
+                loop {
+                    match timeout(read_timeout, lines.next_line()).await {
+                        Err(_) => return Err(SympheoError::TurnReadTimeout),
+                        Ok(Err(_)) | Ok(Ok(None)) => return Ok(()),
+                        Ok(Ok(Some(line))) => {
+                            if line.trim().is_empty() {
+                                continue;
                             }
-                            AgentEvent::Text { part, .. } => {
-                                accumulated_text.push_str(&part.text);
+                            if let Some(event) = parse_event_line(&line) {
+                                tracing::debug!(event = ?event, "parsed agent event");
+                                match &event {
+                                    AgentEvent::StepStart { session_id, part, .. } => {
+                                        current_session = Some(session_id.clone());
+                                        current_turn = Some(part.message_id.clone());
+                                        tracing::debug!(session = %part.session_id, message = %part.message_id, "step_start");
+                                    }
+                                    AgentEvent::Text { part, .. } => {
+                                        accumulated_text.push_str(&part.text);
+                                    }
+                                    AgentEvent::StepFinish { part, .. } => {
+                                        tokens = part.tokens.clone();
+                                        success = part.reason == "stop" || part.reason == "tool-calls";
+                                        tracing::info!(
+                                            reason = %part.reason,
+                                            success,
+                                            session_id = %part.session_id,
+                                            message_id = %part.message_id,
+                                            "step_finish"
+                                        );
+                                    }
+                                    _ => {}
+                                }
+                                // SPEC §10.3: stamp the active turn PID onto the event.
+                                let _ = event_tx
+                                    .send(EmittedEvent::with_pid(event, agent_pid))
+                                    .await;
+                            } else {
+                                tracing::warn!(raw = %line, "failed to parse event line");
                             }
-                            AgentEvent::StepFinish { part, .. } => {
-                                tokens = part.tokens.clone();
-                                success = part.reason == "stop" || part.reason == "tool-calls";
-                                tracing::info!(
-                                    reason = %part.reason,
-                                    success,
-                                    session_id = %part.session_id,
-                                    message_id = %part.message_id,
-                                    "step_finish"
-                                );
-                            }
-                            _ => {}
                         }
-                        let _ = event_tx.send(event).await;
-                    } else {
-                        tracing::warn!(raw = %line, "failed to parse event line");
                     }
                 }
             })
             .await;
 
-            if read_result.is_err() {
+            // Fold the doubly-nested timeout/Result into a single Result so
+            // downstream branches can distinguish per-read stalls (`TurnReadTimeout`)
+            // from total-turn exhaustion (`TurnTotalTimeout`).
+            let read_outcome: Result<(), SympheoError> = match read_result {
+                Ok(inner) => inner,
+                Err(_) => Err(SympheoError::TurnTotalTimeout),
+            };
+
+            if let Err(e) = read_outcome {
                 kill_process_group(&mut child);
                 let _ = stderr_handle.abort();
                 let _ = tokio::fs::remove_file(&prompt_file).await;
-                return Err(SympheoError::AgentTurnTimeout);
+                return Err(e);
             }
 
             // Terminate the process since the turn is complete
@@ -272,12 +309,22 @@ impl AgentBackend for LocalBackend {
             let sid = current_session.unwrap_or_else(|| issue.id.clone());
             let tid = current_turn.unwrap_or_else(|| "turn-1".into());
 
+            // SPEC §10.2.2 — outcome is a typed enum; failure to reach a
+            // `step_finish` with a stop-shaped reason maps to `Failed`, not a
+            // silent `success=false` boolean.
+            let outcome = if success {
+                TurnOutcome::Succeeded
+            } else {
+                TurnOutcome::Failed
+            };
+            let last_message = (!accumulated_text.is_empty()).then_some(accumulated_text);
             Ok(TurnResult {
                 session_id: sid.clone(),
                 turn_id: tid,
-                success,
-                text: accumulated_text,
-                tokens,
+                outcome,
+                last_message,
+                usage: tokens,
+                error: None,
             })
         }.instrument(span).await
     }
@@ -488,9 +535,76 @@ mod tests {
                 event_tx,
             )
             .await;
+        // SPEC §10.5: a process that produces zero output stalls the per-line
+        // read first; with a 200 ms `turn_timeout_ms` and the default 5000 ms
+        // `read_timeout_ms`, the total timeout fires before the read timeout.
         assert!(
-            matches!(result, Err(SympheoError::AgentTurnTimeout)),
-            "expected AgentTurnTimeout, got {:?}",
+            matches!(result, Err(SympheoError::TurnTotalTimeout)),
+            "expected TurnTotalTimeout, got {:?}",
+            result
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// SPEC §10.2.2: when a per-stdout-read stalls past `read_timeout_ms` we
+    /// MUST surface `TurnReadTimeout` (distinct from total-turn exhaustion).
+    #[tokio::test]
+    async fn test_local_backend_run_turn_read_timeout() {
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut workspace = serde_json::Map::<String, serde_json::Value>::new();
+        let tmp = std::env::temp_dir().join(format!("local_read_to_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        workspace.insert(
+            "root".into(),
+            serde_json::Value::String(tmp.to_string_lossy().to_string()),
+        );
+        raw.insert("workspace".into(), serde_json::Value::Object(workspace));
+        let mut cli = serde_json::Map::<String, serde_json::Value>::new();
+        // Emit one event then sleep forever — read_timeout fires while we
+        // wait for the next line.
+        cli.insert(
+            "command".into(),
+            serde_json::Value::String(r#"bash -c 'echo "{\"type\":\"step_start\",\"timestamp\":1,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p1\",\"messageID\":\"msg-1\",\"sessionID\":\"sess-1\",\"type\":\"step\"}}"; sleep 1000'"#.into()),
+        );
+        cli.insert(
+            "read_timeout_ms".into(),
+            serde_json::Value::Number(150.into()),
+        );
+        cli.insert(
+            "turn_timeout_ms".into(),
+            serde_json::Value::Number(60_000.into()),
+        );
+        raw.insert("cli".into(), serde_json::Value::Object(cli));
+        let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
+        let backend = LocalBackend::new(&config).unwrap();
+        let issue = crate::tracker::model::Issue {
+            id: "1".into(),
+            identifier: "TEST-1".into(),
+            title: "test".into(),
+            description: None,
+            priority: None,
+            state: "todo".into(),
+            branch_name: None,
+            url: None,
+            labels: vec![],
+            blocked_by: vec![],
+            ..Default::default()
+        };
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(64);
+        let result = backend
+            .run_turn(
+                &issue,
+                "prompt",
+                None,
+                &tmp,
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                event_tx,
+            )
+            .await;
+        assert!(
+            matches!(result, Err(SympheoError::TurnReadTimeout)),
+            "expected TurnReadTimeout, got {:?}",
             result
         );
         let _ = std::fs::remove_dir_all(&tmp);
@@ -546,12 +660,12 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(result.success);
-        assert_eq!(result.text, "hello");
+        assert!(result.succeeded());
+        assert_eq!(result.last_message.as_deref(), Some("hello"));
         assert_eq!(result.session_id, "sess-1");
         assert_eq!(result.turn_id, "msg-1");
-        assert!(result.tokens.is_some());
-        let tokens = result.tokens.unwrap();
+        assert!(result.usage.is_some());
+        let tokens = result.usage.as_ref().unwrap();
         assert_eq!(tokens.total, 100);
         assert_eq!(tokens.input, 50);
         assert_eq!(tokens.output, 40);
@@ -608,8 +722,9 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(!result.success);
-        assert_eq!(result.text, "hello");
+        assert!(!result.succeeded());
+        assert!(matches!(result.outcome, TurnOutcome::Failed));
+        assert_eq!(result.last_message.as_deref(), Some("hello"));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -663,8 +778,8 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(result.success);
-        assert_eq!(result.text, "hello");
+        assert!(result.succeeded());
+        assert_eq!(result.last_message.as_deref(), Some("hello"));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -776,7 +891,7 @@ mod tests {
             .await
             .unwrap();
         let _ = consumer.await;
-        assert!(result.success);
+        assert!(result.succeeded());
 
         let arrivals = arrival_log.lock().await;
         assert!(

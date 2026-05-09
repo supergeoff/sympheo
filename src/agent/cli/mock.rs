@@ -5,6 +5,11 @@
 
 use crate::agent::cli::CliAdapter;
 use crate::error::SympheoError;
+use async_trait::async_trait;
+
+/// SPEC §10.6 (mock parallel): `cli.options.script` points at a YAML/JSON
+/// fixture; the mock execution backend reads it and replays scripted events.
+pub const MOCK_KNOWN_OPTION_KEYS: &[&str] = &["script"];
 
 pub struct MockCliAdapter;
 
@@ -20,6 +25,7 @@ impl Default for MockCliAdapter {
     }
 }
 
+#[async_trait]
 impl CliAdapter for MockCliAdapter {
     fn kind(&self) -> &str {
         "mock"
@@ -27,6 +33,10 @@ impl CliAdapter for MockCliAdapter {
 
     fn binary_names(&self) -> &[&'static str] {
         &["mock-cli"]
+    }
+
+    fn known_option_keys(&self) -> &[&'static str] {
+        MOCK_KNOWN_OPTION_KEYS
     }
 
     fn validate(&self, cli_command: &str) -> Result<(), SympheoError> {

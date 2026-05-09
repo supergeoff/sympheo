@@ -8,7 +8,9 @@ use tokio::sync::mpsc::Sender;
 use tokio::time::timeout;
 
 use crate::agent::backend::AgentBackend;
-use crate::agent::parser::{AgentEvent, TokenInfo, TurnResult, parse_event_line};
+use crate::agent::parser::{
+    AgentEvent, EmittedEvent, TokenInfo, TurnOutcome, TurnResult, parse_event_line,
+};
 use crate::config::typed::ServiceConfig;
 use crate::error::SympheoError;
 use crate::tracker::model::Issue;
@@ -411,6 +413,10 @@ impl DaytonaBackend {
 
 #[async_trait]
 impl AgentBackend for DaytonaBackend {
+    fn kind(&self) -> &'static str {
+        "daytona"
+    }
+
     async fn run_turn(
         &self,
         issue: &Issue,
@@ -418,7 +424,7 @@ impl AgentBackend for DaytonaBackend {
         session_id: Option<&str>,
         workspace_path: &Path,
         _cancelled: Arc<AtomicBool>,
-        event_tx: Sender<AgentEvent>,
+        event_tx: Sender<EmittedEvent>,
     ) -> Result<TurnResult, SympheoError> {
         self.workspace_manager
             .validate_inside_root(workspace_path)?;
@@ -449,6 +455,9 @@ impl AgentBackend for DaytonaBackend {
             "launching opencode agent (daytona backend)"
         );
 
+        // SPEC §10.2.2: Daytona is a one-shot RPC, not a streaming spawn —
+        // there is no per-stdout-read window, so only `turn_timeout_ms`
+        // applies. Map exhaustion to `TurnTotalTimeout`.
         let exec_result = timeout(
             Duration::from_millis(self.config.turn_timeout_ms),
             self.execute_command(&sandbox_id, &opencode_cmd, sandbox_dir),
@@ -458,11 +467,11 @@ impl AgentBackend for DaytonaBackend {
         let exec = match exec_result {
             Ok(Ok(exec)) => exec,
             Ok(Err(e)) => return Err(e),
-            Err(_) => return Err(SympheoError::AgentTurnTimeout),
+            Err(_) => return Err(SympheoError::TurnTotalTimeout),
         };
 
         if exec.exit_code != 0 {
-            return Err(SympheoError::AgentRunnerError(format!(
+            return Err(SympheoError::TurnFailed(format!(
                 "daytona process exited with code {}: {}",
                 exec.exit_code, exec.result
             )));
@@ -495,19 +504,29 @@ impl AgentBackend for DaytonaBackend {
                     }
                     _ => {}
                 }
-                let _ = event_tx.send(event).await;
+                // SPEC §10.3: Daytona is RPC-based, the subprocess PID lives
+                // inside the sandbox and is not surfaced through the toolbox
+                // API; emit `agent_pid = None`.
+                let _ = event_tx.send(EmittedEvent::with_pid(event, None)).await;
             }
         }
 
         let sid = current_session.unwrap_or_else(|| issue.id.clone());
         let tid = current_turn.unwrap_or_else(|| "turn-1".into());
 
+        let outcome = if success {
+            TurnOutcome::Succeeded
+        } else {
+            TurnOutcome::Failed
+        };
+        let last_message = (!accumulated_text.is_empty()).then_some(accumulated_text);
         Ok(TurnResult {
             session_id: sid.clone(),
             turn_id: tid,
-            success,
-            text: accumulated_text,
-            tokens,
+            outcome,
+            last_message,
+            usage: tokens,
+            error: None,
         })
     }
 

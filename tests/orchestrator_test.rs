@@ -744,7 +744,13 @@ async fn test_orchestrator_tick_reconcile_unknown_state() {
 async fn test_orchestrator_process_retries_max_attempts_reached() {
     let mut raw = valid_config().raw().clone();
     let mut cli = serde_json::Map::<String, serde_json::Value>::new();
-    cli.insert("command".into(), serde_json::Value::String("false".into()));
+    // SPEC §10.1: cli.command must select a known adapter. The test only
+    // exercises the retry budget logic, so any well-formed adapter command
+    // works here — `opencode run` keeps the original test intent.
+    cli.insert(
+        "command".into(),
+        serde_json::Value::String("opencode run".into()),
+    );
     raw.insert("cli".into(), serde_json::Value::Object(cli));
     let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "prompt".into());
     let issue = make_issue("1", "TEST-1", "todo");

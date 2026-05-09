@@ -1,16 +1,24 @@
 //! SPEC §10.6 OpenCode Reference Adapter.
 //!
 //! This is the reference adapter: `cli.command = "opencode run"` (default).
-//! For now, only the identity/selection/validate surface is implemented here;
-//! the per-turn lifecycle (`start_session` / `run_turn` / `stop_session`) lives
-//! in `crate::agent::backend::local`.
+//! Identity/selection/validate live here; the protocol-specific lifecycle
+//! (`start_session` / `run_turn` / `stop_session`) is provided through the
+//! [`crate::agent::cli::CliAdapter`] trait defaults, which delegate the
+//! subprocess-spawning + stdout-parsing surface to the configured execution
+//! [`crate::agent::backend::AgentBackend`] (`LocalBackend`, `DaytonaBackend`).
 
 use crate::agent::cli::CliAdapter;
 use crate::error::SympheoError;
+use async_trait::async_trait;
 
 /// Tested OpenCode CLI version range (advisory; not enforced at runtime).
 /// SPEC §10.6 RECOMMENDED: adapters MUST document the CLI version range they support.
 pub const SUPPORTED_OPENCODE_VERSION_RANGE: &str = ">=0.1, <0.5";
+
+/// SPEC §10.6: keys the OpenCode adapter recognizes inside `cli.options`. Any
+/// other key is forwarded for forward-compatibility and logged as a warning
+/// from `start_session`.
+pub const OPENCODE_KNOWN_OPTION_KEYS: &[&str] = &["model", "permissions", "mcp_servers"];
 
 pub struct OpencodeAdapter;
 
@@ -26,6 +34,7 @@ impl Default for OpencodeAdapter {
     }
 }
 
+#[async_trait]
 impl CliAdapter for OpencodeAdapter {
     fn kind(&self) -> &str {
         "opencode"
@@ -33,6 +42,10 @@ impl CliAdapter for OpencodeAdapter {
 
     fn binary_names(&self) -> &[&'static str] {
         &["opencode"]
+    }
+
+    fn known_option_keys(&self) -> &[&'static str] {
+        OPENCODE_KNOWN_OPTION_KEYS
     }
 
     /// SPEC §10.1 + §10.6: static validation of the CLI command.
@@ -99,5 +112,14 @@ mod tests {
     #[test]
     fn test_supported_version_range_is_set() {
         assert!(!SUPPORTED_OPENCODE_VERSION_RANGE.is_empty());
+    }
+
+    #[test]
+    fn test_known_option_keys_documented() {
+        let a = OpencodeAdapter::new();
+        let keys = a.known_option_keys();
+        assert!(keys.contains(&"model"));
+        assert!(keys.contains(&"permissions"));
+        assert!(keys.contains(&"mcp_servers"));
     }
 }

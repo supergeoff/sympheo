@@ -1,6 +1,7 @@
 use crate::agent::backend::AgentBackend;
 use crate::agent::backend::{daytona::DaytonaBackend, local::LocalBackend, mock::MockBackend};
-use crate::agent::parser::{AgentEvent, TurnResult};
+use crate::agent::cli::{CliAdapter, CliConfig, SessionContext, select_adapter};
+use crate::agent::parser::{EmittedEvent, TurnResult};
 use crate::config::typed::ServiceConfig;
 use crate::error::SympheoError;
 use crate::tracker::model::Issue;
@@ -10,13 +11,17 @@ use std::sync::atomic::AtomicBool;
 use tokio::sync::mpsc::Sender;
 
 pub struct AgentRunner {
+    adapter: Arc<dyn CliAdapter>,
     backend: Arc<dyn AgentBackend>,
+    cli_config: CliConfig,
 }
 
 impl AgentRunner {
     pub fn new(config: &ServiceConfig) -> Result<Self, SympheoError> {
-        let cmd = config.cli_command();
-        let leading = cmd
+        let cli_config = CliConfig::from_service(config);
+        let adapter = select_adapter(&cli_config.command)?;
+        let leading = cli_config
+            .command
             .split_whitespace()
             .next()
             .map(|s| {
@@ -37,28 +42,62 @@ impl AgentRunner {
         } else {
             Arc::new(LocalBackend::new(config)?)
         };
-        Ok(Self { backend })
+        Ok(Self {
+            adapter,
+            backend,
+            cli_config,
+        })
     }
 
+    pub fn adapter_kind(&self) -> &str {
+        self.adapter.kind()
+    }
+
+    pub fn backend_kind(&self) -> &'static str {
+        self.backend.kind()
+    }
+
+    /// SPEC §10.2.1: one-time per-worker-run setup.
+    pub async fn start_session(
+        &self,
+        workspace_path: &Path,
+    ) -> Result<SessionContext, SympheoError> {
+        self.adapter
+            .start_session(workspace_path, &self.cli_config)
+            .await
+    }
+
+    /// SPEC §10.2.2: one CLI subprocess invocation for one turn.
+    #[allow(clippy::too_many_arguments)] // Reason: forwards verbatim to `CliAdapter::run_turn`, whose arity is fixed by SPEC §10.2.2; refactoring here would only diverge the two signatures.
     pub async fn run_turn(
         &self,
-        issue: &Issue,
+        session: &SessionContext,
         prompt: &str,
-        session_id: Option<&str>,
+        issue: &Issue,
+        turn_number: u32,
         workspace_path: &Path,
         cancelled: Arc<AtomicBool>,
-        event_tx: Sender<AgentEvent>,
+        event_tx: Sender<EmittedEvent>,
     ) -> Result<TurnResult, SympheoError> {
-        self.backend
+        self.adapter
             .run_turn(
-                issue,
+                session,
                 prompt,
-                session_id,
-                workspace_path,
+                issue,
+                turn_number,
                 cancelled,
                 event_tx,
+                self.backend.as_ref(),
+                &self.cli_config,
+                workspace_path,
             )
             .await
+    }
+
+    /// SPEC §10.2.3: per-worker-run teardown. Safe to call after a `run_turn`
+    /// failure.
+    pub async fn stop_session(&self, session: &SessionContext) -> Result<(), SympheoError> {
+        self.adapter.stop_session(session).await
     }
 
     pub async fn cleanup_workspace(&self, workspace_path: &Path) -> Result<(), SympheoError> {
@@ -83,11 +122,15 @@ mod tests {
     fn test_agent_runner_local_success() {
         let mut raw = base_config();
         let mut cli = serde_json::Map::<String, serde_json::Value>::new();
-        cli.insert("command".into(), serde_json::Value::String("echo".into()));
+        cli.insert(
+            "command".into(),
+            serde_json::Value::String("opencode run".into()),
+        );
         raw.insert("cli".into(), serde_json::Value::Object(cli));
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
-        let runner = AgentRunner::new(&config);
-        assert!(runner.is_ok());
+        let runner = AgentRunner::new(&config).unwrap();
+        assert_eq!(runner.adapter_kind(), "opencode");
+        assert_eq!(runner.backend_kind(), "local");
     }
 
     #[test]
@@ -105,9 +148,16 @@ mod tests {
         );
         daytona.insert("target".into(), serde_json::Value::String("local".into()));
         raw.insert("daytona".into(), serde_json::Value::Object(daytona));
+        let mut cli = serde_json::Map::<String, serde_json::Value>::new();
+        cli.insert(
+            "command".into(),
+            serde_json::Value::String("opencode run".into()),
+        );
+        raw.insert("cli".into(), serde_json::Value::Object(cli));
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
-        let runner = AgentRunner::new(&config);
-        assert!(runner.is_ok());
+        let runner = AgentRunner::new(&config).unwrap();
+        assert_eq!(runner.adapter_kind(), "opencode");
+        assert_eq!(runner.backend_kind(), "daytona");
     }
 
     #[test]
@@ -120,5 +170,56 @@ mod tests {
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
         let runner = AgentRunner::new(&config);
         assert!(runner.is_err());
+    }
+
+    /// SPEC §17.6: adapter selection picks the right adapter regardless of
+    /// what backend ends up running (selection is keyed off the leading
+    /// binary token of `cli.command`).
+    #[test]
+    fn test_agent_runner_selects_mock_adapter() {
+        let mut raw = base_config();
+        let mut cli = serde_json::Map::<String, serde_json::Value>::new();
+        cli.insert(
+            "command".into(),
+            serde_json::Value::String("mock-cli".into()),
+        );
+        let mut opts = serde_json::Map::<String, serde_json::Value>::new();
+        opts.insert(
+            "script".into(),
+            serde_json::Value::String("script.yaml".into()),
+        );
+        cli.insert("options".into(), serde_json::Value::Object(opts));
+        raw.insert("cli".into(), serde_json::Value::Object(cli));
+        let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
+        let runner = AgentRunner::new(&config).unwrap();
+        assert_eq!(runner.adapter_kind(), "mock");
+        assert_eq!(runner.backend_kind(), "mock");
+    }
+
+    /// SPEC §10.2.1 + §10.2.3: the adapter lifecycle is callable
+    /// independently of any actual turn — `start_session` / `stop_session`
+    /// work for the reference adapters without touching the execution
+    /// backend.
+    #[tokio::test]
+    async fn test_agent_runner_lifecycle_independent_of_backend() {
+        let mut raw = base_config();
+        let mut cli = serde_json::Map::<String, serde_json::Value>::new();
+        cli.insert(
+            "command".into(),
+            serde_json::Value::String("opencode run".into()),
+        );
+        raw.insert("cli".into(), serde_json::Value::Object(cli));
+        let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
+        let runner = AgentRunner::new(&config).unwrap();
+        let ctx = runner
+            .start_session(std::path::Path::new("/tmp"))
+            .await
+            .expect("start_session should succeed");
+        assert!(!ctx.session_id.is_empty());
+        assert!(!ctx.agent_session_handle.is_empty());
+        runner
+            .stop_session(&ctx)
+            .await
+            .expect("stop_session should succeed (default no-op)");
     }
 }

@@ -31,6 +31,3 @@ lcov.info
 
 #mise
 mise.local.toml
-
-# Local agent memory (codebase-memory-mcp)
-.codebase-memory/

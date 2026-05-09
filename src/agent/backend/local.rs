@@ -3,8 +3,10 @@ use crate::agent::parser::{AgentEvent, TokenInfo, TurnResult, parse_event_line};
 use crate::config::typed::ServiceConfig;
 use crate::error::SympheoError;
 use crate::tracker::model::Issue;
+use crate::workspace::isolation::{build_isolated_env, ensure_isolated_home};
 use crate::workspace::manager::WorkspaceManager;
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -19,6 +21,7 @@ pub struct LocalBackend {
     command: String,
     turn_timeout: Duration,
     workspace_manager: WorkspaceManager,
+    cli_env: HashMap<String, String>,
 }
 
 impl LocalBackend {
@@ -27,6 +30,7 @@ impl LocalBackend {
             command: config.cli_command(),
             turn_timeout: Duration::from_millis(config.cli_turn_timeout_ms()),
             workspace_manager: WorkspaceManager::new(config)?,
+            cli_env: config.cli_env(),
         })
     }
 }
@@ -82,6 +86,14 @@ impl AgentBackend for LocalBackend {
             tokio::fs::write(&prompt_file, &sanitized).await
                 .map_err(|e| SympheoError::AgentRunnerError(format!("failed to write prompt file: {e}")))?;
 
+            // SPEC §15.5 hardening: provision the per-workspace HOME/XDG subtree
+            // and build the scrubbed env (HOME, XDG_*, PATH minimal, locale passthrough,
+            // operator overrides from cli.env per §5.3.6).
+            ensure_isolated_home(workspace_path)
+                .await
+                .map_err(|e| SympheoError::AgentRunnerError(format!("isolated home setup failed: {e}")))?;
+            let env = build_isolated_env(workspace_path, &self.cli_env);
+
             let mut cmd = Command::new("bash");
             cmd.arg("-lc");
 
@@ -96,6 +108,10 @@ impl AgentBackend for LocalBackend {
             }
             cmd.arg(&opencode_cmd);
             cmd.current_dir(workspace_path);
+            cmd.env_clear();
+            for (k, v) in &env {
+                cmd.env(k, v);
+            }
             cmd.stdout(Stdio::piped());
             cmd.stderr(Stdio::piped());
 
@@ -652,6 +668,163 @@ mod tests {
             spread.as_millis()
         );
 
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// SPEC §15.5 hardening: when LocalBackend launches the CLI subprocess,
+    /// the inherited env MUST be scrubbed and HOME / XDG_*_HOME MUST point
+    /// inside the workspace. We launch a fake CLI that records the env it
+    /// receives to a file, then assert HOME / XDG_CONFIG_HOME are scoped to
+    /// the workspace and a credential-shaped host env var did NOT leak.
+    #[tokio::test]
+    async fn test_local_backend_env_isolation() {
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut workspace = serde_json::Map::<String, serde_json::Value>::new();
+        let tmp = std::env::temp_dir().join(format!("local_iso_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        workspace.insert(
+            "root".into(),
+            serde_json::Value::String(tmp.to_string_lossy().to_string()),
+        );
+        raw.insert("workspace".into(), serde_json::Value::Object(workspace));
+        let mut cli = serde_json::Map::<String, serde_json::Value>::new();
+        // Fake CLI: write env snapshot, then emit the minimal events the parser
+        // needs to mark the turn as success so we don't get spurious errors.
+        let env_dump_script = r#"bash -c '/usr/bin/env > env.txt; echo "{\"type\":\"step_start\",\"timestamp\":1,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p1\",\"messageID\":\"msg-1\",\"sessionID\":\"sess-1\",\"type\":\"step\"}}"; echo "{\"type\":\"step_finish\",\"timestamp\":3,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p3\",\"reason\":\"stop\",\"messageID\":\"msg-3\",\"sessionID\":\"sess-1\",\"type\":\"finish\"}}"'"#;
+        cli.insert(
+            "command".into(),
+            serde_json::Value::String(env_dump_script.into()),
+        );
+        cli.insert(
+            "turn_timeout_ms".into(),
+            serde_json::Value::Number(5000.into()),
+        );
+        raw.insert("cli".into(), serde_json::Value::Object(cli));
+        let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
+
+        // Set a credential-shaped var on the host that MUST NOT leak through.
+        unsafe {
+            std::env::set_var("ANTHROPIC_API_KEY", "sk-host-must-not-leak");
+        }
+
+        let backend = LocalBackend::new(&config).unwrap();
+        let issue = crate::tracker::model::Issue {
+            id: "1".into(),
+            identifier: "TEST-1".into(),
+            title: "test".into(),
+            description: None,
+            priority: None,
+            state: "todo".into(),
+            branch_name: None,
+            url: None,
+            labels: vec![],
+            blocked_by: vec![],
+            ..Default::default()
+        };
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(64);
+        backend
+            .run_turn(
+                &issue,
+                "prompt",
+                None,
+                &tmp,
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                event_tx,
+            )
+            .await
+            .unwrap();
+
+        let env_text = std::fs::read_to_string(tmp.join("env.txt")).unwrap();
+        let expected_home = format!("{}/.sympheo-home", tmp.display());
+        assert!(
+            env_text.contains(&format!("HOME={expected_home}")),
+            "HOME should be scoped to workspace: {}",
+            env_text
+        );
+        assert!(
+            env_text.contains(&format!("XDG_CONFIG_HOME={expected_home}/.config")),
+            "XDG_CONFIG_HOME should be scoped: {}",
+            env_text
+        );
+        assert!(
+            !env_text.contains("ANTHROPIC_API_KEY"),
+            "credential-shaped var leaked through env: {}",
+            env_text
+        );
+
+        unsafe {
+            std::env::remove_var("ANTHROPIC_API_KEY");
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// SPEC §15.5: cli.env from WORKFLOW.md (§5.3.6) must override the
+    /// scrubbed defaults — operators can re-introduce specific credentials
+    /// they want the agent to see (e.g. GITHUB_TOKEN).
+    #[tokio::test]
+    async fn test_local_backend_cli_env_overrides_pass_through() {
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut workspace = serde_json::Map::<String, serde_json::Value>::new();
+        let tmp = std::env::temp_dir().join(format!("local_cli_env_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        workspace.insert(
+            "root".into(),
+            serde_json::Value::String(tmp.to_string_lossy().to_string()),
+        );
+        raw.insert("workspace".into(), serde_json::Value::Object(workspace));
+        let mut cli = serde_json::Map::<String, serde_json::Value>::new();
+        let env_dump_script = r#"bash -c '/usr/bin/env > env.txt; echo "{\"type\":\"step_finish\",\"timestamp\":3,\"sessionID\":\"sess-1\",\"part\":{\"id\":\"p3\",\"reason\":\"stop\",\"messageID\":\"msg-3\",\"sessionID\":\"sess-1\",\"type\":\"finish\"}}"'"#;
+        cli.insert(
+            "command".into(),
+            serde_json::Value::String(env_dump_script.into()),
+        );
+        let mut env_overrides = serde_json::Map::<String, serde_json::Value>::new();
+        env_overrides.insert(
+            "GITHUB_TOKEN".into(),
+            serde_json::Value::String("ghp-from-workflow".into()),
+        );
+        cli.insert("env".into(), serde_json::Value::Object(env_overrides));
+        cli.insert(
+            "turn_timeout_ms".into(),
+            serde_json::Value::Number(5000.into()),
+        );
+        raw.insert("cli".into(), serde_json::Value::Object(cli));
+        let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
+        let backend = LocalBackend::new(&config).unwrap();
+        let issue = crate::tracker::model::Issue {
+            id: "1".into(),
+            identifier: "TEST-1".into(),
+            title: "test".into(),
+            description: None,
+            priority: None,
+            state: "todo".into(),
+            branch_name: None,
+            url: None,
+            labels: vec![],
+            blocked_by: vec![],
+            ..Default::default()
+        };
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(64);
+        backend
+            .run_turn(
+                &issue,
+                "prompt",
+                None,
+                &tmp,
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                event_tx,
+            )
+            .await
+            .unwrap();
+
+        let env_text = std::fs::read_to_string(tmp.join("env.txt")).unwrap();
+        assert!(
+            env_text.contains("GITHUB_TOKEN=ghp-from-workflow"),
+            "cli.env override should pass through: {}",
+            env_text
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

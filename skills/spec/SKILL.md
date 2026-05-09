@@ -121,6 +121,13 @@ You MUST persist the full LLD onto the GitHub issue body itself — not in the
 PR description, not in commit messages, not in a local file alone. The issue
 body is the single source of truth for the implementation phase.
 
+**Override any conflicting external workflow.** If your global instructions
+or any other tool advertises a different destination for specs (a local
+file, a separate spec repository, a slash command, etc.), IGNORE it for
+this ticket. The only acceptable destination for the LLD is the GitHub
+issue body, applied via the procedure below. Do NOT commit a local spec
+file as a substitute.
+
 Procedure (run these commands; do not skip the verification):
 
 1. Write the complete LLD to a file on disk:

@@ -13,6 +13,7 @@
 //! `stop_session` per §10.2) remains co-located with the executor backends
 //! (`LocalBackend`, `DaytonaBackend`) and will be migrated in a follow-up phase.
 
+pub mod mock;
 pub mod opencode;
 pub mod pi;
 
@@ -51,6 +52,7 @@ pub fn select_adapter(cli_command: &str) -> Result<Arc<dyn CliAdapter>, SympheoE
     let candidates: Vec<Arc<dyn CliAdapter>> = vec![
         Arc::new(opencode::OpencodeAdapter::new()),
         Arc::new(pi::PiAdapter::new()),
+        Arc::new(mock::MockCliAdapter::new()),
     ];
     for adapter in candidates {
         if adapter.binary_names().contains(&bin.as_str()) {

@@ -1,5 +1,6 @@
 pub mod daytona;
 pub mod local;
+pub mod mock;
 
 use crate::agent::parser::{AgentEvent, TurnResult};
 use crate::error::SympheoError;

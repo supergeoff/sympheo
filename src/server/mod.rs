@@ -4,10 +4,11 @@ use axum::{
     extract::{Path as AxumPath, State},
     http::StatusCode,
     response::{Html, Json},
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use serde_json::json;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tokio::sync::RwLock;
 
 pub type SharedState = Arc<RwLock<OrchestratorState>>;
@@ -18,6 +19,8 @@ pub async fn start_server(port: u16, state: SharedState) -> Result<(), crate::er
         .route("/api/v1/state", get(api_state))
         .route("/api/v1/refresh", post(api_refresh))
         .route("/api/v1/{issue_identifier}", get(api_issue))
+        .route("/api/v1/{issue_identifier}/cancel", post(api_cancel))
+        .route("/api/v1/retry/{issue_identifier}", delete(api_retry_delete))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port))
@@ -54,23 +57,30 @@ async fn dashboard(State(state): State<SharedState>) -> (StatusCode, Html<String
                 .and_then(|s| s.last_event.as_ref())
                 .map(|s| s.as_str())
                 .unwrap_or("-");
+            // SPEC §13.7: render the FULL last_message (no truncation). The
+            // operator needs the complete content to spot a stuck or
+            // misbehaving turn quickly. Wrap in a <details> for long messages
+            // so the table stays readable.
             let last_msg = sess
                 .and_then(|s| s.last_message.as_ref())
-                .map(|s| {
-                    let mut txt = s.clone();
-                    if txt.len() > 30 {
-                        txt.truncate(30);
-                        txt.push_str("...");
-                    }
-                    html_escape(&txt)
-                })
+                .map(|s| render_last_message(s))
                 .unwrap_or_else(|| "-".to_string());
             let tokens = sess
                 .map(|s| format!("{} / {}", s.input_tokens, s.output_tokens))
                 .unwrap_or_else(|| "-".to_string());
             let started = e.started_at.format("%H:%M:%S").to_string();
+            // Operator kill switch (P6): HTMX-style POST, no page reload required.
+            // The button calls POST /api/v1/<identifier>/cancel; the orchestrator's
+            // watchdog will SIGKILL the subprocess group within ~1s and the next
+            // tick converts the exit to a retry per §7.3 / §8.4.
+            let identifier_url_safe = url_encode(&e.issue.identifier);
+            let kill_button = format!(
+                r#"<button class="contrast outline" style="padding:0.2rem 0.5rem; font-size:0.8rem;" hx-post="/api/v1/{}/cancel" hx-confirm="Kill worker {}? Will be retried after backoff." hx-swap="none">Kill</button>"#,
+                identifier_url_safe,
+                html_escape(&e.issue.identifier)
+            );
             format!(
-                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
                 html_escape(&e.issue.identifier),
                 html_escape(&e.issue.state),
                 sess.map(|s| html_escape(&s.session_id)).unwrap_or_else(|| "-".to_string()),
@@ -78,7 +88,8 @@ async fn dashboard(State(state): State<SharedState>) -> (StatusCode, Html<String
                 started,
                 html_escape(last_event),
                 last_msg,
-                tokens
+                tokens,
+                kill_button
             )
         })
         .collect();
@@ -214,6 +225,7 @@ async fn dashboard(State(state): State<SharedState>) -> (StatusCode, Html<String
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Sympheo Dashboard</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+  <script src="https://unpkg.com/htmx.org@2.0.4" integrity="sha384-HGfztofotfshcF7+8n44JQL2oJmowVChPTg48S+jvZoztPfvwD79OC/LTtG6dMp+" crossorigin="anonymous"></script>
   <style>
     .status-dot {{ width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 6px; }}
     .status-running {{ background: var(--pico-color-green-500); }}
@@ -279,6 +291,7 @@ async fn dashboard(State(state): State<SharedState>) -> (StatusCode, Html<String
           <th>Last Event</th>
           <th>Last Message</th>
           <th>Tokens (in/out)</th>
+          <th>Actions</th>
         </tr>
       </thead>
       <tbody>{}</tbody>
@@ -324,7 +337,7 @@ async fn dashboard(State(state): State<SharedState>) -> (StatusCode, Html<String
             blocked_rows + &delayed_rows
         },
         if running_rows.is_empty() {
-            "<tr><td colspan=8 style='text-align:center;'>No active sessions</td></tr>".to_string()
+            "<tr><td colspan=9 style='text-align:center;'>No active sessions</td></tr>".to_string()
         } else {
             running_rows
         },
@@ -342,6 +355,42 @@ fn html_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+/// Minimal percent-encoding for path segments. Encodes characters that have
+/// special meaning in URL paths (`#`, ` `, `?`, `/`, etc.). For sympheo
+/// identifiers like `repo#42` this yields `repo%2342`, which `axum` decodes
+/// transparently on the receiving end.
+fn url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '~' {
+            out.push(c);
+        } else {
+            let mut buf = [0u8; 4];
+            for byte in c.encode_utf8(&mut buf).as_bytes() {
+                out.push_str(&format!("%{byte:02X}"));
+            }
+        }
+    }
+    out
+}
+
+/// Render a CLI last_message in the dashboard cell. SPEC §13.7 + CONTEXT.md
+/// requires the FULL message be available to the operator (no silent
+/// truncation). Short messages are rendered inline; long ones collapse into
+/// a `<details>` so the table stays scannable while preserving full content.
+fn render_last_message(msg: &str) -> String {
+    let escaped = html_escape(msg);
+    if msg.chars().count() <= 80 {
+        return escaped;
+    }
+    let preview: String = msg.chars().take(60).collect();
+    format!(
+        "<details><summary>{}…</summary><pre style=\"white-space:pre-wrap; max-width:50ch;\">{}</pre></details>",
+        html_escape(&preview),
+        escaped
+    )
 }
 
 async fn api_state(State(state): State<SharedState>) -> Json<serde_json::Value> {
@@ -446,6 +495,74 @@ async fn api_refresh(State(state): State<SharedState>) -> Json<serde_json::Value
     }))
 }
 
+/// SPEC §13.7 extension: operational control endpoint to cancel a running worker.
+/// Sets `RunningEntry.cancelled` so the watchdog (`src/agent/backend/local.rs`)
+/// kills the subprocess group within 1s. The orchestrator detects the worker
+/// exit and converts it to a retry per §7.3 / §8.4.
+///
+/// Returns 200 with a JSON status payload on success, 404 if no running entry
+/// matches the identifier.
+async fn api_cancel(
+    State(state): State<SharedState>,
+    AxumPath(issue_identifier): AxumPath<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let st = state.read().await;
+    let entry = st
+        .running
+        .values()
+        .find(|e| e.issue.identifier == issue_identifier);
+    match entry {
+        Some(entry) => {
+            entry.cancelled.store(true, Ordering::Relaxed);
+            tracing::info!(
+                issue_identifier = %issue_identifier,
+                issue_id = %entry.issue.id,
+                "operator-issued cancel via /api/v1/<id>/cancel"
+            );
+            Ok(Json(json!({
+                "cancelled": true,
+                "issue_identifier": issue_identifier,
+                "issue_id": entry.issue.id,
+                "requested_at": chrono::Utc::now().to_rfc3339(),
+            })))
+        }
+        None => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+/// SPEC §13.7 extension: operational control endpoint to remove an issue
+/// from the retry queue (releases the claim so the issue stops being scheduled).
+async fn api_retry_delete(
+    State(state): State<SharedState>,
+    AxumPath(issue_identifier): AxumPath<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let mut st = state.write().await;
+    // Find the entry by identifier (retry entries store identifier alongside id).
+    let issue_id = st
+        .retry_attempts
+        .values()
+        .find(|r| r.identifier == issue_identifier)
+        .map(|r| r.issue_id.clone());
+    match issue_id {
+        Some(id) => {
+            st.retry_attempts.remove(&id);
+            st.claimed.remove(&id);
+            tracing::info!(
+                issue_identifier = %issue_identifier,
+                issue_id = %id,
+                "operator-issued retry removal via DELETE /api/v1/retry/<id>"
+            );
+            Ok(Json(json!({
+                "removed": true,
+                "issue_identifier": issue_identifier,
+                "issue_id": id,
+                "requested_at": chrono::Utc::now().to_rfc3339(),
+            })))
+        }
+        None => Err(StatusCode::NOT_FOUND),
+    }
+}
+
 async fn api_issue(
     State(state): State<SharedState>,
     AxumPath(issue_identifier): AxumPath<String>,
@@ -507,6 +624,116 @@ mod tests {
         assert_eq!(html_escape("foo & bar"), "foo &amp; bar");
         assert_eq!(html_escape("\"quoted\""), "&quot;quoted&quot;");
         assert_eq!(html_escape("<div>"), "&lt;div&gt;");
+    }
+
+    #[test]
+    fn test_url_encode_passthrough() {
+        assert_eq!(url_encode("ABC-123"), "ABC-123");
+        assert_eq!(url_encode("v1.2.3"), "v1.2.3");
+    }
+
+    #[test]
+    fn test_url_encode_hash_and_slash() {
+        // SPEC §13.7.2: GitHub identifiers contain '#' and need URL-encoding
+        // when used as path segments.
+        assert_eq!(url_encode("repo#42"), "repo%2342");
+        assert_eq!(url_encode("a/b c"), "a%2Fb%20c");
+    }
+
+    #[test]
+    fn test_render_last_message_short() {
+        let msg = "Hello, world!";
+        let rendered = render_last_message(msg);
+        assert_eq!(rendered, "Hello, world!");
+        assert!(!rendered.contains("<details>"));
+    }
+
+    #[test]
+    fn test_render_last_message_long_uses_details() {
+        let msg = "a".repeat(150);
+        let rendered = render_last_message(&msg);
+        assert!(rendered.contains("<details>"));
+        assert!(rendered.contains(&msg));
+    }
+
+    #[test]
+    fn test_render_last_message_escapes_html() {
+        let rendered = render_last_message("<b>bold</b>");
+        assert!(rendered.contains("&lt;b&gt;"));
+        assert!(!rendered.contains("<b>"));
+    }
+
+    #[tokio::test]
+    async fn test_api_cancel_sets_atomic() {
+        let mut state = OrchestratorState::new(5000, 5);
+        let cancelled_flag = Arc::new(AtomicBool::new(false));
+        state.running.insert(
+            "1".into(),
+            RunningEntry {
+                issue: Issue {
+                    id: "1".into(),
+                    identifier: "repo#42".into(),
+                    title: "t".into(),
+                    description: None,
+                    priority: None,
+                    state: "in progress".into(),
+                    branch_name: None,
+                    url: None,
+                    labels: vec![],
+                    blocked_by: vec![],
+                    ..Default::default()
+                },
+                session: None,
+                started_at: chrono::Utc::now(),
+                retry_attempt: None,
+                turn_count: 0,
+                stagnation_counter: 0,
+                last_state_change_at: chrono::Utc::now(),
+                cancelled: cancelled_flag.clone(),
+            },
+        );
+        let shared = Arc::new(RwLock::new(state));
+        let result = api_cancel(State(shared.clone()), AxumPath("repo#42".into())).await;
+        assert!(result.is_ok());
+        assert!(cancelled_flag.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn test_api_cancel_unknown_returns_404() {
+        let state = OrchestratorState::new(5000, 5);
+        let shared = Arc::new(RwLock::new(state));
+        let result = api_cancel(State(shared), AxumPath("nope#1".into())).await;
+        assert_eq!(result.unwrap_err(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_api_retry_delete_removes_entry() {
+        let mut state = OrchestratorState::new(5000, 5);
+        state.claimed.insert("1".into());
+        state.retry_attempts.insert(
+            "1".into(),
+            RetryEntry {
+                issue_id: "1".into(),
+                identifier: "repo#42".into(),
+                attempt: 2,
+                error: Some("transient".into()),
+                due_at: std::time::Instant::now(),
+            },
+        );
+        let shared = Arc::new(RwLock::new(state));
+        let result = api_retry_delete(State(shared.clone()), AxumPath("repo#42".into())).await;
+        assert!(result.is_ok());
+        let st = shared.read().await;
+        assert!(!st.retry_attempts.contains_key("1"));
+        assert!(!st.claimed.contains("1"));
+    }
+
+    #[tokio::test]
+    async fn test_api_retry_delete_unknown_returns_404() {
+        let state = OrchestratorState::new(5000, 5);
+        let shared = Arc::new(RwLock::new(state));
+        let result = api_retry_delete(State(shared), AxumPath("nope#1".into())).await;
+        assert_eq!(result.unwrap_err(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -624,7 +851,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_dashboard_long_message_truncate() {
+    async fn test_dashboard_long_message_renders_full_in_details() {
         let mut state = OrchestratorState::new(5000, 5);
         state.running.insert(
             "1".into(),
@@ -670,7 +897,16 @@ mod tests {
         let shared = Arc::new(RwLock::new(state));
         let (status, Html(body)) = dashboard(State(shared)).await;
         assert_eq!(status, StatusCode::OK);
-        assert!(body.contains("..."));
+        // P6: long messages render in a <details> with the FULL content
+        // available (no truncation). The summary uses an ellipsis ('…').
+        assert!(
+            body.contains("<details>"),
+            "long message should be wrapped in <details> for operator visibility"
+        );
+        assert!(
+            body.contains(&"a".repeat(100)),
+            "full message body should be present (no silent truncation)"
+        );
     }
 
     #[tokio::test]

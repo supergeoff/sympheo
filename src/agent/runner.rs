@@ -68,7 +68,7 @@ impl AgentRunner {
     }
 
     /// SPEC §10.2.2: one CLI subprocess invocation for one turn.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)] // Reason: forwards verbatim to `CliAdapter::run_turn`, whose arity is fixed by SPEC §10.2.2; refactoring here would only diverge the two signatures.
     pub async fn run_turn(
         &self,
         session: &SessionContext,

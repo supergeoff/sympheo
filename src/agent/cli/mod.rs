@@ -110,7 +110,7 @@ pub trait CliAdapter: Send + Sync {
     /// Default implementation delegates to the supplied execution backend's
     /// `run_turn`, which still owns the CLI protocol for the reference
     /// adapters today; adapters that need bespoke protocol handling override.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)] // Reason: SPEC §10.2.2 mandates this exact arity; bundling into a struct would just add indirection without changing the contract.
     async fn run_turn(
         &self,
         session_context: &SessionContext,

@@ -402,6 +402,9 @@ impl ServiceConfig {
                 "cli.command is empty".into(),
             ));
         }
+        // SPEC §6.3 + §10.1: resolve a CLI adapter from cli.command's leading binary token.
+        // Fails with CliAdapterNotFound if no adapter matches (§5.5).
+        let _ = crate::agent::cli::select_adapter(&cmd)?;
         if self.daytona_enabled() && self.daytona_api_key().is_none() {
             return Err(SympheoError::InvalidConfiguration(
                 "daytona.api_key is required when backend is enabled".into(),

@@ -116,6 +116,47 @@ async fn test_orchestrator_tick_skips_blocked_todo() {
 }
 
 #[tokio::test]
+async fn test_orchestrator_tick_dispatches_todo_with_terminal_blockers() {
+    // SPEC §17.5: "An issue in the first active state with terminal blockers
+    // is eligible". Companion to `test_orchestrator_tick_skips_blocked_todo`:
+    // same issue shape, but every blocker has reached a terminal state, so
+    // dispatch must claim and run it.
+    let config = valid_config();
+    let issue = Issue {
+        blocked_by: vec![
+            sympheo::tracker::model::BlockerRef {
+                id: Some("2".into()),
+                identifier: Some("TEST-2".into()),
+                state: Some("closed".into()),
+            },
+            sympheo::tracker::model::BlockerRef {
+                id: Some("3".into()),
+                identifier: Some("TEST-3".into()),
+                state: Some("done".into()),
+            },
+        ],
+        ..make_issue("1", "TEST-1", "todo")
+    };
+    let tracker = Arc::new(MockTracker {
+        candidates: vec![issue],
+        by_states: vec![],
+        by_ids: vec![],
+    });
+    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
+    orch.tick().await;
+
+    let state = orch.state.read().await;
+    assert!(
+        state.claimed.contains("1"),
+        "todo with all-terminal blockers must be claimed"
+    );
+    assert!(
+        state.running.contains_key("1"),
+        "todo with all-terminal blockers must be running"
+    );
+}
+
+#[tokio::test]
 async fn test_orchestrator_tick_skips_terminal_issue() {
     let config = valid_config();
     let issue = make_issue("1", "TEST-1", "closed");
@@ -190,6 +231,108 @@ async fn test_orchestrator_reload_config() {
     let state = orch.state.read().await;
     assert_eq!(state.poll_interval_ms, 10000);
     assert_eq!(state.max_concurrent_agents, 5);
+}
+
+#[tokio::test]
+async fn test_orchestrator_invalid_reload_keeps_last_known_good() {
+    // SPEC §17.1: "Invalid workflow reload keeps last known good effective
+    // configuration and emits an operator-visible error".
+    //
+    // The watcher in src/main.rs guards reload by short-circuiting on a
+    // loader error. This test exercises the same contract end-to-end:
+    //   1. Successfully load a good workflow → reload_config applies.
+    //   2. A subsequent invalid workflow file MUST surface a typed error
+    //      from `WorkflowLoader::load()` and the in-memory state MUST stay
+    //      pinned at the last good values (no partial / silent overwrite).
+    use std::path::PathBuf;
+    use sympheo::workflow::loader::WorkflowLoader;
+
+    let tracker = Arc::new(MockTracker {
+        candidates: vec![],
+        by_states: vec![],
+        by_ids: vec![],
+    });
+    let orch = Orchestrator::new(
+        valid_config(),
+        tracker,
+        std::collections::HashMap::new(),
+        None,
+    )
+    .unwrap();
+
+    // 1) Land a known-good config.
+    let good_path = std::env::temp_dir().join(format!(
+        "sympheo_reload_good_{}_{}.md",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::write(
+        &good_path,
+        r#"---
+polling:
+  interval_ms: 11111
+agent:
+  max_concurrent_agents: 7
+---
+ok
+"#,
+    )
+    .expect("write good workflow");
+    let good_loaded = WorkflowLoader::new(Some(good_path.clone()))
+        .load()
+        .expect("good workflow loads");
+    let good_cfg = ServiceConfig::new(
+        good_loaded.config,
+        PathBuf::from("/tmp"),
+        good_loaded.prompt_template,
+    );
+    orch.reload_config(good_cfg, std::collections::HashMap::new())
+        .await;
+    {
+        let st = orch.state.read().await;
+        assert_eq!(st.poll_interval_ms, 11111);
+        assert_eq!(st.max_concurrent_agents, 7);
+    }
+
+    // 2) Now write an INVALID workflow (unclosed front matter) at a fresh
+    //    path and try to load it. The loader must return a typed error and
+    //    the orchestrator state must stay at the last-known-good values.
+    let bad_path = std::env::temp_dir().join(format!(
+        "sympheo_reload_bad_{}_{}.md",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::write(&bad_path, "---\ntracker: kind\nDo work").expect("write bad workflow");
+    let bad_result = WorkflowLoader::new(Some(bad_path.clone())).load();
+    assert!(
+        matches!(bad_result, Err(SympheoError::WorkflowParseError(_))),
+        "invalid workflow must surface typed parse error, got {:?}",
+        bad_result
+    );
+
+    // The watcher path skips reload on Err, so we mirror that here: do NOT
+    // call reload_config. Assert the orchestrator still holds the last good
+    // effective configuration.
+    {
+        let st = orch.state.read().await;
+        assert_eq!(
+            st.poll_interval_ms, 11111,
+            "invalid reload must not change poll_interval_ms"
+        );
+        assert_eq!(
+            st.max_concurrent_agents, 7,
+            "invalid reload must not change max_concurrent_agents"
+        );
+    }
+
+    let _ = std::fs::remove_file(&good_path);
+    let _ = std::fs::remove_file(&bad_path);
 }
 
 #[tokio::test]

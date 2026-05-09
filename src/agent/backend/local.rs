@@ -166,18 +166,35 @@ impl AgentBackend for LocalBackend {
                 .take()
                 .ok_or_else(|| SympheoError::AgentRunnerError("missing stderr".into()))?;
 
-            // Spawn stderr reader task to capture agent diagnostic output
+            // Spawn stderr reader task to capture agent diagnostic output.
+            // Detects well-known opencode failure signals (rate-limit, auth, account
+            // required, permission denied) and exposes them via the shared
+            // `detected_stderr_error` slot so the main turn loop can fail explicitly
+            // instead of silently treating reason=stop as success.
+            let detected_stderr_error: Arc<tokio::sync::Mutex<Option<SympheoError>>> =
+                Arc::new(tokio::sync::Mutex::new(None));
+            let stderr_error_slot = detected_stderr_error.clone();
             let stderr_span = tracing::info_span!(parent: span_clone, "opencode_stderr");
-            let stderr_handle = tokio::spawn(async move {
-                let stderr_reader = BufReader::new(stderr);
-                let mut stderr_lines = stderr_reader.lines();
-                while let Ok(Some(line)) = stderr_lines.next_line().await {
-                    let trimmed = line.trim();
-                    if !trimmed.is_empty() {
+            let stderr_handle = tokio::spawn(
+                async move {
+                    let stderr_reader = BufReader::new(stderr);
+                    let mut stderr_lines = stderr_reader.lines();
+                    while let Ok(Some(line)) = stderr_lines.next_line().await {
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
                         tracing::warn!(target = "opencode::stderr", "{}", trimmed);
+                        if let Some(err) = classify_stderr_line(trimmed) {
+                            let mut slot = stderr_error_slot.lock().await;
+                            if slot.is_none() {
+                                *slot = Some(err);
+                            }
+                        }
                     }
                 }
-            }.instrument(stderr_span));
+                .instrument(stderr_span),
+            );
 
             let reader = BufReader::new(stdout);
             let mut lines = reader.lines();
@@ -235,10 +252,22 @@ impl AgentBackend for LocalBackend {
             // Terminate the process since the turn is complete
             // opencode run may not exit on its own after step_finish
             kill_process_group(&mut child);
-            let _ = stderr_handle.abort();
+            // Allow the stderr reader to finish draining synchronously so any
+            // late-arriving error line (rate_limit, auth, etc.) is captured before
+            // we look at detected_stderr_error.
+            let _ = timeout(Duration::from_millis(100), stderr_handle).await;
             // Attempt to reap the process without blocking the result
             let _ = timeout(Duration::from_secs(5), child.wait()).await;
             let _ = tokio::fs::remove_file(&prompt_file).await;
+
+            // Promote any detected stderr error into a typed turn failure (§10.5).
+            // This prevents silent "success" when opencode crashed on rate-limit /
+            // auth / account / permission errors mid-turn but still emitted a
+            // stop-reason event before exiting.
+            if let Some(err) = detected_stderr_error.lock().await.take() {
+                tracing::warn!(error = %err, "opencode stderr signaled a failure; turn marked as failed");
+                return Err(err);
+            }
 
             let sid = current_session.unwrap_or_else(|| issue.id.clone());
             let tid = current_turn.unwrap_or_else(|| "turn-1".into());
@@ -252,6 +281,48 @@ impl AgentBackend for LocalBackend {
             })
         }.instrument(span).await
     }
+}
+
+/// Map opencode stderr lines to typed adapter errors (§10.5). Conservative
+/// pattern matching: only well-known signals are surfaced — anything unknown
+/// is left as a plain warn log line.
+pub(crate) fn classify_stderr_line(line: &str) -> Option<SympheoError> {
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("rate limit")
+        || lower.contains("rate_limit")
+        || lower.contains("rate-limit")
+        || lower.contains("too many requests")
+        || lower.contains("status 429")
+    {
+        return Some(SympheoError::TurnFailed(format!("rate limit: {line}")));
+    }
+    if lower.contains("unauthorized")
+        || lower.contains("invalid api key")
+        || lower.contains("api key") && (lower.contains("missing") || lower.contains("invalid"))
+        || lower.contains("authentication failed")
+        || lower.contains("authentication required")
+        || lower.contains("status 401")
+        || lower.contains("status 403")
+    {
+        return Some(SympheoError::SessionStartFailed(format!(
+            "auth failure: {line}"
+        )));
+    }
+    if lower.contains("account required")
+        || lower.contains("login required")
+        || lower.contains("subscription required")
+        || lower.contains("payment required")
+    {
+        return Some(SympheoError::UserInputRequired(format!(
+            "account / login required: {line}"
+        )));
+    }
+    if lower.contains("permission denied") && !lower.contains("--dangerously-skip-permissions") {
+        return Some(SympheoError::TurnFailed(format!(
+            "permission denied: {line}"
+        )));
+    }
+    None
 }
 
 fn kill_process_group(child: &mut tokio::process::Child) {
@@ -295,6 +366,54 @@ fn sanitize_prompt_for_opencode(prompt: &str) -> String {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn test_classify_stderr_line_rate_limit() {
+        assert!(matches!(
+            classify_stderr_line("ERROR: Rate limit exceeded"),
+            Some(SympheoError::TurnFailed(_))
+        ));
+        assert!(matches!(
+            classify_stderr_line("[opencode] HTTP status 429 too many requests"),
+            Some(SympheoError::TurnFailed(_))
+        ));
+    }
+
+    #[test]
+    fn test_classify_stderr_line_auth() {
+        assert!(matches!(
+            classify_stderr_line("Unauthorized: invalid API key"),
+            Some(SympheoError::SessionStartFailed(_))
+        ));
+        assert!(matches!(
+            classify_stderr_line("status 401 authentication failed"),
+            Some(SympheoError::SessionStartFailed(_))
+        ));
+    }
+
+    #[test]
+    fn test_classify_stderr_line_account_required() {
+        assert!(matches!(
+            classify_stderr_line("Subscription required to use this model"),
+            Some(SympheoError::UserInputRequired(_))
+        ));
+    }
+
+    #[test]
+    fn test_classify_stderr_line_permission_denied() {
+        assert!(matches!(
+            classify_stderr_line("permission denied for tool 'write'"),
+            Some(SympheoError::TurnFailed(_))
+        ));
+    }
+
+    #[test]
+    fn test_classify_stderr_line_neutral() {
+        assert!(classify_stderr_line("info: starting model").is_none());
+        assert!(classify_stderr_line("[debug] connection ok").is_none());
+        // The skip-permissions flag string itself should NOT trigger
+        assert!(classify_stderr_line("--dangerously-skip-permissions enabled").is_none());
+    }
 
     #[test]
     fn test_shell_escape_backslash() {

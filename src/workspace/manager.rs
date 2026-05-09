@@ -33,6 +33,18 @@ impl WorkspaceManager {
         &self.git_adapter
     }
 
+    /// SPEC §4.2 + §9.2 + §15.2: workspace key = identifier with any character outside
+    /// `[A-Za-z0-9._]` replaced by `-`. Examples:
+    ///   sympheo#42      -> sympheo-42
+    ///   ABC-123         -> ABC-123        (hyphen kept; outside [.A-Za-z0-9_] but spec sample)
+    ///   feat/new_thing  -> feat-new_thing
+    ///
+    /// Note: SPEC §4.2 lists `[A-Za-z0-9._]` strictly; the GitHub example
+    /// `sympheo#42 -> sympheo-42` shows hyphen as the replacement char. The Linear example
+    /// `ABC-123 -> ABC-123` shows hyphen survives (because spec text says "not in" the
+    /// allowed set, but the result preserves the hyphen). We interpret the conformance
+    /// requirement as: replace any character outside `[A-Za-z0-9._-]` with `-`,
+    /// matching both example mappings.
     pub fn sanitize_identifier(identifier: &str) -> String {
         identifier
             .chars()
@@ -40,7 +52,7 @@ impl WorkspaceManager {
                 if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
                     c
                 } else {
-                    '_'
+                    '-'
                 }
             })
             .collect()
@@ -174,20 +186,31 @@ mod tests {
 
     #[test]
     fn test_sanitize_identifier_basic() {
+        // SPEC §4.2 examples
+        assert_eq!(
+            WorkspaceManager::sanitize_identifier("sympheo#42"),
+            "sympheo-42"
+        );
         assert_eq!(WorkspaceManager::sanitize_identifier("ABC-123"), "ABC-123");
         assert_eq!(
             WorkspaceManager::sanitize_identifier("feat/new_thing"),
-            "feat_new_thing"
+            "feat-new_thing"
         );
         assert_eq!(
             WorkspaceManager::sanitize_identifier("bug: crash!"),
-            "bug__crash_"
+            "bug--crash-"
         );
     }
 
     #[test]
     fn test_sanitize_identifier_preserves_dots() {
         assert_eq!(WorkspaceManager::sanitize_identifier("v1.2.3"), "v1.2.3");
+    }
+
+    #[test]
+    fn test_sanitize_identifier_replaces_with_hyphen() {
+        // any char outside [A-Za-z0-9._-] becomes '-'
+        assert_eq!(WorkspaceManager::sanitize_identifier("a@b/c d"), "a-b-c-d");
     }
 
     #[test]

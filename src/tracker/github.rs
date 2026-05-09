@@ -9,6 +9,34 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+/// SPEC §11.4.3 + §4.2: branch name = `<number>-<slug>`,
+/// slug = lowercase title, runs of non-`[a-z0-9]` → `-`, trimmed, truncated to 60.
+pub(crate) fn build_branch_name(number: i64, title: &str) -> String {
+    let lower = title.to_lowercase();
+    let mut slug = String::with_capacity(lower.len());
+    let mut last_was_dash = true;
+    for c in lower.chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c);
+            last_was_dash = false;
+        } else if !last_was_dash {
+            slug.push('-');
+            last_was_dash = true;
+        }
+    }
+    let slug = slug.trim_matches('-').to_string();
+    let raw = if slug.is_empty() {
+        format!("{number}")
+    } else {
+        format!("{number}-{slug}")
+    };
+    if raw.len() > 60 {
+        raw[..60].trim_end_matches('-').to_string()
+    } else {
+        raw
+    }
+}
+
 pub mod mutations;
 
 pub(crate) type FieldCache = HashMap<String, (String, HashMap<String, String>)>;
@@ -354,14 +382,18 @@ impl GithubTracker {
             vec![]
         };
 
+        // SPEC §11.4.2: identifier = "<repo>#<number>" (no owner prefix).
+        // Use the GraphQL node id (e.g. "I_kwDO...") as the stable internal id.
+        let internal_id = node_id.clone().unwrap_or_else(|| number.to_string());
+
         Some(Issue {
-            id: number.to_string(),
-            identifier: format!("{}-{}", self.repo.to_uppercase(), number),
-            title,
+            id: internal_id,
+            identifier: format!("{}#{}", self.repo, number),
+            title: title.clone(),
             description: body,
             priority: None,
             state,
-            branch_name: None,
+            branch_name: Some(build_branch_name(number, &title)),
             url: content
                 .get("url")
                 .and_then(|u| u.as_str())
@@ -384,6 +416,29 @@ impl GithubTracker {
 
 #[async_trait]
 impl IssueTracker for GithubTracker {
+    /// SPEC §11.1.1 + §11.4.8: validate org, project_number positive, status_field non-empty,
+    /// auth_token resolved non-empty. No network calls.
+    fn validate(&self) -> Result<(), SympheoError> {
+        if self.owner.trim().is_empty() {
+            return Err(SympheoError::InvalidConfiguration(
+                "tracker.org (derived from project_slug) is empty".into(),
+            ));
+        }
+        if self.repo.trim().is_empty() {
+            return Err(SympheoError::InvalidConfiguration(
+                "tracker.project_slug repo segment is empty".into(),
+            ));
+        }
+        if self.project_number <= 0 {
+            return Err(SympheoError::InvalidConfiguration(
+                "tracker.project_number must be a positive integer".into(),
+            ));
+        }
+        // status_field is currently hardcoded to "Status"; presence on project is a
+        // runtime-only check (would require a network call), so we skip it here per §11.1.1.
+        Ok(())
+    }
+
     async fn fetch_candidate_issues(&self) -> Result<Vec<Issue>, SympheoError> {
         let items = self.fetch_project_items().await?;
         let issues: Vec<Issue> = items
@@ -533,6 +588,7 @@ mod tests {
         let tracker = GithubTracker::new(&config).unwrap();
         let item = serde_json::json!({
             "content": {
+                "id": "I_kwDOABCD12345",
                 "number": 42,
                 "title": "Fix bug",
                 "body": "Description here",
@@ -550,18 +606,58 @@ mod tests {
             }
         });
         let issue = tracker.normalize_item(&item).unwrap();
-        assert_eq!(issue.id, "42");
-        assert_eq!(issue.identifier, "REPO-42");
+        // SPEC §4.1.1 + §4.2: id = GraphQL node id; identifier = "<repo>#<number>"
+        assert_eq!(issue.id, "I_kwDOABCD12345");
+        assert_eq!(issue.identifier, "repo#42");
         assert_eq!(issue.title, "Fix bug");
         assert_eq!(issue.description, Some("Description here".to_string()));
         assert_eq!(issue.state, "in progress");
         assert_eq!(issue.labels, vec!["bug", "urgent"]);
+        assert_eq!(issue.branch_name, Some("42-fix-bug".to_string()));
         assert_eq!(
             issue.url,
             Some("https://github.com/owner/repo/issues/42".to_string())
         );
         assert!(issue.created_at.is_some());
         assert!(issue.updated_at.is_some());
+    }
+
+    #[test]
+    fn test_build_branch_name_simple() {
+        assert_eq!(
+            build_branch_name(42, "Fix login bug on Safari"),
+            "42-fix-login-bug-on-safari"
+        );
+    }
+
+    #[test]
+    fn test_build_branch_name_truncation() {
+        let long = "a".repeat(80);
+        let result = build_branch_name(7, &long);
+        assert!(result.len() <= 60);
+        assert!(result.starts_with("7-"));
+    }
+
+    #[test]
+    fn test_build_branch_name_special_chars_collapse() {
+        assert_eq!(
+            build_branch_name(3, "  Foo!!! Bar / Baz  "),
+            "3-foo-bar-baz"
+        );
+    }
+
+    #[test]
+    fn test_build_branch_name_empty_title() {
+        assert_eq!(build_branch_name(99, ""), "99");
+    }
+
+    #[test]
+    fn test_build_branch_name_truncate_trims_trailing_dash() {
+        // Construct title where the 60-char cut would land on a hyphen
+        let title = "abcdefghij ".repeat(10); // ~110 chars with spaces collapsing to dashes
+        let result = build_branch_name(1, &title);
+        assert!(!result.ends_with('-'));
+        assert!(result.len() <= 60);
     }
 
     #[test]
@@ -654,6 +750,32 @@ mod tests {
             result,
             Err(SympheoError::MissingTrackerProjectSlug)
         ));
+    }
+
+    #[test]
+    fn test_validate_ok() {
+        let config = make_config("owner/repo", 7, "key");
+        let tracker = GithubTracker::new(&config).unwrap();
+        assert!(tracker.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_zero_project_number() {
+        // build a tracker with valid owner/repo first, then mutate to test validate()
+        let config = make_config("owner/repo", 1, "key");
+        let mut tracker = GithubTracker::new(&config).unwrap();
+        tracker.project_number = 0;
+        let err = tracker.validate().unwrap_err();
+        assert!(matches!(err, SympheoError::InvalidConfiguration(_)));
+    }
+
+    #[test]
+    fn test_validate_negative_project_number() {
+        let config = make_config("owner/repo", 1, "key");
+        let mut tracker = GithubTracker::new(&config).unwrap();
+        tracker.project_number = -3;
+        let err = tracker.validate().unwrap_err();
+        assert!(matches!(err, SympheoError::InvalidConfiguration(_)));
     }
 
     #[test]

@@ -110,13 +110,16 @@ async fn test_fetch_candidate_issues() {
     let tracker = GithubTracker::new(&config).unwrap();
     let issues = tracker.fetch_candidate_issues().await.unwrap();
 
+    // SPEC §4.1.1: id = GraphQL node id; SPEC §11.4.2: identifier = "<repo>#<number>"
     assert_eq!(issues.len(), 2);
-    assert_eq!(issues[0].id, "1");
-    assert_eq!(issues[0].identifier, "REPO-1");
+    assert_eq!(issues[0].id, "issue-1");
+    assert_eq!(issues[0].identifier, "repo#1");
     assert_eq!(issues[0].title, "Issue One");
     assert_eq!(issues[0].state, "in progress");
     assert_eq!(issues[0].labels, vec!["bug"]);
-    assert_eq!(issues[1].id, "2");
+    assert_eq!(issues[0].branch_name, Some("1-issue-one".to_string()));
+    assert_eq!(issues[1].id, "issue-2");
+    assert_eq!(issues[1].identifier, "repo#2");
     assert_eq!(issues[1].state, "closed");
 }
 
@@ -145,7 +148,7 @@ async fn test_fetch_issues_by_states() {
         .unwrap();
 
     assert_eq!(issues.len(), 1);
-    assert_eq!(issues[0].id, "2");
+    assert_eq!(issues[0].id, "issue-2");
     assert_eq!(issues[0].state, "closed");
 }
 
@@ -180,12 +183,12 @@ async fn test_fetch_issue_states_by_ids() {
     let config = make_config(&mock_server.uri());
     let tracker = GithubTracker::new(&config).unwrap();
     let issues = tracker
-        .fetch_issue_states_by_ids(&["1".into()])
+        .fetch_issue_states_by_ids(&["issue-1".into()])
         .await
         .unwrap();
 
     assert_eq!(issues.len(), 1);
-    assert_eq!(issues[0].id, "1");
+    assert_eq!(issues[0].id, "issue-1");
 }
 
 #[tokio::test]

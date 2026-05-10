@@ -15,6 +15,19 @@ Assert Sympheo Binary Exists
     END
     Log To Console    [setup] sympheo binary at ${SYMPHEO_BIN}
 
+Stage Claude OAuth Home
+    [Documentation]    Build a minimal HOME-shaped directory under ``${WORKFLOW_DIR}/claude-home/``
+    ...                containing only ``.claude/.credentials.json`` from the host. The WORKFLOW.md
+    ...                generator then sets ``cli.env.HOME`` to this directory so claude — launched
+    ...                inside sympheo's isolated workspace — can authenticate via OAuth without
+    ...                exposing the rest of ``~/`` to ``--dangerously-skip-permissions``.
+    File Should Exist    ${HOST_CLAUDE_CREDENTIALS}    msg=run `claude /login` once or export ANTHROPIC_API_KEY
+    ${claude_home}=    Set Variable    ${WORKFLOW_DIR}/claude-home
+    Create Directory    ${claude_home}/.claude
+    Copy File    ${HOST_CLAUDE_CREDENTIALS}    ${claude_home}/.claude/.credentials.json
+    Set Suite Variable    ${CLAUDE_HOME_DIR}    ${claude_home}
+    Log To Console    [setup] staged claude OAuth home at ${claude_home}
+
 Set Up Workflow Dir
     [Documentation]    Create a temp dir for WORKFLOW.md, workspace, and logs. Stored as suite vars.
     ${tmp}=    Evaluate    __import__('tempfile').mkdtemp(prefix='sympheo-e2e-')    modules=tempfile

@@ -90,6 +90,7 @@ Generate Workflow Md For Claude Spec Phase
     ...    cli:
     ...    \ \ command: claude
     ...    \ \ env:
+    ...    \ \ \ \ HOME: ${CLAUDE_HOME_DIR}
     ...    \ \ \ \ ANTHROPIC_API_KEY: $ANTHROPIC_API_KEY
     ...    \ \ \ \ GITHUB_TOKEN: $GITHUB_TOKEN
     ...    \ \ \ \ GH_TOKEN: $GITHUB_TOKEN
@@ -138,6 +139,7 @@ Generate Workflow Md For Claude Code Phase
     ...    cli:
     ...    \ \ command: claude
     ...    \ \ env:
+    ...    \ \ \ \ HOME: ${CLAUDE_HOME_DIR}
     ...    \ \ \ \ ANTHROPIC_API_KEY: $ANTHROPIC_API_KEY
     ...    \ \ \ \ GITHUB_TOKEN: $GITHUB_TOKEN
     ...    \ \ \ \ GH_TOKEN: $GITHUB_TOKEN

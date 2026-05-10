@@ -33,10 +33,10 @@ ${MARKER_FILE_PREFIX}    e2e-marker-
 *** Keywords ***
 Code Phase Setup
     Assert Sympheo Binary Exists
-    Skip If    "%{ANTHROPIC_API_KEY=}"=="${EMPTY}"    ANTHROPIC_API_KEY not set; skipping code phase pipeline
     Cleanup Stale E2E Issues
     Provision Test Issue
     Set Up Workflow Dir
+    Stage Claude OAuth Home
     ${stamp}=    Get Time    epoch
     Set Suite Variable    ${MARKER_FILE_NAME}    ${MARKER_FILE_PREFIX}${stamp}.txt
     Set Suite Variable    ${MARKER_CONTENT}      hello-from-claude-${stamp}

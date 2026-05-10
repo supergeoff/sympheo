@@ -32,10 +32,10 @@ ${SPEC_BODY_MARKER}    ## Spec
 *** Keywords ***
 Spec Phase Setup
     Assert Sympheo Binary Exists
-    Skip If    "%{ANTHROPIC_API_KEY=}"=="${EMPTY}"    ANTHROPIC_API_KEY not set; skipping spec phase pipeline
     Cleanup Stale E2E Issues
     Provision Test Issue
     Set Up Workflow Dir
+    Stage Claude OAuth Home
     ${meta}=    Get Project Status Metadata    ${OWNER}    ${PROJECT_NUMBER}
     Set Suite Variable    ${PROJECT_ID}             ${meta}[project_id]
     Set Suite Variable    ${STATUS_FIELD_ID}        ${meta}[status_field_id]

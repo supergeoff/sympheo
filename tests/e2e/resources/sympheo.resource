@@ -1,8 +1,9 @@
 *** Settings ***
-Documentation     Spawn / kill / probe the sympheo daemon.
+Documentation     Spawn / kill / probe the sympheo daemon. Uses ``curl`` via the Process library
+...               instead of ``RequestsLibrary`` so the harness only needs the global
+...               ``robot`` install and zero extra Python packages.
 Library           OperatingSystem
 Library           Process
-Library           RequestsLibrary
 
 
 *** Keywords ***
@@ -16,7 +17,7 @@ Set Up Workflow Dir
     Log To Console    [setup] workflow_dir=${tmp}
 
 Teardown Workflow Dir
-    [Documentation]    Best-effort removal of the temp workflow dir. Always copies logs to ${OUTPUT_DIR} first.
+    [Documentation]    Best-effort removal of the temp workflow dir. Always copies logs to ``${OUTPUT_DIR}`` first.
     ${dir}=    Get Variable Value    ${WORKFLOW_DIR}    ${EMPTY}
     Run Keyword If    '${dir}'!='${EMPTY}'    Copy Logs To Report Dir    ${dir}
     Run Keyword If    '${dir}'!='${EMPTY}'    Run Keyword And Ignore Error    Remove Directory    ${dir}    recursive=True
@@ -35,7 +36,7 @@ Copy Logs To Report Dir
 
 Start Sympheo Daemon
     [Arguments]    ${workflow_path}    ${port}=18080
-    [Documentation]    Kills any stale sympheo bound to ${port} (a previous failed run that didn't get torn down) before starting fresh.
+    [Documentation]    Kills any stale sympheo bound to ``${port}`` (a previous failed run that didn't get torn down) before starting fresh.
     Run Keyword And Ignore Error    Kill Stale Sympheo On Port    ${port}
     ${stdout}=    Set Variable    ${SYMPHEO_LOG}/stdout.log
     ${stderr}=    Set Variable    ${SYMPHEO_LOG}/stderr.log
@@ -56,8 +57,9 @@ Wait For Sympheo Ready
 
 Sympheo State Endpoint Responds
     [Arguments]    ${port}
-    ${resp}=    GET    http://127.0.0.1:${port}/api/v1/state    expected_status=200
-    RETURN    ${resp}
+    ${result}=    Run Process    curl    -fsS    -m    5    http://127.0.0.1:${port}/api/v1/state
+    Should Be Equal As Integers    ${result.rc}    0    msg=curl failed: ${result.stderr}
+    RETURN    ${result.stdout}
 
 Stop Sympheo Daemon
     ${handle}=    Get Variable Value    ${SYMPHEO_HANDLE}    ${None}

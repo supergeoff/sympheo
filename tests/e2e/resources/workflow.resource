@@ -1,14 +1,19 @@
 *** Settings ***
-Documentation     Generate WORKFLOW.md (and mock script.yaml) fixtures pointing at the provisioned GitHub resources.
+Documentation     Generate WORKFLOW.md (and mock script.yaml) fixtures pointing at the real ``supergeoff/sympheo`` repo + Project v2 #2.
 Library           OperatingSystem
 Library           String
+
+
+*** Variables ***
+${ACTIVE_STATES}      Todo,In Progress
+${TERMINAL_STATES}    Done,Canceled
 
 
 *** Keywords ***
 Generate Mock Script
     [Arguments]    ${workflow_dir}
-    [Documentation]    Writes the YAML script consumed by MockBackend (src/agent/backend/mock.rs schema).
-    ...    The 8s sleep keeps the worker visible in /api/v1/state long enough for the poll to observe it
+    [Documentation]    Writes the YAML script consumed by MockBackend (``src/agent/backend/mock.rs`` schema).
+    ...    The 8s sleep keeps the worker visible in ``/api/v1/state`` long enough for the poll to observe it
     ...    (the test polls every 2s; without a sleep, the whole turn completes inside one tick).
     ${content}=    Catenate    SEPARATOR=\n
     ...    events:
@@ -41,7 +46,7 @@ Generate Workflow Md For Mock
     ...    \ \ project_slug: ${slug}
     ...    \ \ project_number: ${project_number}
     ...    \ \ active_states: [Todo, In Progress]
-    ...    \ \ terminal_states: [Done]
+    ...    \ \ terminal_states: [Done, Canceled]
     ...    cli:
     ...    \ \ command: mock-cli
     ...    \ \ options:
@@ -80,7 +85,7 @@ Generate Workflow Md For Claude
     ...    \ \ project_slug: ${slug}
     ...    \ \ project_number: ${project_number}
     ...    \ \ active_states: [Todo, In Progress]
-    ...    \ \ terminal_states: [Done]
+    ...    \ \ terminal_states: [Done, Canceled]
     ...    cli:
     ...    \ \ command: claude
     ...    \ \ env:

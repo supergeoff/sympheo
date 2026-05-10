@@ -77,20 +77,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //
     // `validate_for_dispatch` above already rejects empty `cli.command`, so
     // `split_whitespace().next()` here is guaranteed to yield a non-empty bin.
-    if !config.daytona_enabled() {
-        let cmd = config.cli_command();
-        let bin = cmd
-            .split_whitespace()
-            .next()
-            .expect("validate_for_dispatch rejects empty cli.command");
-        if sympheo::agent::tool_resolver::resolve_tool(bin).is_none() {
-            error!(
-                tool = %bin,
-                "startup validation failed: agent CLI binary not found on host. \
-                 Install it (mise, brew, apt, manual) or enable the daytona backend."
-            );
-            std::process::exit(1);
-        }
+    //
+    // The `mock-cli` sentinel is a special case: it selects the in-process
+    // `MockBackend`, which never spawns a host subprocess (it replays a YAML
+    // event script). There is no host binary to resolve, so the check is
+    // skipped.
+    let cmd = config.cli_command();
+    let bin = cmd
+        .split_whitespace()
+        .next()
+        .expect("validate_for_dispatch rejects empty cli.command");
+    let bin_leaf = std::path::Path::new(bin)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or(bin);
+    if bin_leaf != "mock-cli" && sympheo::agent::tool_resolver::resolve_tool(bin).is_none() {
+        error!(
+            tool = %bin,
+            "startup validation failed: agent CLI binary not found on host. \
+             Install it (mise, brew, apt, manual) or fix `cli.command`."
+        );
+        std::process::exit(1);
     }
 
     info!("startup validation passed");
@@ -118,7 +125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Ok(ref r) = runner {
                 let ws_path = wm.workspace_path(&issue.identifier);
                 if let Err(e) = r.cleanup_workspace(&ws_path).await {
-                    warn!(error = %e, issue_identifier = %issue.identifier, "startup cleanup daytona sandbox failed");
+                    warn!(error = %e, issue_identifier = %issue.identifier, "startup cleanup failed");
                 }
             }
             wm.remove_workspace(

@@ -1,5 +1,5 @@
 use crate::agent::backend::AgentBackend;
-use crate::agent::backend::{daytona::DaytonaBackend, local::LocalBackend, mock::MockBackend};
+use crate::agent::backend::{local::LocalBackend, mock::MockBackend};
 use crate::agent::cli::{CliAdapter, CliConfig, SessionContext, select_adapter};
 use crate::agent::parser::{EmittedEvent, TurnResult};
 use crate::config::typed::ServiceConfig;
@@ -37,8 +37,6 @@ impl AgentRunner {
             // `cli.command = "mock-cli"`. Reads a YAML/JSON event script from
             // cli.options.script and replays it.
             Arc::new(MockBackend::new(config)?)
-        } else if config.daytona_enabled() {
-            Arc::new(DaytonaBackend::new(config)?)
         } else {
             Arc::new(LocalBackend::new(config)?)
         };
@@ -131,45 +129,6 @@ mod tests {
         let runner = AgentRunner::new(&config).unwrap();
         assert_eq!(runner.adapter_kind(), "opencode");
         assert_eq!(runner.backend_kind(), "local");
-    }
-
-    #[test]
-    fn test_agent_runner_daytona_success() {
-        let mut raw = base_config();
-        let mut daytona = serde_json::Map::<String, serde_json::Value>::new();
-        daytona.insert("enabled".into(), serde_json::Value::Bool(true));
-        daytona.insert(
-            "api_key".into(),
-            serde_json::Value::String("test-key".into()),
-        );
-        daytona.insert(
-            "server_url".into(),
-            serde_json::Value::String("http://localhost".into()),
-        );
-        daytona.insert("target".into(), serde_json::Value::String("local".into()));
-        raw.insert("daytona".into(), serde_json::Value::Object(daytona));
-        let mut cli = serde_json::Map::<String, serde_json::Value>::new();
-        cli.insert(
-            "command".into(),
-            serde_json::Value::String("opencode run".into()),
-        );
-        raw.insert("cli".into(), serde_json::Value::Object(cli));
-        let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
-        let runner = AgentRunner::new(&config).unwrap();
-        assert_eq!(runner.adapter_kind(), "opencode");
-        assert_eq!(runner.backend_kind(), "daytona");
-    }
-
-    #[test]
-    fn test_agent_runner_daytona_failure() {
-        let mut raw = base_config();
-        let mut daytona = serde_json::Map::<String, serde_json::Value>::new();
-        daytona.insert("enabled".into(), serde_json::Value::Bool(true));
-        // Missing api_key
-        raw.insert("daytona".into(), serde_json::Value::Object(daytona));
-        let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
-        let runner = AgentRunner::new(&config);
-        assert!(runner.is_err());
     }
 
     /// SPEC §17.6: adapter selection picks the right adapter regardless of

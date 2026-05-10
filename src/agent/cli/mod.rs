@@ -9,7 +9,7 @@
 //! adapter matches, dispatch validation fails with [`SympheoError::CliAdapterNotFound`].
 //!
 //! Lifecycle (§10.2) lives on this trait. The execution surface (subprocess,
-//! Daytona sandbox, scriptable mock) is provided by an
+//! scriptable mock) is provided by an
 //! [`crate::agent::backend::AgentBackend`] and is intentionally distinct from
 //! the protocol the adapter speaks with the CLI binary.
 

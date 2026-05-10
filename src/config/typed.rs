@@ -51,10 +51,6 @@ impl ServiceConfig {
         self.raw.get("cli").and_then(|v| v.as_object())
     }
 
-    pub fn daytona(&self) -> Option<&serde_json::Map<String, serde_json::Value>> {
-        self.raw.get("daytona").and_then(|v| v.as_object())
-    }
-
     pub fn skills(&self) -> Option<&serde_json::Map<String, serde_json::Value>> {
         self.raw.get("skills").and_then(|v| v.as_object())
     }
@@ -310,72 +306,6 @@ impl ServiceConfig {
             })
     }
 
-    // Daytona helpers
-    pub fn daytona_enabled(&self) -> bool {
-        self.daytona()
-            .and_then(|m| m.get("enabled").and_then(|v| v.as_bool()))
-            .unwrap_or(false)
-    }
-
-    pub fn daytona_api_key(&self) -> Option<String> {
-        self.daytona()
-            .and_then(|m| resolver::get_string(m, "api_key"))
-            .map(|s| resolver::resolve_value(&s))
-            .filter(|s| !s.is_empty())
-    }
-
-    pub fn daytona_api_url(&self) -> String {
-        self.daytona()
-            .and_then(|m| resolver::get_string(m, "api_url"))
-            .unwrap_or_else(|| "https://api.daytona.io".to_string())
-    }
-
-    pub fn daytona_target(&self) -> String {
-        self.daytona()
-            .and_then(|m| resolver::get_string(m, "target"))
-            .unwrap_or_else(|| "us".to_string())
-    }
-
-    pub fn daytona_image(&self) -> Option<String> {
-        self.daytona()
-            .and_then(|m| resolver::get_string(m, "image"))
-            .filter(|s| !s.is_empty())
-    }
-
-    pub fn daytona_timeout_sec(&self) -> u64 {
-        self.daytona()
-            .and_then(|m| resolver::get_i64(m, "timeout_sec"))
-            .unwrap_or(3600)
-            .max(30) as u64
-    }
-
-    pub fn daytona_env(&self) -> HashMap<String, String> {
-        let mut map = HashMap::new();
-        if let Some(daytona_map) = self.daytona()
-            && let Some(env_map) = daytona_map.get("env").and_then(|v| v.as_object())
-        {
-            for (k, v) in env_map {
-                if let Some(val) = v.as_str() {
-                    map.insert(k.to_string(), resolver::resolve_value(val));
-                }
-            }
-        }
-        map
-    }
-
-    pub fn daytona_mode(&self) -> String {
-        self.daytona()
-            .and_then(|m| resolver::get_string(m, "mode"))
-            .unwrap_or_else(|| "oneshot".to_string())
-            .to_lowercase()
-    }
-
-    pub fn daytona_repo_url(&self) -> Option<String> {
-        self.daytona()
-            .and_then(|m| resolver::get_string(m, "repo_url"))
-            .filter(|s| !s.is_empty())
-    }
-
     pub fn validate_for_dispatch(&self) -> Result<(), SympheoError> {
         let kind = self
             .tracker_kind()
@@ -405,11 +335,6 @@ impl ServiceConfig {
         // SPEC §6.3 + §10.1: resolve a CLI adapter from cli.command's leading binary token.
         // Fails with CliAdapterNotFound if no adapter matches (§5.5).
         let _ = crate::agent::cli::select_adapter(&cmd)?;
-        if self.daytona_enabled() && self.daytona_api_key().is_none() {
-            return Err(SympheoError::InvalidConfiguration(
-                "daytona.api_key is required when backend is enabled".into(),
-            ));
-        }
         Ok(())
     }
 
@@ -858,80 +783,6 @@ mod tests {
     }
 
     #[test]
-    fn test_daytona_enabled_default() {
-        assert!(!empty_config().daytona_enabled());
-    }
-
-    #[test]
-    fn test_daytona_api_key() {
-        unsafe { std::env::set_var("TEST_DAYTONA_KEY", "dk") };
-        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
-        let mut daytona = serde_json::Map::<String, serde_json::Value>::new();
-        daytona.insert(
-            "api_key".into(),
-            serde_json::Value::String("$TEST_DAYTONA_KEY".into()),
-        );
-        raw.insert("daytona".into(), serde_json::Value::Object(daytona));
-        assert_eq!(config_with(raw).daytona_api_key(), Some("dk".to_string()));
-        unsafe { std::env::remove_var("TEST_DAYTONA_KEY") };
-    }
-
-    #[test]
-    fn test_daytona_api_url_default() {
-        assert_eq!(empty_config().daytona_api_url(), "https://api.daytona.io");
-    }
-
-    #[test]
-    fn test_daytona_target_default() {
-        assert_eq!(empty_config().daytona_target(), "us");
-    }
-
-    #[test]
-    fn test_daytona_image() {
-        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
-        let mut daytona = serde_json::Map::<String, serde_json::Value>::new();
-        daytona.insert("image".into(), serde_json::Value::String("my-image".into()));
-        raw.insert("daytona".into(), serde_json::Value::Object(daytona));
-        assert_eq!(
-            config_with(raw).daytona_image(),
-            Some("my-image".to_string())
-        );
-    }
-
-    #[test]
-    fn test_daytona_timeout_default() {
-        assert_eq!(empty_config().daytona_timeout_sec(), 3600);
-    }
-
-    #[test]
-    fn test_daytona_timeout_min_clamp() {
-        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
-        let mut daytona = serde_json::Map::<String, serde_json::Value>::new();
-        daytona.insert("timeout_sec".into(), serde_json::Value::Number(10.into()));
-        raw.insert("daytona".into(), serde_json::Value::Object(daytona));
-        assert_eq!(config_with(raw).daytona_timeout_sec(), 30);
-    }
-
-    #[test]
-    fn test_daytona_env() {
-        unsafe { std::env::set_var("TEST_DAYTONA_ENV", "val") };
-        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
-        let mut daytona = serde_json::Map::<String, serde_json::Value>::new();
-        let mut env = serde_json::Map::<String, serde_json::Value>::new();
-        env.insert("KEY1".into(), serde_json::Value::String("v1".into()));
-        env.insert(
-            "KEY2".into(),
-            serde_json::Value::String("$TEST_DAYTONA_ENV".into()),
-        );
-        daytona.insert("env".into(), serde_json::Value::Object(env));
-        raw.insert("daytona".into(), serde_json::Value::Object(daytona));
-        let map = config_with(raw).daytona_env();
-        assert_eq!(map.get("KEY1"), Some(&"v1".to_string()));
-        assert_eq!(map.get("KEY2"), Some(&"val".to_string()));
-        unsafe { std::env::remove_var("TEST_DAYTONA_ENV") };
-    }
-
-    #[test]
     fn test_validate_for_dispatch_ok() {
         let mut raw = serde_json::Map::<String, serde_json::Value>::new();
         let mut tracker = serde_json::Map::<String, serde_json::Value>::new();
@@ -1029,28 +880,6 @@ mod tests {
         cli.insert("command".into(), serde_json::Value::String("   ".into()));
         raw.insert("tracker".into(), serde_json::Value::Object(tracker));
         raw.insert("cli".into(), serde_json::Value::Object(cli));
-        let config = config_with(raw);
-        assert!(matches!(
-            config.validate_for_dispatch(),
-            Err(SympheoError::InvalidConfiguration(_))
-        ));
-    }
-
-    #[test]
-    fn test_validate_daytona_missing_key() {
-        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
-        let mut tracker = serde_json::Map::<String, serde_json::Value>::new();
-        tracker.insert("kind".into(), serde_json::Value::String("github".into()));
-        tracker.insert("api_key".into(), serde_json::Value::String("key".into()));
-        tracker.insert(
-            "project_slug".into(),
-            serde_json::Value::String("owner/repo".into()),
-        );
-        tracker.insert("project_number".into(), serde_json::Value::Number(1.into()));
-        let mut daytona = serde_json::Map::<String, serde_json::Value>::new();
-        daytona.insert("enabled".into(), serde_json::Value::Bool(true));
-        raw.insert("tracker".into(), serde_json::Value::Object(tracker));
-        raw.insert("daytona".into(), serde_json::Value::Object(daytona));
         let config = config_with(raw);
         assert!(matches!(
             config.validate_for_dispatch(),

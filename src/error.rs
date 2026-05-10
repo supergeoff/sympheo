@@ -100,9 +100,6 @@ pub enum SympheoError {
     #[error("io error: {0}")]
     Io(String),
 
-    #[error("daytona api error: {0}")]
-    DaytonaApiError(String),
-
     #[error("git error: {0}")]
     GitError(String),
 
@@ -206,10 +203,6 @@ mod tests {
             "invalid configuration: cfg"
         );
         assert_eq!(format!("{}", SympheoError::Io("io".into())), "io error: io");
-        assert_eq!(
-            format!("{}", SympheoError::DaytonaApiError("api".into())),
-            "daytona api error: api"
-        );
         assert_eq!(
             format!("{}", SympheoError::GitError("merge conflict".into())),
             "git error: merge conflict"

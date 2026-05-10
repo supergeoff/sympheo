@@ -91,28 +91,6 @@ fn test_config_var_resolution() {
     assert_eq!(sympheo::config::resolver::resolve_value("plain"), "plain");
 }
 
-#[test]
-fn test_daytona_config_parsing() {
-    use std::path::PathBuf;
-    let mut raw = serde_json::Map::<String, serde_json::Value>::new();
-    let mut daytona = serde_json::Map::<String, serde_json::Value>::new();
-    daytona.insert("enabled".into(), serde_json::Value::Bool(true));
-    daytona.insert(
-        "api_key".into(),
-        serde_json::Value::String("$DAYTONA_KEY".into()),
-    );
-    daytona.insert(
-        "endpoint".into(),
-        serde_json::Value::String("https://api.daytona.io".into()),
-    );
-    raw.insert("daytona".into(), serde_json::Value::Object(daytona));
-    unsafe { std::env::set_var("DAYTONA_KEY", "secret") };
-    let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "prompt".into());
-    assert!(config.daytona_enabled());
-    assert_eq!(config.daytona_api_key(), Some("secret".into()));
-    assert_eq!(config.daytona_api_url(), "https://api.daytona.io");
-}
-
 #[cfg(test)]
 mod workstream0_tests {
     use chrono::Utc;

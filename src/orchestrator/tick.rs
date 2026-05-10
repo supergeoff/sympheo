@@ -242,7 +242,7 @@ impl Orchestrator {
                     drop(state);
                     let ws_path = self.workspace_manager.workspace_path(&identifier);
                     if let Err(e) = self.runner.cleanup_workspace(&ws_path).await {
-                        warn!(error = %e, "daytona cleanup failed during reconcile");
+                        warn!(error = %e, "backend cleanup failed during reconcile");
                     }
                     self.workspace_manager
                         .remove_workspace(
@@ -992,7 +992,7 @@ async fn run_worker(
         }
     }
 
-    // Cleanup Daytona sandbox if issue is now terminal
+    // Cleanup workspace via backend if issue is now terminal
     let refreshed = tracker
         .fetch_issue_states_by_ids(std::slice::from_ref(&issue.id))
         .await?;
@@ -1003,7 +1003,7 @@ async fn run_worker(
         if (terminal_states.contains(&state_lc) || !active_states.contains(&state_lc))
             && let Err(e) = runner.cleanup_workspace(&workspace.path).await
         {
-            warn!(error = %e, "daytona cleanup failed after terminal issue");
+            warn!(error = %e, "backend cleanup failed after terminal issue");
         }
     }
 

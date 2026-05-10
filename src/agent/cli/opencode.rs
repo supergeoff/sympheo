@@ -5,7 +5,7 @@
 //! (`start_session` / `run_turn` / `stop_session`) is provided through the
 //! [`crate::agent::cli::CliAdapter`] trait defaults, which delegate the
 //! subprocess-spawning + stdout-parsing surface to the configured execution
-//! [`crate::agent::backend::AgentBackend`] (`LocalBackend`, `DaytonaBackend`).
+//! [`crate::agent::backend::AgentBackend`] (`LocalBackend`, `MockBackend`).
 
 use crate::agent::cli::CliAdapter;
 use crate::error::SympheoError;

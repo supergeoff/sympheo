@@ -1,20 +1,18 @@
 *** Settings ***
-Documentation     Generate WORKFLOW.md (and mock script.yaml) fixtures pointing at the real ``supergeoff/sympheo`` repo + Project v2 #2.
+Documentation     Generate ``WORKFLOW.md`` (and the mock ``script.yaml`` consumed by ``MockBackend``)
+...               targeting the real ``supergeoff/sympheo`` repo + Project v2.
 Library           OperatingSystem
 Library           String
-
-
-*** Variables ***
-${ACTIVE_STATES}      Todo,In Progress
-${TERMINAL_STATES}    Done,Canceled
+Resource          resources/common.resource
 
 
 *** Keywords ***
 Generate Mock Script
     [Arguments]    ${workflow_dir}
     [Documentation]    Writes the YAML script consumed by MockBackend (``src/agent/backend/mock.rs`` schema).
-    ...    The 8s sleep keeps the worker visible in ``/api/v1/state`` long enough for the poll to observe it
-    ...    (the test polls every 2s; without a sleep, the whole turn completes inside one tick).
+    ...                The 8s sleep keeps the worker visible in ``/api/v1/state`` long enough for the poll
+    ...                to observe it (poll interval is 2s; without a sleep the whole turn finishes inside
+    ...                a single tick).
     ${content}=    Catenate    SEPARATOR=\n
     ...    events:
     ...    \ \ - type: step_start

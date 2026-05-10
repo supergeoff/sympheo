@@ -1,12 +1,20 @@
 *** Settings ***
-Documentation     Spawn / kill / probe the sympheo daemon. Uses ``curl`` via the Process library
-...               instead of ``RequestsLibrary`` so the harness only needs the global
-...               ``robot`` install and zero extra Python packages.
+Documentation     Spawn / probe / kill the sympheo daemon. Uses ``curl`` via ``Process``
+...               so the harness needs zero extra Python packages.
 Library           OperatingSystem
 Library           Process
+Resource          resources/common.resource
 
 
 *** Keywords ***
+Assert Sympheo Binary Exists
+    [Documentation]    Fail fast if the release binary is missing.
+    ${exists}=    Run Keyword And Return Status    File Should Exist    ${SYMPHEO_BIN}
+    IF    not ${exists}
+        Fail    sympheo binary not found at ${SYMPHEO_BIN}; run `cargo build --release` first
+    END
+    Log To Console    [setup] sympheo binary at ${SYMPHEO_BIN}
+
 Set Up Workflow Dir
     [Documentation]    Create a temp dir for WORKFLOW.md, workspace, and logs. Stored as suite vars.
     ${tmp}=    Evaluate    __import__('tempfile').mkdtemp(prefix='sympheo-e2e-')    modules=tempfile

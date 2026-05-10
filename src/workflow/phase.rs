@@ -25,7 +25,7 @@ pub struct WorkflowSpec {
 impl WorkflowSpec {
     // PRD-v2 §5.2 — parse the `phases[]` block from raw config front
     // matter. Returns an empty spec when the block is absent so callers
-    // that haven't migrated yet (skills-based) keep working unchanged.
+    // fall back to the global prompt template unchanged.
     pub fn from_raw(raw: &serde_json::Map<String, serde_json::Value>) -> Self {
         let arr = match raw.get("phases").and_then(|v| v.as_array()) {
             Some(a) => a,

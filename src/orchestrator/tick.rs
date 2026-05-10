@@ -5,13 +5,11 @@ use crate::error::SympheoError;
 use crate::git::adapter::GitStatus;
 use crate::orchestrator::retry::schedule_retry;
 use crate::orchestrator::state::{OrchestratorState, RunningEntry};
-use crate::skills::Skill;
 use crate::tracker::IssueTracker;
 use crate::tracker::model::{AttemptStatus, Issue, LiveSession, RunAttempt};
 use crate::workflow::phase::Phase;
 use crate::workspace::manager::WorkspaceManager;
 use chrono::Utc;
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::RwLock;
@@ -29,12 +27,10 @@ impl Orchestrator {
     pub fn new(
         config: ServiceConfig,
         tracker: Arc<dyn IssueTracker>,
-        skills: HashMap<String, Skill>,
         git_adapter: Option<Arc<dyn crate::git::GitAdapter>>,
     ) -> Result<Self, SympheoError> {
-        let mut state =
+        let state =
             OrchestratorState::new(config.poll_interval_ms(), config.max_concurrent_agents());
-        state.skills = skills;
         let mut workspace_manager = WorkspaceManager::new(&config)?;
         if let Some(adapter) = git_adapter {
             workspace_manager.set_git_adapter(adapter);
@@ -49,11 +45,10 @@ impl Orchestrator {
         })
     }
 
-    pub async fn reload_config(&self, config: ServiceConfig, skills: HashMap<String, Skill>) {
+    pub async fn reload_config(&self, config: ServiceConfig) {
         let mut state = self.state.write().await;
         state.poll_interval_ms = config.poll_interval_ms();
         state.max_concurrent_agents = config.max_concurrent_agents();
-        state.skills = skills;
         *self.config.write().await = config;
     }
 
@@ -673,11 +668,6 @@ async fn run_worker(
 
     let mut turn_number = 0;
 
-    let skills = {
-        let st = state.read().await;
-        st.skills.clone()
-    };
-
     // SPEC §10.2.1 + §10.7: allocate the adapter session once per worker run.
     // The handle is reused across every turn; it doubles as the "current
     // session id" the per-turn invocation passes back to the CLI for resume.
@@ -720,10 +710,6 @@ async fn run_worker(
         }
 
         attempt_record.transition(AttemptStatus::BuildingPrompt);
-        let skill_content = skills
-            .get(&issue.state.to_lowercase())
-            .or_else(|| skills.get("default"))
-            .map(|s| s.content.as_str());
 
         // PRD-v2 §4.1 — phase is selected from the tracker state every turn,
         // so a hot-reloaded WORKFLOW.md picks up the new phase fragment on
@@ -732,7 +718,7 @@ async fn run_worker(
         let phase = workflow_spec.phase_for_state(&issue.state);
 
         let prompt = if turn_number == 1 {
-            build_prompt_strict(config, &issue, attempt, skill_content, phase)?
+            build_prompt_strict(config, &issue, attempt, phase)?
         } else {
             config.continuation_prompt()
         };
@@ -1014,7 +1000,6 @@ fn build_prompt_strict(
     config: &ServiceConfig,
     issue: &Issue,
     attempt: Option<u32>,
-    skill_instructions: Option<&str>,
     phase: Option<&Phase>,
 ) -> Result<String, SympheoError> {
     use liquid::model::Value;
@@ -1075,13 +1060,6 @@ fn build_prompt_strict(
         .render(&globals)
         .map_err(|e| SympheoError::TemplateRenderError(e.to_string()))?;
 
-    let output = match skill_instructions {
-        Some(instr) if !instr.trim().is_empty() => {
-            format!("{}\n\n---\n\n{}", instr.trim(), output)
-        }
-        _ => output,
-    };
-
     Ok(output)
 }
 
@@ -1138,7 +1116,7 @@ mod tests {
             blocked_by: vec![],
             ..Default::default()
         };
-        let prompt = build_prompt_strict(&config, &issue, None, None, None).unwrap();
+        let prompt = build_prompt_strict(&config, &issue, None, None).unwrap();
         assert_eq!(prompt, "Fix the bug");
     }
 
@@ -1163,7 +1141,7 @@ mod tests {
             blocked_by: vec![],
             ..Default::default()
         };
-        let prompt = build_prompt_strict(&config, &issue, None, None, None).unwrap();
+        let prompt = build_prompt_strict(&config, &issue, None, None).unwrap();
         assert_eq!(prompt, "You are working on an issue from the tracker.");
     }
 
@@ -1188,7 +1166,7 @@ mod tests {
             blocked_by: vec![],
             ..Default::default()
         };
-        let prompt = build_prompt_strict(&config, &issue, Some(2), None, None).unwrap();
+        let prompt = build_prompt_strict(&config, &issue, Some(2), None).unwrap();
         assert_eq!(prompt, "Attempt 2");
     }
 
@@ -1279,7 +1257,7 @@ mod tests {
             blocked_by: vec![],
             ..Default::default()
         };
-        let result = build_prompt_strict(&config, &issue, None, None, None);
+        let result = build_prompt_strict(&config, &issue, None, None);
         assert!(matches!(result, Err(SympheoError::TemplateRenderError(_))));
     }
 
@@ -1305,7 +1283,7 @@ mod tests {
             blocked_by: vec![],
             ..Default::default()
         };
-        let result = build_prompt_strict(&config, &issue, None, None, None);
+        let result = build_prompt_strict(&config, &issue, None, None);
         assert!(matches!(result, Err(SympheoError::TemplateRenderError(_))));
     }
 
@@ -1330,42 +1308,8 @@ mod tests {
             blocked_by: vec![],
             ..Default::default()
         };
-        let result = build_prompt_strict(&config, &issue, None, None, None);
+        let result = build_prompt_strict(&config, &issue, None, None);
         assert!(matches!(result, Err(SympheoError::TemplateParseError(_))));
-    }
-
-    #[test]
-    fn test_build_prompt_with_skill() {
-        let mut raw = serde_json::Map::new();
-        raw.insert(
-            "tracker".into(),
-            serde_json::Value::Object(serde_json::Map::new()),
-        );
-        let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "Fix {{ issue.title }}".into());
-        let issue = Issue {
-            id: "1".into(),
-            identifier: "TEST-1".into(),
-            title: "the bug".into(),
-            description: None,
-            priority: None,
-            state: "todo".into(),
-            branch_name: None,
-            url: None,
-            labels: vec![],
-            blocked_by: vec![],
-            ..Default::default()
-        };
-        let prompt = build_prompt_strict(
-            &config,
-            &issue,
-            None,
-            Some("Analyze the issue first."),
-            None,
-        )
-        .unwrap();
-        assert!(prompt.contains("Analyze the issue first."));
-        assert!(prompt.contains("Fix the bug"));
-        assert!(prompt.contains("---"));
     }
 
     // PRD-v2 §5.2.2 — `{{ phase.prompt }}` interpolated into the body.
@@ -1395,7 +1339,7 @@ mod tests {
             verifications: vec![],
             cli_options: serde_json::Map::new(),
         };
-        let prompt = build_prompt_strict(&config, &issue, None, None, Some(&phase)).unwrap();
+        let prompt = build_prompt_strict(&config, &issue, None, Some(&phase)).unwrap();
         assert!(prompt.contains("Issue: bug"));
         assert!(prompt.contains("Implement the LLD then move to Review."));
     }
@@ -1417,7 +1361,7 @@ mod tests {
             ..Default::default()
         };
         // No phase passed; liquid renders missing var as empty string.
-        let prompt = build_prompt_strict(&config, &issue, None, None, None).unwrap();
+        let prompt = build_prompt_strict(&config, &issue, None, None).unwrap();
         assert_eq!(prompt, "Hello ");
     }
 

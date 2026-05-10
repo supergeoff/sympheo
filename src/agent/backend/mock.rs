@@ -11,8 +11,8 @@
 //!    lifecycle (turn loop, retries, stalls, reconciliation) without a real
 //!    opencode invocation. Fixtures live in `tests/fixtures/mock-runs/`.
 //! 2. **Dry-runs** — `WORKFLOW.md` operator can swap `opencode run` for
-//!    `mock-cli` to validate that the orchestrator + skills + workflow
-//!    plumbing works end-to-end before spending tokens on a real run.
+//!    `mock-cli` to validate that the orchestrator + workflow plumbing
+//!    works end-to-end before spending tokens on a real run.
 //!
 //! Script format (one document per turn):
 //!
@@ -421,7 +421,7 @@ events:
         // Reproduce the 2026-05-09 incident shape: agent claims reason=stop
         // without doing anything. The mock backend reports success=true (it's
         // not the orchestrator's job to validate per §11.5/§15.1) — the
-        // dashboard / hooks / skills are responsible for catching this.
+        // dashboard / hooks are responsible for catching this.
         let tmp = unique_tmp("empty");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();

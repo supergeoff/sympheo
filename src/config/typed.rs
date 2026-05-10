@@ -51,10 +51,6 @@ impl ServiceConfig {
         self.raw.get("cli").and_then(|v| v.as_object())
     }
 
-    pub fn skills(&self) -> Option<&serde_json::Map<String, serde_json::Value>> {
-        self.raw.get("skills").and_then(|v| v.as_object())
-    }
-
     pub fn tracker_kind(&self) -> Option<String> {
         self.tracker().and_then(|m| resolver::get_string(m, "kind"))
     }
@@ -336,10 +332,6 @@ impl ServiceConfig {
         // Fails with CliAdapterNotFound if no adapter matches (§5.5).
         let _ = crate::agent::cli::select_adapter(&cmd)?;
         Ok(())
-    }
-
-    pub fn skill_mapping(&self) -> crate::skills::SkillMapping {
-        crate::skills::SkillMapping::from_config(self)
     }
 
     // PRD-v2 §5.2/§5.3 — parsed view of the `phases[]` block. Workflow

@@ -384,6 +384,36 @@ def get_remote_branches(owner: str, repo_name: str) -> list[str]:
     return [line.strip() for line in raw.splitlines() if line.strip()]
 
 
+@keyword
+def list_stale_e2e_issues(owner: str, repo_name: str) -> list:
+    """Return open issues whose title starts with ``[e2e-test]`` — leftovers from prior runs.
+
+    Each entry is ``{number, node_id, title}``. Used by ``Cleanup Stale E2E Issues``
+    to wipe state before the suite provisions its own ticket.
+    """
+    rc, out, err = _run_no_check([
+        "gh", "issue", "list",
+        "--repo", f"{owner}/{repo_name}",
+        "--state", "open",
+        "--search", ISSUE_TITLE_PREFIX,
+        "--json", "number,id,title",
+        "--limit", "200",
+    ])
+    if rc != 0:
+        logger.warn(f"failed to list stale e2e issues: {err.strip()}")
+        return []
+    issues = []
+    for it in json.loads(out):
+        title = it.get("title", "")
+        if title.startswith(ISSUE_TITLE_PREFIX):
+            issues.append({
+                "number": it["number"],
+                "node_id": it["id"],
+                "title": title,
+            })
+    return issues
+
+
 # ---- Project status metadata (for prompt injection) ------------------------
 
 @keyword

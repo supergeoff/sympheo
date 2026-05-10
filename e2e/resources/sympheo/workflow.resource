@@ -73,7 +73,7 @@ Generate Workflow Md For Mock
 
 Generate Workflow Md For Claude Spec Phase
     [Arguments]    ${workflow_dir}    ${repo_url}    ${owner}    ${repo_name}    ${project_number}
-    ...    ${project_id}    ${status_field_id}    ${in_progress_option_id}    ${poll_ms}=5000
+    ...    ${project_id}    ${status_field_id}    ${in_progress_option_id}    ${poll_ms}=15000
     [Documentation]    Single ``Spec`` phase. Claude rewrites the issue body with a short
     ...                spec section, then moves the project item to ``In Progress``.
     ${slug}=    Set Variable    ${owner}/${repo_name}
@@ -121,7 +121,7 @@ Generate Workflow Md For Claude Spec Phase
     Create File    ${workflow_dir}/WORKFLOW.md    ${content}
 
 Generate Workflow Md For Claude Code Phase
-    [Arguments]    ${workflow_dir}    ${repo_url}    ${owner}    ${repo_name}    ${project_number}    ${poll_ms}=5000
+    [Arguments]    ${workflow_dir}    ${repo_url}    ${owner}    ${repo_name}    ${project_number}    ${poll_ms}=15000
     [Documentation]    Single ``In Progress`` phase. Claude implements the change described in
     ...                the issue body, commits, pushes the branch, and opens a draft PR.
     ${slug}=    Set Variable    ${owner}/${repo_name}

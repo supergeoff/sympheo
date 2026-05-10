@@ -12,6 +12,17 @@ Resource          resources/common.resource
 
 
 *** Keywords ***
+Cleanup Stale E2E Issues
+    [Documentation]    Sweep any open ``[e2e-test]``-prefixed issues left over from prior runs.
+    ...                Without this, sympheo would dispatch them on top of our fresh issue,
+    ...                which both defeats isolation and burns through the GraphQL rate budget.
+    ...                Best-effort: each delete is independently fault-tolerant.
+    ${stale}=    List Stale E2E Issues    ${OWNER}    ${REPO_NAME}
+    Log To Console    [pre-clean] stale e2e issues: ${stale}
+    FOR    ${it}    IN    @{stale}
+        Run Keyword And Ignore Error    Safe Delete Test Issue    ${OWNER}    ${REPO_NAME}    ${it}[number]    ${it}[node_id]
+    END
+
 Provision Test Issue
     [Documentation]    Creates one ``[e2e-test]``-prefixed issue and adds it to the project.
     ...                Captures the suite-scoped state needed for cleanup.

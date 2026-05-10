@@ -33,6 +33,7 @@ ${SPEC_BODY_MARKER}    ## Spec
 Spec Phase Setup
     Assert Sympheo Binary Exists
     Skip If    "%{ANTHROPIC_API_KEY=}"=="${EMPTY}"    ANTHROPIC_API_KEY not set; skipping spec phase pipeline
+    Cleanup Stale E2E Issues
     Provision Test Issue
     Set Up Workflow Dir
     ${meta}=    Get Project Status Metadata    ${OWNER}    ${PROJECT_NUMBER}
@@ -55,7 +56,7 @@ Spec Phase Teardown
 
 Wait For Issue Body To Contain
     [Arguments]    ${owner}    ${repo_name}    ${issue_number}    ${needle}    ${timeout}=10m
-    Wait Until Keyword Succeeds    ${timeout}    10s    Issue Body Should Contain    ${owner}    ${repo_name}    ${issue_number}    ${needle}
+    Wait Until Keyword Succeeds    ${timeout}    30s    Issue Body Should Contain    ${owner}    ${repo_name}    ${issue_number}    ${needle}
 
 Issue Body Should Contain
     [Arguments]    ${owner}    ${repo_name}    ${issue_number}    ${needle}
@@ -64,7 +65,7 @@ Issue Body Should Contain
 
 Wait For Project Item Status
     [Arguments]    ${owner}    ${project_number}    ${item_id}    ${expected_status}    ${timeout}=10m
-    Wait Until Keyword Succeeds    ${timeout}    10s    Project Item Status Should Equal    ${owner}    ${project_number}    ${item_id}    ${expected_status}
+    Wait Until Keyword Succeeds    ${timeout}    30s    Project Item Status Should Equal    ${owner}    ${project_number}    ${item_id}    ${expected_status}
 
 Project Item Status Should Equal
     [Arguments]    ${owner}    ${project_number}    ${item_id}    ${expected_status}

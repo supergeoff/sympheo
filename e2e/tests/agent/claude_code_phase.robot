@@ -34,6 +34,7 @@ ${MARKER_FILE_PREFIX}    e2e-marker-
 Code Phase Setup
     Assert Sympheo Binary Exists
     Skip If    "%{ANTHROPIC_API_KEY=}"=="${EMPTY}"    ANTHROPIC_API_KEY not set; skipping code phase pipeline
+    Cleanup Stale E2E Issues
     Provision Test Issue
     Set Up Workflow Dir
     ${stamp}=    Get Time    epoch
@@ -84,7 +85,7 @@ Cleanup Open PR For Issue
 
 Wait For Pr To Be Opened For Issue
     [Arguments]    ${owner}    ${repo_name}    ${issue_number}    ${timeout}=15m
-    Wait Until Keyword Succeeds    ${timeout}    15s    Pr Should Exist For Issue    ${owner}    ${repo_name}    ${issue_number}
+    Wait Until Keyword Succeeds    ${timeout}    30s    Pr Should Exist For Issue    ${owner}    ${repo_name}    ${issue_number}
 
 Pr Should Exist For Issue
     [Arguments]    ${owner}    ${repo_name}    ${issue_number}

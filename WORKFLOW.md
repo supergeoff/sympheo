@@ -84,15 +84,88 @@ workspace:
   git_reset_strategy: stash                   # how the workspace is cleaned between turns ; "stash" (default) | "hard" | "none" (typed.rs:149-154)
 
 # ── hooks ───────────────────────────────────────────────────────────────
-# Shell scripts run at well-known lifecycle points. The same timeout
-# applies to all of them (typed.rs:140-161). Hooks are looked up by name
-# via `hook_script("<name>")` — only the names below are read today.
+# Shell scripts run at well-known lifecycle points (typed.rs:140-161).
+# Hooks are looked up by name via `hook_script("<name>")`; the four names
+# below are the only ones the daemon currently invokes:
+#   • after_create   src/workspace/manager.rs:107-110
+#   • before_run     src/orchestrator/tick.rs:657-665
+#   • after_run      src/orchestrator/tick.rs:966-974
+#   • before_remove  src/workspace/manager.rs:172-184  (also tick.rs:214,246 ; main.rs:127)
+#
+# Execution surface (src/workspace/manager.rs:122-166):
+#   • shell  → `bash -lc <script>` (login shell)
+#   • cwd    → the per-issue workspace directory
+#   • env    → SYMPHEO_ISSUE_IDENTIFIER, SYMPHEO_ISSUE_ID, SYMPHEO_WORKSPACE_PATH
+#              (+ SYMPHEO_PHASE_NAME for before_run / after_run only — tick.rs:895)
+#   • timeout → hooks.timeout_ms (same cap for all)
 hooks:
   timeout_ms: 60000                           # default 60s
-  after_create:   ./scripts/setup-workspace.sh
-  before_run:     ./scripts/lint-before-run.sh
-  after_run:      ./scripts/collect-artifacts.sh
-  after_destroy:  ./scripts/cleanup-workspace.sh
+
+  # ─── after_create ─────────────────────────────────────────────────────
+  # Fires once, the first time the workspace dir is created
+  # (manager.rs:102-110). NOTE: only runs as a FALLBACK when
+  # `workspace.repo_url` is unset — with a repo_url the daemon clones via
+  # its built-in git adapter and SKIPS this hook (manager.rs:103-106).
+  # Comment out `workspace.repo_url` if you want this hook to do the clone.
+  after_create: |
+    set -euo pipefail
+    # Clone the target repo into the (empty) workspace dir.
+    git clone --depth 50 https://github.com/supergeoff/sympheo.git .
+    # Activate the repo's own githooks (fmt+clippy pre-commit, conv-commits commit-msg, …)
+    git config core.hooksPath .githooks
+    # Warm caches when a fresh lockfile is present.
+    if [ -f Cargo.lock ]; then cargo fetch --locked; fi
+    if [ -f e2e/bun.lock ]; then (cd e2e && bun install --frozen-lockfile); fi
+
+  # ─── before_run ───────────────────────────────────────────────────────
+  # Fires before EACH agent turn (tick.rs:657-665). Use it to make sure
+  # the working branch exists and is up to date.
+  before_run: |
+    set -euo pipefail
+    branch="sympheo/${SYMPHEO_ISSUE_IDENTIFIER#\#}"
+    git fetch origin --quiet
+    if git show-ref --verify --quiet "refs/heads/${branch}"; then
+      git checkout "${branch}"
+      git pull --ff-only origin "${branch}" 2>/dev/null || true
+    else
+      git checkout -b "${branch}" origin/main
+    fi
+
+  # ─── after_run ────────────────────────────────────────────────────────
+  # Fires after EACH agent turn (tick.rs:966-974). Belt-and-braces:
+  # `.githooks/pre-commit` already enforces fmt+clippy on every commit,
+  # so this hook is only here in case the agent failed to commit and
+  # there is still uncommitted output on disk. If the githooks did their
+  # job (which they should), the if-block below is a no-op.
+  after_run: |
+    set -euo pipefail
+    cargo fmt --all
+    cargo clippy --all-targets --all-features -- -D warnings
+    if ! git diff --quiet || ! git diff --cached --quiet; then
+      git add -A
+      git commit -m "wip(${SYMPHEO_PHASE_NAME}): turn output for ${SYMPHEO_ISSUE_IDENTIFIER}"
+    fi
+
+  # ─── before_remove ────────────────────────────────────────────────────
+  # Fires once, just before the workspace dir is deleted
+  # (manager.rs:172-184). Push the final state and open a PR so the
+  # work survives the workspace teardown.
+  before_remove: |
+    set -euo pipefail
+    branch="sympheo/${SYMPHEO_ISSUE_IDENTIFIER#\#}"
+    # Nothing to push if the workspace was created but never committed.
+    if ! git rev-parse --verify HEAD >/dev/null 2>&1; then exit 0; fi
+    if git log "origin/main..HEAD" --oneline 2>/dev/null | grep -q .; then
+      git push -u origin "${branch}"
+      if ! gh pr view "${branch}" >/dev/null 2>&1; then
+        gh pr create --base main --head "${branch}" \
+          --title "feat: resolve ${SYMPHEO_ISSUE_IDENTIFIER}" \
+          --body "Closes ${SYMPHEO_ISSUE_IDENTIFIER}"
+      fi
+    fi
+    # The daemon removes ${SYMPHEO_WORKSPACE_PATH} right after this hook
+    # returns. Clean any per-issue cache that lives outside that tree.
+    rm -rf "/tmp/sympheo-cache-${SYMPHEO_ISSUE_ID}" 2>/dev/null || true
 
 # ── agent ───────────────────────────────────────────────────────────────
 # Concurrency, retry, and turn budget knobs. (src/config/typed.rs:163-204, 214-230, 297-303)
@@ -204,7 +277,7 @@ cli:
 # (src/server/, src/config/typed.rs:206-212). If omitted, no HTTP server
 # is started — the daemon stays headless.
 server:
-  port: 8080
+  port: 9090
 
 # ── phases ──────────────────────────────────────────────────────────────
 # Each phase binds a Project v2 status to a per-state prompt,
@@ -270,46 +343,86 @@ phases:
       - "true"
 
   # ──────────────────────────────────────────────────────────────────
-  # 2) Spec — translate the issue into an OpenSpec proposal
+  # 2) Spec — senior architect produces the design on the ticket itself
   # ──────────────────────────────────────────────────────────────────
-  # NO production code is allowed here. Spec drift is the #1 cause of
-  # runaway agents; the turn budget is tight on purpose.
+  # NO production code is allowed here. The deliverable is a structured
+  # "Architecture decision" comment posted DIRECTLY on the GitHub issue
+  # — the ticket is the source of truth, not a side-channel doc tree.
   - name: spec
     state: Spec
     prompt: |
-      You are entering the SPEC phase of issue {{ issue.identifier }}:
+      You are the SENIOR ARCHITECT for issue {{ issue.identifier }}:
       {{ issue.title }}.
 
-      Goal: produce (or update) an OpenSpec proposal at
-      `openspec/changes/<change-name>/`. Do NOT write production code.
-      Do NOT touch files outside `openspec/`.
+      Goal: produce the architectural blueprint a downstream `code` phase
+      will implement. Do NOT write production code. Do NOT touch any
+      source file. Your sole deliverable is a single "Architecture
+      decision" comment posted on the GitHub issue itself.
 
-      Deliverables this phase:
-        • proposal.md   — problem, scope, non-goals, acceptance criteria
-        • tasks.md      — ordered checklist
-        • specs/<capability>/spec.md deltas if the proposal touches an
-          existing capability
+      Use the GitHub CLI to post the comment:
+        gh issue comment {{ issue.identifier }} --body-file - <<'MD'
+        ... your architecture decision below ...
+        MD
 
-      When the proposal is ready, commit and push. Do NOT move the issue
-      forward — a human reviews the proposal and flips the status to
-      `In Progress`.
+      The comment MUST contain these sections, with EXACTLY these
+      headings so downstream verifications can grep them:
+
+        ## Problem statement
+        ## Scope / non-goals
+        ## Options considered
+        ## Decision & rationale
+        ## Risks & open questions
+        ## Acceptance criteria
+        ## Test strategy
+
+      Cover each section as a senior architect would:
+        • Problem statement: what concrete user/operator pain are we
+          solving, expressed in one paragraph.
+        • Scope / non-goals: what is in, what is explicitly out — and
+          why the non-goals are non-goals.
+        • Options considered: 2–4 plausible designs, named, with a
+          one-line summary each. No straw-men.
+        • Decision & rationale: which option wins, and the decisive
+          criteria. Mention the load-bearing trade-off.
+        • Risks & open questions: anything that could turn the decision
+          on its head; flag unknowns the implementer needs to resolve.
+        • Acceptance criteria: a bullet list the implementer can tick
+          off; testable, not aspirational.
+        • Test strategy: which layer (unit / integration / e2e) covers
+          which acceptance criterion.
+
+      Do NOT move the issue forward — a human reviews the comment and
+      flips the status to `In Progress` when satisfied.
 
       Issue body
       ----------
       {{ issue.description }}
     verifications:
-      # The two MUST files are the proposal and its tasks list.
-      - "ls openspec/changes/*/proposal.md"
-      - "ls openspec/changes/*/tasks.md"
-      # OpenSpec's own validator catches malformed deltas early.
-      - "openspec validate --strict"
+      # The architecture comment must exist on the issue and contain
+      # every required heading. Verifications run with cwd = workspace
+      # and SYMPHEO_ISSUE_IDENTIFIER pre-populated (tick.rs:884-908).
+      - |
+        set -euo pipefail
+        body=$(gh issue view "${SYMPHEO_ISSUE_IDENTIFIER}" \
+                 --json comments --jq '.comments[].body')
+        for heading in \
+            '## Problem statement' \
+            '## Scope / non-goals' \
+            '## Options considered' \
+            '## Decision & rationale' \
+            '## Risks & open questions' \
+            '## Acceptance criteria' \
+            '## Test strategy' ; do
+          printf '%s\n' "$body" | grep -qxF "$heading" \
+            || { echo "missing heading on issue ${SYMPHEO_ISSUE_IDENTIFIER}: $heading" >&2 ; exit 1 ; }
+        done
     cli_options:
-      # Tighter permissions for spec authoring — agent can only edit
-      # openspec/, nothing else.
+      # Tighter permissions for spec authoring — the architect should
+      # only call `gh`, never edit files.
       permission_mode: plan
 
   # ──────────────────────────────────────────────────────────────────
-  # 3) In Progress — code the OpenSpec proposal
+  # 3) In Progress — implement the architecture decision
   # ──────────────────────────────────────────────────────────────────
   - name: code
     state: In Progress
@@ -321,19 +434,22 @@ phases:
       verification output from the previous turn before doing anything
       new.{% endif %}
 
-      Goal: implement the OpenSpec proposal under
-      `openspec/changes/<change-name>/`. Follow `tasks.md` in order.
-      After every task:
-        1. Run `cargo fmt --all`
-        2. Run `cargo clippy --all-targets --all-features -- -D warnings`
-        3. Run `cargo test --workspace --all-features`
-        4. Commit with a Conventional Commit message
-           (`feat:`, `fix:`, `docs:`, `refactor:`, `chore:`, `test:`)
+      Read the "Architecture decision" comment posted on the issue
+      during the spec phase — that is your blueprint:
+        gh issue view {{ issue.identifier }} --json comments \
+          --jq '.comments[].body' | less
 
-      When the implementation is complete:
-        • Push the branch (`feat/<short-slug>`).
-        • Open a PR against `main` with a Conventional Commit title and
-          `closes #{{ issue.identifier }}` in the body.
+      Work the Acceptance criteria checklist top-down. For each item:
+        1. Implement the smallest slice that turns it green.
+        2. Run `cargo fmt --all`
+        3. Run `cargo clippy --all-targets --all-features -- -D warnings`
+        4. Run `cargo test --workspace --all-features`
+        5. Commit with a Conventional Commit message
+           (`feat:`, `fix:`, `docs:`, `refactor:`, `chore:`, `test:`).
+
+      The `before_run` hook (above) keeps the branch alive across turns;
+      the `before_remove` hook opens the PR when the issue leaves the
+      active states. You do NOT need to push or open the PR yourself.
 
       Do NOT move the issue forward — a human flips it to `Review`
       once CI is green.
@@ -400,8 +516,11 @@ phases:
 
       Update user-facing docs to match the now-merged change:
         • README.md (if user-visible behaviour changed)
-        • openspec/specs/<capability>/spec.md if the proposal had deltas
         • CHANGELOG.md — add to the Unreleased section
+        • The architecture decision comment on the issue if the
+          implementation deviated from the original design — append
+          a "## Implementation notes" section there, do not rewrite
+          the original decision.
 
       Write present-tense, snapshot-style prose. Do NOT describe what
       used to be the behaviour, only what it is now ("Sympheo reads…",

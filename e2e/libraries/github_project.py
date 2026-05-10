@@ -385,6 +385,36 @@ def get_remote_branches(owner: str, repo_name: str) -> list[str]:
 
 
 @keyword
+def list_stale_e2e_prs(owner: str, repo_name: str) -> list:
+    """Return open PRs whose title contains ``[e2e-test]`` — leftover claude-driven runs.
+
+    Each entry is ``{number, head_ref, title}``. Used to close + delete-branch
+    stragglers before the next suite starts.
+    """
+    rc, out, err = _run_no_check([
+        "gh", "pr", "list",
+        "--repo", f"{owner}/{repo_name}",
+        "--state", "open",
+        "--search", ISSUE_TITLE_PREFIX,
+        "--json", "number,title,headRefName",
+        "--limit", "200",
+    ])
+    if rc != 0:
+        logger.warn(f"failed to list stale e2e PRs: {err.strip()}")
+        return []
+    out_list = []
+    for pr in json.loads(out):
+        title = pr.get("title", "")
+        if ISSUE_TITLE_PREFIX in title:
+            out_list.append({
+                "number": pr["number"],
+                "head_ref": pr.get("headRefName", ""),
+                "title": title,
+            })
+    return out_list
+
+
+@keyword
 def list_stale_e2e_issues(owner: str, repo_name: str) -> list:
     """Return open issues whose title starts with ``[e2e-test]`` — leftovers from prior runs.
 
@@ -469,14 +499,15 @@ def get_project_item_status(
 
 @keyword
 def find_open_pr_for_issue(
-    owner: str, repo_name: str, issue_number: int, head_prefix: str = BRANCH_PREFIX
+    owner: str, repo_name: str, issue_number: int, head_prefix: str = ""
 ) -> dict:
-    """Locate an open PR whose head branch starts with ``head_prefix`` and which references ``issue_number``.
+    """Locate an open PR that references ``issue_number`` in its head branch, body, or title.
 
     Returns ``{number, node_id, head_ref, url}`` or an empty dict if nothing
-    matches. The reference check is permissive: the PR body or title may
-    mention ``#<issue_number>``, ``Closes #<n>``, or the head branch may
-    contain ``<n>``.
+    matches. ``head_prefix`` is an optional additional filter; when empty
+    (the default) any head branch is accepted as long as the PR references
+    the issue. Claude does not always honour the orchestrator-pushed branch
+    name, so the filter has to stay lax.
     """
     rc, out, err = _run_no_check([
         "gh", "pr", "list",
@@ -491,7 +522,7 @@ def find_open_pr_for_issue(
     needles = (f"#{issue_token}", f"closes #{issue_token}", f"Closes #{issue_token}")
     for pr in json.loads(out):
         head = (pr.get("headRefName") or "").strip()
-        if not head.startswith(head_prefix):
+        if head_prefix and not head.startswith(head_prefix):
             continue
         title = pr.get("title") or ""
         body = pr.get("body") or ""

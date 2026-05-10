@@ -12,6 +12,15 @@ Resource          resources/common.resource
 
 
 *** Keywords ***
+Cleanup Stale E2E PRs
+    [Documentation]    Close any open ``[e2e-test]``-prefixed PR left over from prior runs and
+    ...                delete its branch. Best-effort: each close is independent.
+    ${stale}=    List Stale E2E PRs    ${OWNER}    ${REPO_NAME}
+    Log To Console    [pre-clean] stale e2e PRs: ${stale}
+    FOR    ${pr}    IN    @{stale}
+        Run Keyword And Ignore Error    Close Pr    ${OWNER}    ${REPO_NAME}    ${pr}[number]
+    END
+
 Cleanup Stale E2E Issues
     [Documentation]    Sweep any open ``[e2e-test]``-prefixed issues left over from prior runs.
     ...                Without this, sympheo would dispatch them on top of our fresh issue,

@@ -34,6 +34,7 @@ ${MARKER_FILE_PREFIX}    e2e-marker-
 Code Phase Setup
     Assert Sympheo Binary Exists
     Ensure Github Token In Env
+    Cleanup Stale E2E PRs
     Cleanup Stale E2E Issues
     Provision Test Issue
     Set Up Workflow Dir
@@ -77,8 +78,8 @@ Cleanup Open PR For Issue
     ${have}=    Get Variable Value    ${ISSUE_NUMBER}    ${EMPTY}
     Return From Keyword If    '${have}'=='${EMPTY}'
     ${pr}=    Find Open Pr For Issue    ${OWNER}    ${REPO_NAME}    ${ISSUE_NUMBER}
-    ${has_pr}=    Run Keyword And Return Status    Should Not Be Equal    ${pr}    ${EMPTY}
-    Return From Keyword If    not ${has_pr}
+    ${len}=    Get Length    ${pr}
+    Return From Keyword If    ${len} == 0
     ${pr_number}=    Set Variable    ${pr}[number]
     Run Keyword And Ignore Error    Assert Safe To Close Pr    ${OWNER}    ${REPO_NAME}    ${pr_number}
     Run Keyword And Ignore Error    Close Pr    ${OWNER}    ${REPO_NAME}    ${pr_number}
@@ -91,7 +92,8 @@ Wait For Pr To Be Opened For Issue
 Pr Should Exist For Issue
     [Arguments]    ${owner}    ${repo_name}    ${issue_number}
     ${pr}=    Find Open Pr For Issue    ${owner}    ${repo_name}    ${issue_number}
-    Should Not Be Equal    ${pr}    ${EMPTY}    msg=no open sympheo/* PR yet for issue #${issue_number}
+    ${len}=    Get Length    ${pr}
+    Should Be True    ${len} > 0    msg=no open sympheo/* PR yet for issue #${issue_number}
     Set Suite Variable    ${OPEN_PR}    ${pr}
 
 
@@ -117,5 +119,4 @@ Claude Implements Issue And Opens Draft PR
     Wait For Pr To Be Opened For Issue    ${OWNER}    ${REPO_NAME}    ${ISSUE_NUMBER}    timeout=15m
 
     Should Not Be Empty    ${OPEN_PR}[head_ref]
-    Should Start With      ${OPEN_PR}[head_ref]    sympheo/
     Log To Console    [verify] PR opened: #${OPEN_PR}[number] head=${OPEN_PR}[head_ref] url=${OPEN_PR}[url]

@@ -33,6 +33,7 @@ ${SPEC_BODY_MARKER}    ## Spec
 Spec Phase Setup
     Assert Sympheo Binary Exists
     Ensure Github Token In Env
+    Cleanup Stale E2E PRs
     Cleanup Stale E2E Issues
     Provision Test Issue
     Set Up Workflow Dir

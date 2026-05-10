@@ -26,8 +26,10 @@ e2e/
 │   ├── cli/
 │   │   └── surface.robot            sympheo binary CLI (--help, errors)
 │   └── agent/
-│       ├── mock_pipeline.robot      orchestration with mock-cli (default)
-│       └── claude_pipeline.robot    orchestration with the real claude CLI (opt-in)
+│       ├── mock_pipeline.robot       orchestration with mock-cli (default)
+│       ├── claude_pipeline.robot     full Todo→In Progress→Done lifecycle, claude-driven (opt-in)
+│       ├── claude_spec_phase.robot   Spec phase: claude rewrites issue body + transitions to In Progress (opt-in)
+│       └── claude_code_phase.robot   In Progress phase: claude implements + pushes branch + opens draft PR (opt-in)
 ├── resources/                *** Keywords *** — composable, no test cases
 │   ├── common.resource
 │   ├── github/project.resource
@@ -75,8 +77,12 @@ robot --pythonpath . --outputdir results tests/agent/mock_pipeline.robot
 # Filter by tag
 robot --pythonpath . --outputdir results --include happy-path tests/
 
-# Run the claude pipeline (real API spend)
+# Run the claude suites (real API spend)
 robot --pythonpath . --outputdir results --include claude tests/
+
+# Run a specific claude scenario
+robot --pythonpath . --outputdir results tests/agent/claude_spec_phase.robot
+robot --pythonpath . --outputdir results tests/agent/claude_code_phase.robot
 
 # Keep the test issue + branches when the run fails (debugging)
 robot --pythonpath . --outputdir results --variable KEEP_ON_FAILURE:1 tests/

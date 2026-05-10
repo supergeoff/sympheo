@@ -38,7 +38,7 @@ impl AgentRunner {
             // cli.options.script and replays it.
             Arc::new(MockBackend::new(config)?)
         } else {
-            Arc::new(LocalBackend::new(config)?)
+            Arc::new(LocalBackend::new(config, adapter.clone())?)
         };
         Ok(Self {
             adapter,

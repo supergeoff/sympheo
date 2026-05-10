@@ -43,19 +43,6 @@ pub struct WorkflowDefinition {
     pub prompt_template: String,
 }
 
-// PRD-v2 §5.2.1 — entry of the `phases[]` block declared in WORKFLOW.md
-// front matter. Each phase maps a tracker state to a prompt fragment
-// (interpolated as `{{ phase.prompt }}` into the global template),
-// post-turn verifications, and per-phase cli_options overrides.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Phase {
-    pub name: String,
-    pub state: String,
-    pub prompt: String,
-    pub verifications: Vec<String>,
-    pub cli_options: serde_json::Map<String, serde_json::Value>,
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct TokenTotals {
     pub input_tokens: u64,

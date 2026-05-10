@@ -171,31 +171,21 @@ fn binary_surfaces_startup_failure_cleanly() {
     );
 }
 
+// Workflow that passes `validate_for_dispatch` and skips the mise check.
+//
+// Three knobs are doing important work here:
+//  - `daytona.enabled: true` + a non-empty `api_key` skips the host mise
+//    discovery check, so this test does not require mise on the runner.
+//  - `endpoint: http://nonexistent-test-host.invalid` makes the startup
+//    terminal cleanup's GitHub call fail fast on DNS rather than hanging
+//    on a TCP timeout (RFC 6761 reserves `.invalid`). The cleanup is
+//    demoted to a background retry, and main proceeds to install the
+//    signal handler.
+//  - `cli.command: mock-cli` + `cli.options.script: ...` lets the mock
+//    backend init succeed without spawning a subprocess. The script file
+//    itself is never read because no turn runs in this test.
 #[cfg(unix)]
-#[test]
-fn binary_exits_zero_on_normal_startup_and_sigterm() {
-    // §17.9: "exits with success when the application starts and shuts down
-    // normally". Drive a fully dispatchable workflow, wait briefly for the
-    // main loop to be reachable, then send SIGTERM. The signal handler in
-    // `src/main.rs` calls `std::process::exit(0)` after draining child
-    // processes, so a graceful SIGTERM must yield exit code 0.
-    use std::process::Stdio;
-    use std::time::{Duration, Instant};
-
-    // Workflow that passes `validate_for_dispatch` and skips the mise check.
-    //
-    // Three knobs are doing important work here:
-    //  - `daytona.enabled: true` + a non-empty `api_key` skips the host mise
-    //    discovery check, so this test does not require mise on the runner.
-    //  - `endpoint: http://nonexistent-test-host.invalid` makes the startup
-    //    terminal cleanup's GitHub call fail fast on DNS rather than hanging
-    //    on a TCP timeout (RFC 6761 reserves `.invalid`). The cleanup is
-    //    demoted to a background retry, and main proceeds to install the
-    //    SIGTERM handler.
-    //  - `cli.command: mock-cli` + `cli.options.script: ...` lets the mock
-    //    backend init succeed without spawning a subprocess. The script file
-    //    itself is never read because no turn runs in this test.
-    const DISPATCHABLE_WORKFLOW: &str = r#"---
+const DISPATCHABLE_WORKFLOW: &str = r#"---
 tracker:
   kind: github
   project_slug: test-org/test-repo
@@ -215,12 +205,29 @@ polling:
 Test prompt {{ issue.title }}
 "#;
 
-    let dir = unique_tmp("sigterm");
+/// Spawn sympheo against `DISPATCHABLE_WORKFLOW`, poll its stderr until the
+/// binary has reached the post-cleanup state (signal handler is installed
+/// shortly after), then send `signal_num` and wait for graceful exit.
+///
+/// Returns `(exit_code, stderr_text)` so callers can also assert on the log
+/// line that triggered the signal. Polling stderr for a deterministic readiness
+/// marker replaces the prior fixed-1500-ms sleep, which was a flaky pattern on
+/// slow CI runners. SIGINT and SIGTERM share this helper so the host-lifecycle
+/// invariant (`std::process::exit(0)` after either signal) is exercised
+/// symmetrically.
+#[cfg(unix)]
+fn run_until_ready_then_signal(label: &str, signal_num: i32) -> (Option<i32>, String) {
+    use std::process::Stdio;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    let dir = unique_tmp(label);
     let workflow_path = dir.join("WORKFLOW.md");
     std::fs::write(&workflow_path, DISPATCHABLE_WORKFLOW).expect("write workflow");
 
     let mut child = sympheo_bin()
         .current_dir(&dir)
+        .env("RUST_LOG", "info")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -229,48 +236,97 @@ Test prompt {{ issue.title }}
 
     let pid = child.id() as i32;
 
-    // Give the binary time to: parse the workflow, fail the startup terminal
-    // cleanup against 127.0.0.1:1 (immediate connection refused), demote it
-    // to the background retry loop, and install the signal handler.
-    std::thread::sleep(Duration::from_millis(1500));
+    // Drain BOTH stdout and stderr concurrently — `tracing_subscriber::fmt()`
+    // defaults to stdout, while typed startup errors surface on stderr. We
+    // need both: stderr to surface unexpected failures, stdout to detect the
+    // readiness marker. If we leave either pipe undrained the OS buffer fills
+    // and the child stalls.
+    let stdout_pipe = child.stdout.take().expect("child stdout");
+    let stderr_pipe = child.stderr.take().expect("child stderr");
+    let collected: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    let ready_pair: Arc<(Mutex<bool>, std::sync::Condvar)> =
+        Arc::new((Mutex::new(false), std::sync::Condvar::new()));
 
-    // If the binary already exited (e.g., dispatch validation failed), the
-    // SIGTERM-shutdown invariant we want to test cannot be exercised — fail
-    // loudly with the captured streams so the failure mode is obvious.
-    if let Some(early) = child.try_wait().expect("try_wait") {
-        let _ = std::fs::remove_dir_all(&dir);
-        let stdout = child
-            .stdout
-            .take()
-            .map(|mut s| {
-                use std::io::Read;
-                let mut buf = String::new();
-                let _ = s.read_to_string(&mut buf);
-                buf
-            })
-            .unwrap_or_default();
-        let stderr = child
-            .stderr
-            .take()
-            .map(|mut s| {
-                use std::io::Read;
-                let mut buf = String::new();
-                let _ = s.read_to_string(&mut buf);
-                buf
-            })
-            .unwrap_or_default();
-        panic!(
-            "binary exited before SIGTERM could be sent: status={:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
-            early
-        );
+    fn drain_into<R: std::io::Read + Send + 'static>(
+        reader: R,
+        tag: &'static str,
+        collected: Arc<Mutex<String>>,
+        ready: Arc<(Mutex<bool>, std::sync::Condvar)>,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let buf = std::io::BufReader::new(reader);
+            use std::io::BufRead;
+            for line in buf.lines().map_while(Result::ok) {
+                {
+                    let mut store = collected.lock().unwrap();
+                    store.push_str(tag);
+                    store.push_str(": ");
+                    store.push_str(&line);
+                    store.push('\n');
+                }
+                // Markers emitted AFTER startup validation passed and the
+                // terminal cleanup has either completed or been demoted to
+                // background retry. Either marker proves the main thread has
+                // moved past the synchronous startup phase; the
+                // SIGTERM/SIGINT spawn that follows is scheduled within
+                // microseconds on tokio's runtime.
+                if line.contains("startup terminal cleanup completed")
+                    || line.contains("scheduling background retry")
+                {
+                    let (lock, cvar) = &*ready;
+                    let mut r = lock.lock().unwrap();
+                    *r = true;
+                    cvar.notify_all();
+                }
+            }
+        })
     }
 
-    // SIGTERM via libc — already a project dependency.
-    let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
-    assert_eq!(rc, 0, "libc::kill(SIGTERM) failed");
+    let _drain_out = drain_into(stdout_pipe, "stdout", collected.clone(), ready_pair.clone());
+    let _drain_err = drain_into(stderr_pipe, "stderr", collected.clone(), ready_pair.clone());
 
-    // Bounded wait for graceful exit. The signal handler calls
-    // `std::process::exit(0)` after a 3s child-process drain, so 8s is plenty.
+    // Bounded wait for the readiness marker. On a slow CI runner DNS may take
+    // a moment to fail; 10s is generous.
+    let (lock, cvar) = &*ready_pair;
+    let mut ready = lock.lock().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !*ready {
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        let (g, _) = cvar
+            .wait_timeout(ready, deadline - now)
+            .expect("condvar wait");
+        ready = g;
+    }
+    let became_ready = *ready;
+    drop(ready);
+
+    // If the binary exited before reaching readiness, fail loudly with the
+    // captured stderr so the operator can see why.
+    if !became_ready {
+        if let Some(early) = child.try_wait().expect("try_wait") {
+            let _ = std::fs::remove_dir_all(&dir);
+            let stderr = collected.lock().unwrap().clone();
+            panic!("binary exited before reaching readiness: status={early:?}\nstderr:\n{stderr}");
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+        let stderr = collected.lock().unwrap().clone();
+        panic!("binary did not reach readiness within 10s\nstderr:\n{stderr}");
+    }
+
+    // Brief grace window so the tokio-spawned signal handler task runs at
+    // least once and registers SIGTERM/SIGINT before we deliver the signal.
+    std::thread::sleep(Duration::from_millis(150));
+
+    let rc = unsafe { libc::kill(pid, signal_num) };
+    assert_eq!(rc, 0, "libc::kill({signal_num}) failed");
+
+    // Bounded wait for graceful exit. The handler calls `exit(0)` after a 3s
+    // child-process drain, so 8s is plenty.
     let deadline = Instant::now() + Duration::from_secs(8);
     let status = loop {
         match child.try_wait().expect("try_wait") {
@@ -279,18 +335,51 @@ Test prompt {{ issue.title }}
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = std::fs::remove_dir_all(&dir);
-                panic!("binary did not exit within 8s of SIGTERM");
+                let stderr = collected.lock().unwrap().clone();
+                panic!("binary did not exit within 8s of signal {signal_num}\nstderr:\n{stderr}");
             }
             None => std::thread::sleep(Duration::from_millis(50)),
         }
     };
 
     let _ = std::fs::remove_dir_all(&dir);
+    let stderr = collected.lock().unwrap().clone();
+    (status.code(), stderr)
+}
 
+#[cfg(unix)]
+#[test]
+fn binary_exits_zero_on_normal_startup_and_sigterm() {
+    // §17.9: "exits with success when the application starts and shuts down
+    // normally" via SIGTERM. The handler in `src/main.rs` registers both
+    // SIGINT and SIGTERM and, on either, drains spawned children and calls
+    // `std::process::exit(0)`.
+    let (code, stderr) = run_until_ready_then_signal("sigterm", libc::SIGTERM);
     assert_eq!(
-        status.code(),
+        code,
         Some(0),
-        "expected exit 0 after graceful SIGTERM, got {:?}",
-        status.code()
+        "expected exit 0 after graceful SIGTERM, got {code:?}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("SIGTERM received"),
+        "stderr must record SIGTERM receipt; got:\n{stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn binary_exits_zero_on_normal_startup_and_sigint() {
+    // §17.9: graceful shutdown coverage MUST be symmetric for SIGINT, since
+    // the handler in `src/main.rs` registers both. A regression that only
+    // wired SIGTERM would pass the SIGTERM test and silently break Ctrl-C.
+    let (code, stderr) = run_until_ready_then_signal("sigint", libc::SIGINT);
+    assert_eq!(
+        code,
+        Some(0),
+        "expected exit 0 after graceful SIGINT, got {code:?}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("SIGINT received"),
+        "stderr must record SIGINT receipt; got:\n{stderr}"
     );
 }

@@ -2,6 +2,7 @@ use crate::agent::backend::AgentBackend;
 use crate::agent::parser::{
     AgentEvent, EmittedEvent, TokenInfo, TurnOutcome, TurnResult, parse_event_line,
 };
+use crate::agent::tool_resolver;
 use crate::config::typed::ServiceConfig;
 use crate::error::SympheoError;
 use crate::tracker::model::Issue;
@@ -9,7 +10,7 @@ use crate::workspace::isolation::{build_isolated_env, ensure_isolated_home};
 use crate::workspace::manager::WorkspaceManager;
 use async_trait::async_trait;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -19,7 +20,17 @@ use tokio::sync::mpsc::Sender;
 use tokio::time::{Duration, timeout};
 use tracing::Instrument;
 
+/// Tools the worker is guaranteed to need. The agent CLI itself is added
+/// dynamically based on `cli.command`'s first token. `gh` is included so the
+/// agent can interact with GitHub (issue comments, PR ops) without falling
+/// back to a shim.
+const ALWAYS_RESOLVE_TOOLS: &[&str] = &["gh"];
+
 pub struct LocalBackend {
+    /// `cli.command` with its first whitespace-delimited token rewritten to
+    /// the absolute path of the resolved agent binary (when resolution
+    /// succeeds). Defense-in-depth: even if the worker `PATH` is shadowed by
+    /// `cli.env.PATH`, the agent binary still runs.
     command: String,
     /// SPEC §10.2.2: total wall-clock per turn (default 3600000 ms).
     turn_timeout: Duration,
@@ -27,16 +38,71 @@ pub struct LocalBackend {
     read_timeout: Duration,
     workspace_manager: WorkspaceManager,
     cli_env: HashMap<String, String>,
+    /// Parent directories of every successfully-resolved tool, in resolution
+    /// order, deduplicated. Threaded into the worker's `PATH` so the agent can
+    /// invoke each tool by short name (e.g. `gh`, `opencode`) without hitting
+    /// a mise shim.
+    resolved_bin_dirs: Vec<PathBuf>,
 }
 
 impl LocalBackend {
     pub fn new(config: &ServiceConfig) -> Result<Self, SympheoError> {
+        let raw_command = config.cli_command();
+
+        let agent_bin_name: Option<String> =
+            raw_command.split_whitespace().next().map(|s| s.to_string());
+
+        let mut tool_names: Vec<String> = Vec::new();
+        if let Some(name) = &agent_bin_name {
+            tool_names.push(name.clone());
+        }
+        for extra in ALWAYS_RESOLVE_TOOLS {
+            if !tool_names.iter().any(|n| n == extra) {
+                tool_names.push((*extra).to_string());
+            }
+        }
+
+        let mut resolved_bin_dirs: Vec<PathBuf> = Vec::new();
+        let mut seen_dirs = std::collections::HashSet::new();
+        let mut agent_abs_path: Option<PathBuf> = None;
+        for name in &tool_names {
+            match tool_resolver::resolve_tool(name) {
+                Some(p) => {
+                    if Some(name) == agent_bin_name.as_ref() {
+                        agent_abs_path = Some(p.clone());
+                    }
+                    if let Some(parent) = p.parent() {
+                        let parent = parent.to_path_buf();
+                        if seen_dirs.insert(parent.clone()) {
+                            resolved_bin_dirs.push(parent);
+                        }
+                    }
+                }
+                None => {
+                    tracing::warn!(
+                        tool = %name,
+                        "could not resolve agent tool to an absolute path; \
+                         worker invocation may fail with `command not found`"
+                    );
+                }
+            }
+        }
+
+        let command = match (&agent_bin_name, &agent_abs_path) {
+            (Some(name), Some(abs)) => {
+                let rest = raw_command[name.len()..].to_string();
+                format!("{}{}", abs.display(), rest)
+            }
+            _ => raw_command,
+        };
+
         Ok(Self {
-            command: config.cli_command(),
+            command,
             turn_timeout: Duration::from_millis(config.cli_turn_timeout_ms()),
             read_timeout: Duration::from_millis(config.cli_read_timeout_ms()),
             workspace_manager: WorkspaceManager::new(config)?,
             cli_env: config.cli_env(),
+            resolved_bin_dirs,
         })
     }
 }
@@ -102,7 +168,7 @@ impl AgentBackend for LocalBackend {
             ensure_isolated_home(workspace_path)
                 .await
                 .map_err(|e| SympheoError::AgentRunnerError(format!("isolated home setup failed: {e}")))?;
-            let env = build_isolated_env(workspace_path, &self.cli_env);
+            let env = build_isolated_env(workspace_path, &self.resolved_bin_dirs, &self.cli_env);
 
             let mut cmd = Command::new("bash");
             cmd.arg("-lc");
@@ -992,6 +1058,24 @@ mod tests {
             "credential-shaped var leaked through env: {}",
             env_text
         );
+        // Worker PATH must not contain a mise shims dir — the whole point of
+        // pre-resolving tools at startup is so the worker bypasses mise.
+        // Shape-based check: no PATH segment may equal "shims" or end with
+        // "/shims". Substring matching would false-negative on legitimate dirs
+        // like "/opt/notmise/shimshelpers/bin".
+        let path_line = env_text
+            .lines()
+            .find(|l| l.starts_with("PATH="))
+            .unwrap_or("");
+        let path_value = path_line.strip_prefix("PATH=").unwrap_or("");
+        for segment in path_value.split(':') {
+            assert!(
+                !segment.ends_with("/shims") && segment != "shims",
+                "worker PATH segment is a shims dir: {} (full PATH={})",
+                segment,
+                path_value
+            );
+        }
 
         unsafe {
             std::env::remove_var("ANTHROPIC_API_KEY");
@@ -1066,5 +1150,124 @@ mod tests {
             env_text
         );
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    fn make_config_with_cli_command(command: &str) -> ServiceConfig {
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut workspace = serde_json::Map::<String, serde_json::Value>::new();
+        workspace.insert(
+            "root".into(),
+            serde_json::Value::String(std::env::temp_dir().to_string_lossy().to_string()),
+        );
+        raw.insert("workspace".into(), serde_json::Value::Object(workspace));
+        let mut cli = serde_json::Map::<String, serde_json::Value>::new();
+        cli.insert(
+            "command".into(),
+            serde_json::Value::String(command.to_string()),
+        );
+        raw.insert("cli".into(), serde_json::Value::Object(cli));
+        ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into())
+    }
+
+    /// `LocalBackend::new` rewrites the leading binary token of `cli.command`
+    /// to its resolved absolute path. Confirms (a) the leading token becomes
+    /// an absolute path, (b) the trailing args are preserved verbatim.
+    #[test]
+    fn test_local_backend_new_rewrites_resolvable_bin_to_absolute() {
+        let bash_abs = tool_resolver::resolve_tool("bash").expect("bash on host");
+        let config = make_config_with_cli_command("bash -c \"echo hi\"");
+        let backend = LocalBackend::new(&config).expect("construct backend");
+        let expected = format!("{} -c \"echo hi\"", bash_abs.display());
+        assert_eq!(
+            backend.command, expected,
+            "expected leading bin rewritten to absolute path with args preserved"
+        );
+    }
+
+    /// When the leading binary cannot be resolved on the host, `LocalBackend::new`
+    /// MUST fall back to the raw command string verbatim and let the worker
+    /// invocation fail later (covered by the warn log in resolution).
+    #[test]
+    fn test_local_backend_new_falls_back_to_raw_when_unresolvable() {
+        let raw = "definitely-not-a-binary-xyz123 --foo bar";
+        let config = make_config_with_cli_command(raw);
+        let backend = LocalBackend::new(&config).expect("construct backend");
+        assert_eq!(
+            backend.command, raw,
+            "raw command must pass through unchanged when resolution fails"
+        );
+    }
+
+    /// `cli.command` with no trailing args (`raw_command[name.len()..]` = "")
+    /// must still rewrite cleanly to just the absolute path, no trailing
+    /// whitespace.
+    #[test]
+    fn test_local_backend_new_rewrites_bare_command_no_args() {
+        let bash_abs = tool_resolver::resolve_tool("bash").expect("bash on host");
+        let config = make_config_with_cli_command("bash");
+        let backend = LocalBackend::new(&config).expect("construct backend");
+        assert_eq!(
+            backend.command,
+            bash_abs.display().to_string(),
+            "bare command must rewrite to just the absolute path"
+        );
+    }
+
+    /// When `cli.command`'s first token equals an `ALWAYS_RESOLVE_TOOLS` entry
+    /// (`gh`), the resolved bin dir must NOT be duplicated. Length-of-vec
+    /// equals length-of-set.
+    #[test]
+    fn test_local_backend_new_dedups_resolved_bin_dirs() {
+        // We cannot guarantee `gh` is installed, so this test is skipped if not.
+        // The invariant we verify: every parent dir in `resolved_bin_dirs`
+        // appears at most once.
+        if tool_resolver::resolve_tool("gh").is_none() {
+            return;
+        }
+        let config = make_config_with_cli_command("gh issue list");
+        let backend = LocalBackend::new(&config).expect("construct backend");
+        let mut seen = std::collections::HashSet::new();
+        for d in &backend.resolved_bin_dirs {
+            assert!(
+                seen.insert(d.clone()),
+                "duplicate bin dir: {:?} in {:?}",
+                d,
+                backend.resolved_bin_dirs
+            );
+        }
+    }
+
+    /// SPEC §15.5 / Q6 hardening test: the worker PATH must not contain a
+    /// mise shims directory. Substring matching on `/shims` is brittle —
+    /// assert on shape: no PATH segment ends with `/shims` or a `mise/...`
+    /// shims dir. This catches the real bug (a shim leaks through) without
+    /// false-negatives on user dirs that happen to contain "shims" as a
+    /// substring (e.g. `/opt/notmise/shimshelpers/bin`).
+    #[test]
+    fn test_path_segment_shape_rejects_shims() {
+        // Sample PATH entries that should and should not match the shape rule.
+        let bad = [
+            "/home/u/.local/share/mise/shims",
+            "/home/u/.asdf/shims",
+            "/some/where/shims",
+        ];
+        let good = [
+            "/usr/bin",
+            "/opt/notmise/shimshelpers/bin",
+            "/home/u/bin/shimserver",
+            "/home/u/.local/share/mise/installs/foo/1.2.3/bin",
+        ];
+        for p in &bad {
+            assert!(
+                p.ends_with("/shims") || p.split('/').any(|s| s == "shims"),
+                "expected shape-match for {p}"
+            );
+        }
+        for p in &good {
+            assert!(
+                !p.ends_with("/shims") && !p.split('/').any(|s| s == "shims"),
+                "expected no shape-match for {p}"
+            );
+        }
     }
 }

@@ -7,7 +7,8 @@ use crate::orchestrator::retry::schedule_retry;
 use crate::orchestrator::state::{OrchestratorState, RunningEntry};
 use crate::skills::Skill;
 use crate::tracker::IssueTracker;
-use crate::tracker::model::{AttemptStatus, Issue, LiveSession, Phase, RunAttempt};
+use crate::tracker::model::{AttemptStatus, Issue, LiveSession, RunAttempt};
+use crate::workflow::phase::Phase;
 use crate::workspace::manager::WorkspaceManager;
 use chrono::Utc;
 use std::collections::HashMap;
@@ -727,10 +728,11 @@ async fn run_worker(
         // PRD-v2 §4.1 — phase is selected from the tracker state every turn,
         // so a hot-reloaded WORKFLOW.md picks up the new phase fragment on
         // the very next dispatch cycle without restarting in-flight workers.
-        let phase = config.phase_for_state(&issue.state);
+        let workflow_spec = config.workflow_spec();
+        let phase = workflow_spec.phase_for_state(&issue.state);
 
         let prompt = if turn_number == 1 {
-            build_prompt_strict(config, &issue, attempt, skill_content, phase.as_ref())?
+            build_prompt_strict(config, &issue, attempt, skill_content, phase)?
         } else {
             config.continuation_prompt()
         };
@@ -896,7 +898,7 @@ async fn run_worker(
         // PRD-v2 §5.2.3 — after a Succeeded turn, run the phase verifications.
         // Failure marks the turn Failed (verification_failed) and the worker
         // returns Err so the existing retry path schedules backoff.
-        if let Some(ref ph) = phase
+        if let Some(ph) = phase
             && !ph.verifications.is_empty()
         {
             let mut env = crate::workspace::manager::sympheo_hook_env(

@@ -87,9 +87,16 @@ impl CliAdapter for ClaudeAdapter {
             cli_command,
             shell_escape(&workspace_path.to_string_lossy()),
         );
-        // First turn: no `--resume`. Subsequent turns reuse the session id
-        // captured from the `system.init` event of the prior turn.
-        if let Some(sid) = session_id {
+        // `claude --print --resume <id>` requires the id to be a UUID (or a
+        // session title that already exists). Sympheo's default
+        // `start_session` allocates a synthetic identifier of the shape
+        // `claude-<pid>-<ts>` which the CLI rejects with
+        //   `--resume requires a valid session ID or session title`.
+        // The orchestrator does not feed the captured UUID back into the
+        // adapter between turns, so for now we only emit `--resume` when the
+        // caller provides a value that already looks like a UUID. First turn
+        // (no continuation) always omits the flag.
+        if let Some(sid) = session_id.filter(|s| is_uuid(s)) {
             cmd.push_str(&format!(" --resume {}", shell_escape(sid)));
         }
         cmd
@@ -194,6 +201,32 @@ impl CliAdapter for ClaudeAdapter {
     }
 }
 
+/// Tightly-scoped UUID-shape check (8-4-4-4-12 hex). The claude CLI rejects
+/// `--resume` values that are neither a valid UUID nor a saved session title;
+/// rather than parse the full RFC, we accept the canonical 36-char hyphenated
+/// form which is what claude emits in its `system.init` event.
+fn is_uuid(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.len() != 36 {
+        return false;
+    }
+    for (i, &b) in bytes.iter().enumerate() {
+        match i {
+            8 | 13 | 18 | 23 => {
+                if b != b'-' {
+                    return false;
+                }
+            }
+            _ => {
+                if !b.is_ascii_hexdigit() {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,12 +287,38 @@ mod tests {
     }
 
     #[test]
-    fn test_build_command_string_with_session() {
+    fn test_build_command_string_with_uuid_session() {
         let a = ClaudeAdapter::new();
         let prompt = Path::new("/ws/.sympheo_prompt.txt");
         let ws = Path::new("/ws");
-        let cmd = a.build_command_string("claude", prompt, ws, Some("sess-abc-123"));
-        assert!(cmd.contains("--resume sess-abc-123"));
+        let uuid = "33595f82-f956-4338-854d-f6332a296842";
+        let cmd = a.build_command_string("claude", prompt, ws, Some(uuid));
+        assert!(cmd.contains(&format!("--resume {uuid}")));
+    }
+
+    #[test]
+    fn test_build_command_string_skips_resume_for_synthetic_id() {
+        // SPEC §10.6: claude rejects --resume <non-uuid>; the orchestrator's
+        // synthetic claude-PID-TS handle must NOT propagate to the CLI.
+        let a = ClaudeAdapter::new();
+        let prompt = Path::new("/ws/.sympheo_prompt.txt");
+        let ws = Path::new("/ws");
+        let cmd = a.build_command_string("claude", prompt, ws, Some("claude-1234-5678"));
+        assert!(
+            !cmd.contains("--resume"),
+            "non-UUID handle must not produce --resume; cmd={cmd}"
+        );
+    }
+
+    #[test]
+    fn test_is_uuid() {
+        assert!(is_uuid("33595f82-f956-4338-854d-f6332a296842"));
+        assert!(is_uuid("00000000-0000-0000-0000-000000000000"));
+        assert!(!is_uuid(""));
+        assert!(!is_uuid("claude-1234-5678"));
+        assert!(!is_uuid("33595f82_f956_4338_854d_f6332a296842"));
+        assert!(!is_uuid("33595f82-f956-4338-854d-f6332a296842-extra"));
+        assert!(!is_uuid("zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz"));
     }
 
     #[test]

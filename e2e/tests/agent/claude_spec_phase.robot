@@ -32,6 +32,7 @@ ${SPEC_BODY_MARKER}    ## Spec
 *** Keywords ***
 Spec Phase Setup
     Assert Sympheo Binary Exists
+    Ensure Github Token In Env
     Cleanup Stale E2E Issues
     Provision Test Issue
     Set Up Workflow Dir
@@ -79,6 +80,7 @@ Claude Writes Spec And Transitions To In Progress
     [Tags]    agent    spec-phase
     Generate Workflow Md For Claude Spec Phase    ${WORKFLOW_DIR}    ${REPO_URL}    ${OWNER}    ${REPO_NAME}    ${PROJECT_NUMBER}
     ...    ${PROJECT_ID}    ${STATUS_FIELD_ID}    ${IN_PROGRESS_OPT_ID}
+    ...    ${ISSUE_NUMBER}    ${ISSUE_TITLE}    ${ITEM_ID}
 
     # Move the freshly-created Todo issue to Spec — kicks off sympheo.
     Move Project Item To Status    ${OWNER}    ${PROJECT_NUMBER}    ${ISSUE_URL}    Spec    item_id=${ITEM_ID}

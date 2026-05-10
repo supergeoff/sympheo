@@ -33,6 +33,7 @@ ${MARKER_FILE_PREFIX}    e2e-marker-
 *** Keywords ***
 Code Phase Setup
     Assert Sympheo Binary Exists
+    Ensure Github Token In Env
     Cleanup Stale E2E Issues
     Provision Test Issue
     Set Up Workflow Dir
@@ -99,6 +100,7 @@ Claude Implements Issue And Opens Draft PR
     [Documentation]    In Progress -> claude writes the marker file, pushes branch, opens draft PR.
     [Tags]    agent    code-phase
     Generate Workflow Md For Claude Code Phase    ${WORKFLOW_DIR}    ${REPO_URL}    ${OWNER}    ${REPO_NAME}    ${PROJECT_NUMBER}
+    ...    ${ISSUE_NUMBER}    ${ISSUE_TITLE}
 
     # Move the freshly-created Todo issue to In Progress — kicks off sympheo.
     Move Project Item To Status    ${OWNER}    ${PROJECT_NUMBER}    ${ISSUE_URL}    In Progress    item_id=${ITEM_ID}

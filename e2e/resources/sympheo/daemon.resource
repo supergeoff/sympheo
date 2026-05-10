@@ -15,6 +15,21 @@ Assert Sympheo Binary Exists
     END
     Log To Console    [setup] sympheo binary at ${SYMPHEO_BIN}
 
+Ensure Github Token In Env
+    [Documentation]    Sympheo's tracker is an in-process reqwest client; it reads ``GITHUB_TOKEN``
+    ...                from its own env, independently of the gh CLI. If the host has no valid
+    ...                ``GITHUB_TOKEN`` exported (or it's stale), sympheo's startup fails with
+    ...                ``missing tracker api key``. Always source the token from ``gh auth token``
+    ...                so sympheo + gh agree on the same identity. The exported value is
+    ...                suite-scoped; Robot does NOT log it.
+    ${result}=    Run Process    gh    auth    token    stderr=STDOUT
+    Should Be Equal As Integers    ${result.rc}    0    msg=gh auth token failed: ${result.stdout}
+    ${tok}=    Strip String    ${result.stdout}
+    Should Not Be Empty    ${tok}    msg=gh auth token returned empty
+    Set Environment Variable    GITHUB_TOKEN    ${tok}
+    ${len}=    Get Length    ${tok}
+    Log To Console    [setup] GITHUB_TOKEN exported from `gh auth token` (length=${len})
+
 Stage Claude OAuth Home
     [Documentation]    Build a minimal HOME-shaped directory under ``${WORKFLOW_DIR}/claude-home/``
     ...                containing only ``.claude/.credentials.json`` from the host. The WORKFLOW.md
@@ -47,6 +62,7 @@ Copy Logs To Report Dir
     [Arguments]    ${dir}
     ${log_src}=    Set Variable    ${dir}/logs
     ${exists}=    Run Keyword And Return Status    Directory Should Exist    ${log_src}
+    Run Keyword If    ${exists}    Run Keyword And Ignore Error    Remove Directory    ${OUTPUT_DIR}/sympheo-logs    recursive=True
     Run Keyword If    ${exists}    Copy Directory    ${log_src}    ${OUTPUT_DIR}/sympheo-logs
     ${wf}=    Set Variable    ${dir}/WORKFLOW.md
     ${wf_exists}=    Run Keyword And Return Status    File Should Exist    ${wf}

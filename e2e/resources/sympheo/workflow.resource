@@ -73,9 +73,14 @@ Generate Workflow Md For Mock
 
 Generate Workflow Md For Claude Spec Phase
     [Arguments]    ${workflow_dir}    ${repo_url}    ${owner}    ${repo_name}    ${project_number}
-    ...    ${project_id}    ${status_field_id}    ${in_progress_option_id}    ${poll_ms}=15000
+    ...    ${project_id}    ${status_field_id}    ${in_progress_option_id}
+    ...    ${issue_number}    ${issue_title}    ${item_id}    ${poll_ms}=15000
     [Documentation]    Single ``Spec`` phase. Claude rewrites the issue body with a short
     ...                spec section, then moves the project item to ``In Progress``.
+    ...                The phase prompt bakes literal values for issue/project ids — Liquid
+    ...                rendering inside ``phase.prompt`` is NOT recursive in sympheo today,
+    ...                so ``{{ issue.identifier }}`` placeholders inside the phase string
+    ...                would reach claude verbatim.
     ${slug}=    Set Variable    ${owner}/${repo_name}
     ${ws}=    Set Variable    ${workflow_dir}/workspace
     ${content}=    Catenate    SEPARATOR=\n
@@ -109,11 +114,11 @@ Generate Workflow Md For Claude Spec Phase
     ...    \ \ - name: spec
     ...    \ \ \ \ state: Spec
     ...    \ \ \ \ prompt: |
-    ...    \ \ \ \ \ \ Write a brief 3-bullet specification for issue #{{issue.identifier}} ({{issue.title}}).
-    ...    \ \ \ \ \ \ Update the issue body using:
-    ...    \ \ \ \ \ \ \ \ gh issue edit {{issue.identifier}} --repo ${slug} --body '<original-body>\\n\\n## Spec\\n- ...\\n- ...\\n- ...'
+    ...    \ \ \ \ \ \ Write a brief 3-bullet specification for issue #${issue_number}: "${issue_title}".
+    ...    \ \ \ \ \ \ Read the current body first, then update it using:
+    ...    \ \ \ \ \ \ \ \ gh issue edit ${issue_number} --repo ${slug} --body "$(gh issue view ${issue_number} --repo ${slug} --json body --jq .body)$(printf '\\n\\n## Spec\\n- bullet 1\\n- bullet 2\\n- bullet 3\\n')"
     ...    \ \ \ \ \ \ Then move the project item to In Progress:
-    ...    \ \ \ \ \ \ \ \ gh project item-edit --id ${ITEM_ID} --project-id ${project_id} --field-id ${status_field_id} --single-select-option-id ${in_progress_option_id}
+    ...    \ \ \ \ \ \ \ \ gh project item-edit --id ${item_id} --project-id ${project_id} --field-id ${status_field_id} --single-select-option-id ${in_progress_option_id}
     ...    \ \ \ \ \ \ Print "DONE_SPEC" and stop. Do not modify any code.
     ...    \ \ \ \ verifications: []
     ...    ---
@@ -122,7 +127,8 @@ Generate Workflow Md For Claude Spec Phase
     Create File    ${workflow_dir}/WORKFLOW.md    ${content}
 
 Generate Workflow Md For Claude Code Phase
-    [Arguments]    ${workflow_dir}    ${repo_url}    ${owner}    ${repo_name}    ${project_number}    ${poll_ms}=15000
+    [Arguments]    ${workflow_dir}    ${repo_url}    ${owner}    ${repo_name}    ${project_number}
+    ...    ${issue_number}    ${issue_title}    ${poll_ms}=15000
     [Documentation]    Single ``In Progress`` phase. Claude implements the change described in
     ...                the issue body, commits, pushes the branch, and opens a draft PR.
     ${slug}=    Set Variable    ${owner}/${repo_name}
@@ -158,15 +164,15 @@ Generate Workflow Md For Claude Code Phase
     ...    \ \ - name: build
     ...    \ \ \ \ state: In Progress
     ...    \ \ \ \ prompt: |
-    ...    \ \ \ \ \ \ You are on a branch checked out from main for issue #{{issue.identifier}}.
-    ...    \ \ \ \ \ \ Read the issue body for the exact task description and implement it.
+    ...    \ \ \ \ \ \ You are on a branch checked out from main for issue #${issue_number}: "${issue_title}".
+    ...    \ \ \ \ \ \ Read the issue body (use ``gh issue view ${issue_number} --repo ${slug}``) for the exact task description and implement it.
     ...    \ \ \ \ \ \ Set up git auth + identity (GH_TOKEN is in your env):
     ...    \ \ \ \ \ \ \ \ gh auth setup-git
     ...    \ \ \ \ \ \ \ \ git config user.email sympheo-bot@noreply.local
     ...    \ \ \ \ \ \ \ \ git config user.name "sympheo-bot"
     ...    \ \ \ \ \ \ Stage and commit your change. Push the current branch to origin (use ``git push -u origin HEAD``).
     ...    \ \ \ \ \ \ Open a DRAFT pull request:
-    ...    \ \ \ \ \ \ \ \ gh pr create --draft --repo ${slug} --base main --title "[e2e-test] {{issue.title}}" --body "Closes #{{issue.identifier}}"
+    ...    \ \ \ \ \ \ \ \ gh pr create --draft --repo ${slug} --base main --title "[e2e-test] ${issue_title}" --body "Closes #${issue_number}"
     ...    \ \ \ \ \ \ Print "DONE_BUILD" and stop.
     ...    \ \ \ \ verifications: []
     ...    ---

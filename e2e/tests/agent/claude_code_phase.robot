@@ -39,6 +39,11 @@ Code Phase Setup
     Provision Test Issue
     Set Up Workflow Dir
     Stage Claude OAuth Home
+    ${meta}=    Get Project Status Metadata    ${OWNER}    ${PROJECT_NUMBER}
+    Set Suite Variable    ${PROJECT_ID}             ${meta}[project_id]
+    Set Suite Variable    ${STATUS_FIELD_ID}        ${meta}[status_field_id]
+    ${options}=    Set Variable    ${meta}[options]
+    Set Suite Variable    ${REVIEW_OPT_ID}          ${options}[review]
     ${stamp}=    Get Time    epoch
     Set Suite Variable    ${MARKER_FILE_NAME}    ${MARKER_FILE_PREFIX}${stamp}.txt
     Set Suite Variable    ${MARKER_CONTENT}      hello-from-claude-${stamp}
@@ -102,7 +107,8 @@ Claude Implements Issue And Opens Draft PR
     [Documentation]    In Progress -> claude writes the marker file, pushes branch, opens draft PR.
     [Tags]    agent    code-phase
     Generate Workflow Md For Claude Code Phase    ${WORKFLOW_DIR}    ${REPO_URL}    ${OWNER}    ${REPO_NAME}    ${PROJECT_NUMBER}
-    ...    ${ISSUE_NUMBER}    ${ISSUE_TITLE}
+    ...    ${PROJECT_ID}    ${STATUS_FIELD_ID}    ${REVIEW_OPT_ID}
+    ...    ${ISSUE_NUMBER}    ${ISSUE_TITLE}    ${ITEM_ID}
 
     # Move the freshly-created Todo issue to In Progress — kicks off sympheo.
     Move Project Item To Status    ${OWNER}    ${PROJECT_NUMBER}    ${ISSUE_URL}    In Progress    item_id=${ITEM_ID}

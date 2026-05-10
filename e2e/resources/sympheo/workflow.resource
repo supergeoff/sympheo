@@ -101,6 +101,7 @@ Generate Workflow Md For Claude Spec Phase
     ...    \ \ \ \ GH_TOKEN: $GITHUB_TOKEN
     ...    \ \ turn_timeout_ms: 600000
     ...    \ \ stall_timeout_ms: 180000
+    ...    \ \ read_timeout_ms: 90000
     ...    workspace:
     ...    \ \ root: ${ws}
     ...    \ \ repo_url: ${repo_url}
@@ -128,7 +129,8 @@ Generate Workflow Md For Claude Spec Phase
 
 Generate Workflow Md For Claude Code Phase
     [Arguments]    ${workflow_dir}    ${repo_url}    ${owner}    ${repo_name}    ${project_number}
-    ...    ${issue_number}    ${issue_title}    ${poll_ms}=15000
+    ...    ${project_id}    ${status_field_id}    ${review_option_id}
+    ...    ${issue_number}    ${issue_title}    ${item_id}    ${poll_ms}=15000
     [Documentation]    Single ``In Progress`` phase. Claude implements the change described in
     ...                the issue body, commits, pushes the branch, and opens a draft PR.
     ${slug}=    Set Variable    ${owner}/${repo_name}
@@ -151,6 +153,7 @@ Generate Workflow Md For Claude Code Phase
     ...    \ \ \ \ GH_TOKEN: $GITHUB_TOKEN
     ...    \ \ turn_timeout_ms: 900000
     ...    \ \ stall_timeout_ms: 240000
+    ...    \ \ read_timeout_ms: 90000
     ...    workspace:
     ...    \ \ root: ${ws}
     ...    \ \ repo_url: ${repo_url}
@@ -158,8 +161,8 @@ Generate Workflow Md For Claude Code Phase
     ...    \ \ interval_ms: ${poll_ms}
     ...    agent:
     ...    \ \ max_concurrent_agents: 1
-    ...    \ \ max_turns: 5
-    ...    \ \ max_retry_attempts: 1
+    ...    \ \ max_turns: 1
+    ...    \ \ max_retry_attempts: 0
     ...    phases:
     ...    \ \ - name: build
     ...    \ \ \ \ state: In Progress
@@ -173,6 +176,8 @@ Generate Workflow Md For Claude Code Phase
     ...    \ \ \ \ \ \ Stage and commit your change. Push the current branch to origin (use ``git push -u origin HEAD``).
     ...    \ \ \ \ \ \ Open a DRAFT pull request:
     ...    \ \ \ \ \ \ \ \ gh pr create --draft --repo ${slug} --base main --title "[e2e-test] ${issue_title}" --body "Closes #${issue_number}"
+    ...    \ \ \ \ \ \ Then move the project item out of In Progress to stop the orchestrator's poll loop:
+    ...    \ \ \ \ \ \ \ \ gh project item-edit --id ${item_id} --project-id ${project_id} --field-id ${status_field_id} --single-select-option-id ${review_option_id}
     ...    \ \ \ \ \ \ Print "DONE_BUILD" and stop.
     ...    \ \ \ \ verifications: []
     ...    ---
@@ -199,6 +204,7 @@ Generate Workflow Md For Claude
     ...    \ \ \ \ ANTHROPIC_API_KEY: $ANTHROPIC_API_KEY
     ...    \ \ turn_timeout_ms: 600000
     ...    \ \ stall_timeout_ms: 120000
+    ...    \ \ read_timeout_ms: 90000
     ...    workspace:
     ...    \ \ root: ${ws}
     ...    \ \ repo_url: ${repo_url}

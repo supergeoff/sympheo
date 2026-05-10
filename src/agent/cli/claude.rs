@@ -158,24 +158,15 @@ impl CliAdapter for ClaudeAdapter {
                     .get("subtype")
                     .and_then(|s| s.as_str())
                     .unwrap_or("success");
-                let is_error = v
-                    .get("is_error")
-                    .and_then(|b| b.as_bool())
-                    .unwrap_or(false);
+                let is_error = v.get("is_error").and_then(|b| b.as_bool()).unwrap_or(false);
                 let reason = if is_error || subtype.contains("error") {
                     "error".to_string()
                 } else {
                     "stop".to_string()
                 };
                 let tokens = v.get("usage").map(|u| {
-                    let input = u
-                        .get("input_tokens")
-                        .and_then(|n| n.as_u64())
-                        .unwrap_or(0);
-                    let output = u
-                        .get("output_tokens")
-                        .and_then(|n| n.as_u64())
-                        .unwrap_or(0);
+                    let input = u.get("input_tokens").and_then(|n| n.as_u64()).unwrap_or(0);
+                    let output = u.get("output_tokens").and_then(|n| n.as_u64()).unwrap_or(0);
                     TokenInfo {
                         total: input + output,
                         input,

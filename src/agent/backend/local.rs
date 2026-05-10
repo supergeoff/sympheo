@@ -49,10 +49,7 @@ pub struct LocalBackend {
 }
 
 impl LocalBackend {
-    pub fn new(
-        config: &ServiceConfig,
-        adapter: Arc<dyn CliAdapter>,
-    ) -> Result<Self, SympheoError> {
+    pub fn new(config: &ServiceConfig, adapter: Arc<dyn CliAdapter>) -> Result<Self, SympheoError> {
         let raw_command = config.cli_command();
 
         let agent_bin_name: Option<String> =

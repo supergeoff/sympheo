@@ -9,16 +9,17 @@
 //! adapter matches, dispatch validation fails with [`SympheoError::CliAdapterNotFound`].
 //!
 //! Lifecycle (§10.2) lives on this trait. The execution surface (subprocess,
-//! Daytona sandbox, scriptable mock) is provided by an
+//! scriptable mock) is provided by an
 //! [`crate::agent::backend::AgentBackend`] and is intentionally distinct from
 //! the protocol the adapter speaks with the CLI binary.
 
+pub mod claude;
 pub mod mock;
 pub mod opencode;
 pub mod pi;
 
 use crate::agent::backend::AgentBackend;
-use crate::agent::parser::{EmittedEvent, TurnResult};
+use crate::agent::parser::{AgentEvent, EmittedEvent, TurnResult, parse_event_line};
 use crate::config::typed::ServiceConfig;
 use crate::error::SympheoError;
 use crate::tracker::model::Issue;
@@ -28,6 +29,30 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::mpsc::Sender;
+
+/// SPEC §10.6: shell-escape a string so it survives a `bash -lc` invocation
+/// verbatim. Backslash-escapes shell metacharacters; not a full POSIX
+/// quoter — but adequate for the controlled paths and identifiers adapters
+/// pass through (`prompt_path`, `workspace_path`, opaque `session_id`).
+pub(crate) fn shell_escape(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('$', "\\$")
+        .replace('`', "\\`")
+        .replace('\'', "\\'")
+        .replace(';', "\\;")
+        .replace('|', "\\|")
+        .replace('&', "\\&")
+        .replace('<', "\\<")
+        .replace('>', "\\>")
+        .replace('(', "\\(")
+        .replace(')', "\\)")
+        .replace('*', "\\*")
+        .replace('?', "\\?")
+        .replace('[', "\\[")
+        .replace(']', "\\]")
+        .replace('\n', "\\n")
+}
 
 /// SPEC §10.2.1: opaque session handle returned by `start_session` and threaded
 /// through every `run_turn` / `stop_session` call within one worker run.
@@ -140,6 +165,41 @@ pub trait CliAdapter: Send + Sync {
     async fn stop_session(&self, _session_context: &SessionContext) -> Result<(), SympheoError> {
         Ok(())
     }
+
+    /// SPEC §10.6: build the shell command `LocalBackend` will spawn for this
+    /// adapter. Default produces the OpenCode-shaped invocation; CLIs with
+    /// different flag conventions (e.g. `claude --print`) override.
+    fn build_command_string(
+        &self,
+        cli_command: &str,
+        prompt_path: &Path,
+        workspace_path: &Path,
+        session_id: Option<&str>,
+    ) -> String {
+        let mut cmd = format!(
+            r#"PROMPT=$(cat "{}"); {} "$PROMPT" --format json --dir "{}" --dangerously-skip-permissions"#,
+            shell_escape(&prompt_path.to_string_lossy()),
+            cli_command,
+            shell_escape(&workspace_path.to_string_lossy())
+        );
+        if let Some(sid) = session_id {
+            cmd.push_str(&format!(" --session {}", shell_escape(sid)));
+        }
+        cmd
+    }
+
+    /// SPEC §10.6: parse one line of CLI stdout into a normalized
+    /// [`AgentEvent`]. Default delegates to the OpenCode-shaped
+    /// [`parse_event_line`].
+    fn parse_stdout_line(&self, line: &str) -> Option<AgentEvent> {
+        parse_event_line(line)
+    }
+
+    /// SPEC §10.6: optional pre-flight prompt sanitization. Default identity.
+    /// OpenCode overrides this to escape lines that look like flags.
+    fn sanitize_prompt(&self, prompt: &str) -> String {
+        prompt.to_string()
+    }
 }
 
 /// SPEC §10.6: emit a `tracing::warn!` for each `cli.options` key the adapter
@@ -197,6 +257,7 @@ pub fn select_adapter(cli_command: &str) -> Result<Arc<dyn CliAdapter>, SympheoE
         .to_string();
     let candidates: Vec<Arc<dyn CliAdapter>> = vec![
         Arc::new(opencode::OpencodeAdapter::new()),
+        Arc::new(claude::ClaudeAdapter::new()),
         Arc::new(pi::PiAdapter::new()),
         Arc::new(mock::MockCliAdapter::new()),
     ];
@@ -232,6 +293,14 @@ mod tests {
     }
 
     #[test]
+    fn test_select_adapter_claude() {
+        let adapter = select_adapter("claude").unwrap();
+        assert_eq!(adapter.kind(), "claude");
+        let adapter = select_adapter("claude --print").unwrap();
+        assert_eq!(adapter.kind(), "claude");
+    }
+
+    #[test]
     fn test_select_adapter_unknown() {
         let result = select_adapter("foobar run");
         assert!(matches!(result, Err(SympheoError::CliAdapterNotFound(_))));
@@ -264,5 +333,30 @@ mod tests {
         let id = generate_session_id("opencode");
         assert!(id.starts_with("opencode-"));
         assert!(id.len() > "opencode-".len());
+    }
+
+    #[test]
+    fn test_shell_escape_backslash() {
+        assert_eq!(shell_escape("a\\b"), "a\\\\b");
+    }
+
+    #[test]
+    fn test_shell_escape_quote() {
+        assert_eq!(shell_escape("say \"hi\""), "say \\\"hi\\\"");
+    }
+
+    #[test]
+    fn test_shell_escape_dollar() {
+        assert_eq!(shell_escape("$HOME"), "\\$HOME");
+    }
+
+    #[test]
+    fn test_shell_escape_backtick() {
+        assert_eq!(shell_escape("`cmd`"), "\\`cmd\\`");
+    }
+
+    #[test]
+    fn test_shell_escape_combined() {
+        assert_eq!(shell_escape("\\\"$`"), "\\\\\\\"\\$\\`");
     }
 }

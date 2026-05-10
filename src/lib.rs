@@ -4,7 +4,6 @@ pub mod error;
 pub mod git;
 pub mod orchestrator;
 pub mod server;
-pub mod skills;
 pub mod tracker;
 pub mod workflow;
 pub mod workspace;

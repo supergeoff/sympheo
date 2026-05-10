@@ -1,4 +1,3 @@
-pub mod daytona;
 pub mod local;
 pub mod mock;
 
@@ -16,13 +15,13 @@ use tokio::sync::mpsc::Sender;
 /// Distinct from [`crate::agent::cli::CliAdapter`]: the **adapter** owns the
 /// CLI protocol (per-turn lifecycle, options validation, prompt continuation
 /// semantics), while the **backend** owns the execution surface (subprocess
-/// vs. Daytona sandbox vs. scriptable mock). For the OpenCode reference
-/// adapter the backend still drives the on-the-wire protocol concretely;
-/// `run_turn` is wrapped through the adapter trait's default implementation
-/// so adapter-level tests can verify the lifecycle independently.
+/// vs. scriptable mock). For the OpenCode reference adapter the backend still
+/// drives the on-the-wire protocol concretely; `run_turn` is wrapped through
+/// the adapter trait's default implementation so adapter-level tests can
+/// verify the lifecycle independently.
 #[async_trait]
 pub trait AgentBackend: Send + Sync {
-    /// Identifier of the execution surface (e.g. `local`, `daytona`, `mock`).
+    /// Identifier of the execution surface (e.g. `local`, `mock`).
     fn kind(&self) -> &'static str;
 
     /// Run a single agent turn.

@@ -171,19 +171,19 @@ fn binary_surfaces_startup_failure_cleanly() {
     );
 }
 
-// Workflow that passes `validate_for_dispatch` and skips the mise check.
+// Workflow that passes `validate_for_dispatch` and skips the host mise check.
 //
-// Three knobs are doing important work here:
-//  - `daytona.enabled: true` + a non-empty `api_key` skips the host mise
-//    discovery check, so this test does not require mise on the runner.
+// Two knobs are doing important work here:
+//  - `cli.command: mock-cli` is the in-process mock-backend sentinel. It
+//    selects `MockBackend`, which never spawns a host subprocess, so main's
+//    host-binary resolver explicitly bypasses it (no real binary is needed
+//    on the runner). The script file itself is never read because no turn
+//    runs in this test.
 //  - `endpoint: http://nonexistent-test-host.invalid` makes the startup
 //    terminal cleanup's GitHub call fail fast on DNS rather than hanging
 //    on a TCP timeout (RFC 6761 reserves `.invalid`). The cleanup is
 //    demoted to a background retry, and main proceeds to install the
 //    signal handler.
-//  - `cli.command: mock-cli` + `cli.options.script: ...` lets the mock
-//    backend init succeed without spawning a subprocess. The script file
-//    itself is never read because no turn runs in this test.
 #[cfg(unix)]
 const DISPATCHABLE_WORKFLOW: &str = r#"---
 tracker:
@@ -196,9 +196,6 @@ cli:
   command: mock-cli
   options:
     script: ./mock-script.yaml
-daytona:
-  enabled: true
-  api_key: dummy-daytona-key
 polling:
   interval_ms: 60000
 ---

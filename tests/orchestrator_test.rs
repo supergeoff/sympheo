@@ -66,7 +66,7 @@ async fn test_orchestrator_tick_no_candidates() {
         by_states: vec![],
         by_ids: vec![],
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
+    let orch = Orchestrator::new(config, tracker, None).unwrap();
     orch.tick().await;
 
     let state = orch.state.read().await;
@@ -83,7 +83,7 @@ async fn test_orchestrator_tick_dispatches_eligible_issue() {
         by_states: vec![],
         by_ids: vec![],
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
+    let orch = Orchestrator::new(config, tracker, None).unwrap();
     orch.tick().await;
 
     let state = orch.state.read().await;
@@ -107,7 +107,7 @@ async fn test_orchestrator_tick_skips_blocked_todo() {
         by_states: vec![],
         by_ids: vec![],
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
+    let orch = Orchestrator::new(config, tracker, None).unwrap();
     orch.tick().await;
 
     let state = orch.state.read().await;
@@ -142,7 +142,7 @@ async fn test_orchestrator_tick_dispatches_todo_with_terminal_blockers() {
         by_states: vec![],
         by_ids: vec![],
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
+    let orch = Orchestrator::new(config, tracker, None).unwrap();
     orch.tick().await;
 
     let state = orch.state.read().await;
@@ -165,7 +165,7 @@ async fn test_orchestrator_tick_skips_terminal_issue() {
         by_states: vec![],
         by_ids: vec![],
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
+    let orch = Orchestrator::new(config, tracker, None).unwrap();
     orch.tick().await;
 
     let state = orch.state.read().await;
@@ -193,7 +193,7 @@ async fn test_orchestrator_tick_respects_concurrency_limit() {
         by_states: vec![],
         by_ids: vec![],
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
+    let orch = Orchestrator::new(config, tracker, None).unwrap();
     orch.tick().await;
 
     let state = orch.state.read().await;
@@ -208,7 +208,7 @@ async fn test_orchestrator_reload_config() {
         by_states: vec![],
         by_ids: vec![],
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
+    let orch = Orchestrator::new(config, tracker, None).unwrap();
 
     let mut new_raw = serde_json::Map::<String, serde_json::Value>::new();
     let mut polling = serde_json::Map::<String, serde_json::Value>::new();
@@ -225,8 +225,7 @@ async fn test_orchestrator_reload_config() {
     new_raw.insert("agent".into(), serde_json::Value::Object(agent));
     let new_config = ServiceConfig::new(new_raw, PathBuf::from("/tmp"), "prompt".into());
 
-    orch.reload_config(new_config, std::collections::HashMap::new())
-        .await;
+    orch.reload_config(new_config).await;
 
     let state = orch.state.read().await;
     assert_eq!(state.poll_interval_ms, 10000);
@@ -252,13 +251,7 @@ async fn test_orchestrator_invalid_reload_keeps_last_known_good() {
         by_states: vec![],
         by_ids: vec![],
     });
-    let orch = Orchestrator::new(
-        valid_config(),
-        tracker,
-        std::collections::HashMap::new(),
-        None,
-    )
-    .unwrap();
+    let orch = Orchestrator::new(valid_config(), tracker, None).unwrap();
 
     // 1) Land a known-good config.
     let good_path = std::env::temp_dir().join(format!(
@@ -289,8 +282,7 @@ ok
         PathBuf::from("/tmp"),
         good_loaded.prompt_template,
     );
-    orch.reload_config(good_cfg, std::collections::HashMap::new())
-        .await;
+    orch.reload_config(good_cfg).await;
     {
         let st = orch.state.read().await;
         assert_eq!(st.poll_interval_ms, 11111);
@@ -343,7 +335,7 @@ async fn test_orchestrator_handle_worker_exit_normal() {
         by_states: vec![],
         by_ids: vec![],
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
+    let orch = Orchestrator::new(config, tracker, None).unwrap();
 
     {
         let mut state = orch.state.write().await;
@@ -379,7 +371,7 @@ async fn test_orchestrator_handle_worker_exit_error() {
         by_states: vec![],
         by_ids: vec![],
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
+    let orch = Orchestrator::new(config, tracker, None).unwrap();
 
     {
         let mut state = orch.state.write().await;
@@ -417,7 +409,7 @@ async fn test_orchestrator_process_retries_no_due() {
         by_states: vec![],
         by_ids: vec![],
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
+    let orch = Orchestrator::new(config, tracker, None).unwrap();
     orch.process_retries().await;
 
     let state = orch.state.read().await;
@@ -432,7 +424,7 @@ async fn test_orchestrator_process_retries_due_released() {
         by_states: vec![],
         by_ids: vec![],
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
+    let orch = Orchestrator::new(config, tracker, None).unwrap();
 
     {
         let mut state = orch.state.write().await;
@@ -465,7 +457,7 @@ async fn test_orchestrator_tick_dispatches_non_todo() {
         by_states: vec![],
         by_ids: vec![],
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
+    let orch = Orchestrator::new(config, tracker, None).unwrap();
     orch.tick().await;
 
     let state = orch.state.read().await;
@@ -493,7 +485,7 @@ async fn test_orchestrator_tick_worker_completes() {
         by_states: vec![],
         by_ids: vec![],
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
+    let orch = Orchestrator::new(config, tracker, None).unwrap();
     orch.tick().await;
 
     // Wait for worker to spawn and fail (subprocess returns non-zero or cannot be found)
@@ -530,7 +522,7 @@ async fn test_orchestrator_tick_reconcile_stall_with_session() {
         by_states: vec![],
         by_ids: vec![],
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
+    let orch = Orchestrator::new(config, tracker, None).unwrap();
 
     {
         let mut state = orch.state.write().await;
@@ -581,7 +573,7 @@ async fn test_orchestrator_tick_reconcile_terminal() {
         by_states: vec![],
         by_ids: vec![issue.clone()],
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
+    let orch = Orchestrator::new(config, tracker, None).unwrap();
 
     {
         let mut state = orch.state.write().await;
@@ -617,7 +609,7 @@ async fn test_orchestrator_process_retries_due_re_dispatches() {
         by_states: vec![],
         by_ids: vec![],
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
+    let orch = Orchestrator::new(config, tracker, None).unwrap();
 
     {
         let mut state = orch.state.write().await;
@@ -672,7 +664,7 @@ impl IssueTracker for FailingTracker {
 async fn test_orchestrator_process_retries_fetch_fails() {
     let config = valid_config();
     let tracker: Arc<dyn IssueTracker> = Arc::new(FailingTracker);
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
+    let orch = Orchestrator::new(config, tracker, None).unwrap();
 
     {
         let mut state = orch.state.write().await;
@@ -700,7 +692,7 @@ async fn test_orchestrator_process_retries_fetch_fails() {
 async fn test_orchestrator_process_retries_fetch_fails_max_attempts() {
     let config = valid_config();
     let tracker: Arc<dyn IssueTracker> = Arc::new(FailingTracker);
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
+    let orch = Orchestrator::new(config, tracker, None).unwrap();
 
     {
         let mut state = orch.state.write().await;
@@ -740,7 +732,7 @@ async fn test_orchestrator_process_retries_no_slots() {
         by_states: vec![],
         by_ids: vec![],
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
+    let orch = Orchestrator::new(config, tracker, None).unwrap();
 
     {
         let mut state = orch.state.write().await;
@@ -787,7 +779,7 @@ async fn test_orchestrator_process_retries_terminal_state() {
         by_states: vec![],
         by_ids: vec![],
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
+    let orch = Orchestrator::new(config, tracker, None).unwrap();
 
     {
         let mut state = orch.state.write().await;
@@ -820,7 +812,7 @@ async fn test_orchestrator_tick_reconcile_active() {
         by_states: vec![],
         by_ids: vec![issue.clone()],
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
+    let orch = Orchestrator::new(config, tracker, None).unwrap();
 
     {
         let mut state = orch.state.write().await;
@@ -856,7 +848,7 @@ async fn test_orchestrator_tick_reconcile_unknown_state() {
         by_states: vec![],
         by_ids: vec![issue.clone()],
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
+    let orch = Orchestrator::new(config, tracker, None).unwrap();
 
     {
         let mut state = orch.state.write().await;
@@ -911,7 +903,7 @@ async fn test_orchestrator_process_retries_max_attempts_reached() {
         by_states: vec![],
         by_ids: vec![],
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
+    let orch = Orchestrator::new(config, tracker, None).unwrap();
 
     {
         let mut state = orch.state.write().await;

@@ -1,4 +1,3 @@
-use crate::skills::Skill;
 use crate::tracker::model::{Issue, LiveSession, RetryEntry, TokenTotals};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -33,7 +32,6 @@ pub struct OrchestratorState {
     pub cli_rate_limits: Option<serde_json::Value>,
     pub last_tick_at: Option<chrono::DateTime<chrono::Utc>>,
     pub refresh_notify: Arc<tokio::sync::Notify>,
-    pub skills: HashMap<String, Skill>,
 }
 
 impl std::fmt::Debug for OrchestratorState {
@@ -49,7 +47,6 @@ impl std::fmt::Debug for OrchestratorState {
             .field("cli_rate_limits", &self.cli_rate_limits)
             .field("last_tick_at", &self.last_tick_at)
             .field("refresh_notify", &"<Notify>")
-            .field("skills", &self.skills)
             .finish()
     }
 }
@@ -67,7 +64,6 @@ impl Clone for OrchestratorState {
             cli_rate_limits: self.cli_rate_limits.clone(),
             last_tick_at: self.last_tick_at,
             refresh_notify: self.refresh_notify.clone(),
-            skills: self.skills.clone(),
         }
     }
 }
@@ -85,7 +81,6 @@ impl OrchestratorState {
             cli_rate_limits: None,
             last_tick_at: None,
             refresh_notify: Arc::new(tokio::sync::Notify::new()),
-            skills: HashMap::new(),
         }
     }
 

@@ -5,7 +5,7 @@
 //! (`start_session` / `run_turn` / `stop_session`) is provided through the
 //! [`crate::agent::cli::CliAdapter`] trait defaults, which delegate the
 //! subprocess-spawning + stdout-parsing surface to the configured execution
-//! [`crate::agent::backend::AgentBackend`] (`LocalBackend`, `DaytonaBackend`).
+//! [`crate::agent::backend::AgentBackend`] (`LocalBackend`, `MockBackend`).
 
 use crate::agent::cli::CliAdapter;
 use crate::error::SympheoError;
@@ -67,6 +67,22 @@ impl CliAdapter for OpencodeAdapter {
         }
         Ok(())
     }
+
+    /// SPEC §10.6: opencode mistakes prompt lines that look like CLI flags
+    /// (`^--foo$`) for actual flag arguments. Wrap such lines in backticks so
+    /// the CLI treats them as literal prompt content.
+    fn sanitize_prompt(&self, prompt: &str) -> String {
+        sanitize_prompt_for_opencode(prompt)
+    }
+}
+
+/// SPEC §10.6: lines matching `^--[a-z0-9-]+$` are wrapped in backticks so
+/// opencode does not interpret them as flag arguments. Public within the
+/// crate so the OpenCode adapter test surface can exercise it directly.
+fn sanitize_prompt_for_opencode(prompt: &str) -> String {
+    let re = regex::Regex::new(r"(?m)^--[a-z0-9-]+$").unwrap();
+    re.replace_all(prompt, |caps: &regex::Captures| format!("`{}`", &caps[0]))
+        .to_string()
 }
 
 #[cfg(test)]
@@ -121,5 +137,22 @@ mod tests {
         assert!(keys.contains(&"model"));
         assert!(keys.contains(&"permissions"));
         assert!(keys.contains(&"mcp_servers"));
+    }
+
+    #[test]
+    fn test_sanitize_prompt_wraps_flag_like_lines() {
+        let a = OpencodeAdapter::new();
+        let raw = "hello\n--foo-bar\nworld";
+        let out = a.sanitize_prompt(raw);
+        assert!(out.contains("`--foo-bar`"));
+        assert!(out.contains("hello"));
+        assert!(out.contains("world"));
+    }
+
+    #[test]
+    fn test_sanitize_prompt_leaves_non_flag_lines() {
+        let a = OpencodeAdapter::new();
+        let raw = "no flags here";
+        assert_eq!(a.sanitize_prompt(raw), raw);
     }
 }

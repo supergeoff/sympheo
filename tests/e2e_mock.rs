@@ -148,7 +148,7 @@ events:
         candidates: vec![issue.clone()],
         by_ids: std::sync::Mutex::new(vec![issue]),
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
+    let orch = Orchestrator::new(config, tracker, None).unwrap();
     orch.tick().await;
 
     // Wait for the worker to finish the turn loop and exit.
@@ -208,7 +208,7 @@ events:
         candidates: vec![issue.clone()],
         by_ids: std::sync::Mutex::new(vec![issue]),
     });
-    let orch = Orchestrator::new(config, tracker, std::collections::HashMap::new(), None).unwrap();
+    let orch = Orchestrator::new(config, tracker, None).unwrap();
     orch.tick().await;
 
     // Wait for the worker to land in running, then flip cancel.

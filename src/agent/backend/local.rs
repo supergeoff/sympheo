@@ -1,7 +1,6 @@
 use crate::agent::backend::AgentBackend;
-use crate::agent::parser::{
-    AgentEvent, EmittedEvent, TokenInfo, TurnOutcome, TurnResult, parse_event_line,
-};
+use crate::agent::cli::CliAdapter;
+use crate::agent::parser::{AgentEvent, EmittedEvent, TokenInfo, TurnOutcome, TurnResult};
 use crate::agent::tool_resolver;
 use crate::config::typed::ServiceConfig;
 use crate::error::SympheoError;
@@ -43,10 +42,14 @@ pub struct LocalBackend {
     /// invoke each tool by short name (e.g. `gh`, `opencode`) without hitting
     /// a mise shim.
     resolved_bin_dirs: Vec<PathBuf>,
+    /// SPEC §10.6: the CLI adapter owns per-CLI argv assembly, prompt
+    /// sanitization, and stdout parsing. Threading it through the backend
+    /// lets the same `LocalBackend` drive opencode, claude, pi, etc.
+    adapter: Arc<dyn CliAdapter>,
 }
 
 impl LocalBackend {
-    pub fn new(config: &ServiceConfig) -> Result<Self, SympheoError> {
+    pub fn new(config: &ServiceConfig, adapter: Arc<dyn CliAdapter>) -> Result<Self, SympheoError> {
         let raw_command = config.cli_command();
 
         let agent_bin_name: Option<String> =
@@ -103,6 +106,7 @@ impl LocalBackend {
             workspace_manager: WorkspaceManager::new(config)?,
             cli_env: config.cli_env(),
             resolved_bin_dirs,
+            adapter,
         })
     }
 }
@@ -154,7 +158,7 @@ impl AgentBackend for LocalBackend {
                 )));
             }
 
-            let sanitized = sanitize_prompt_for_opencode(prompt);
+            let sanitized = self.adapter.sanitize_prompt(prompt);
             tracing::debug!(prompt_len = sanitized.len(), "prompt length");
 
             // Write prompt to a temp file to avoid shell escaping and ARG_MAX issues
@@ -173,16 +177,15 @@ impl AgentBackend for LocalBackend {
             let mut cmd = Command::new("bash");
             cmd.arg("-lc");
 
-            let mut opencode_cmd = format!(
-                r#"PROMPT=$(cat "{}"); {} "$PROMPT" --format json --dir "{}" --dangerously-skip-permissions"#,
-                shell_escape(&prompt_file.to_string_lossy()),
-                self.command,
-                shell_escape(&workspace_path.to_string_lossy())
+            // SPEC §10.6: per-CLI argv assembly is owned by the adapter so this
+            // backend can drive opencode, claude, pi, ... without any branching.
+            let cli_cmd_str = self.adapter.build_command_string(
+                &self.command,
+                &prompt_file,
+                workspace_path,
+                session_id,
             );
-            if let Some(sid) = session_id {
-                opencode_cmd.push_str(&format!(" --session {}", shell_escape(sid)));
-            }
-            cmd.arg(&opencode_cmd);
+            cmd.arg(&cli_cmd_str);
             cmd.current_dir(workspace_path);
             cmd.env_clear();
             for (k, v) in &env {
@@ -199,8 +202,8 @@ impl AgentBackend for LocalBackend {
                 });
             }
 
-            tracing::info!("launching opencode agent (local backend)");
-            tracing::debug!(command = %opencode_cmd, "local backend command");
+            tracing::info!(adapter = %self.adapter.kind(), "launching agent (local backend)");
+            tracing::debug!(command = %cli_cmd_str, "local backend command");
 
             let mut child = cmd
                 .spawn()
@@ -300,7 +303,7 @@ impl AgentBackend for LocalBackend {
                             if line.trim().is_empty() {
                                 continue;
                             }
-                            if let Some(event) = parse_event_line(&line) {
+                            if let Some(event) = self.adapter.parse_stdout_line(&line) {
                                 tracing::debug!(event = ?event, "parsed agent event");
                                 match &event {
                                     AgentEvent::StepStart { session_id, part, .. } => {
@@ -449,36 +452,18 @@ fn kill_process_group(child: &mut tokio::process::Child) {
     let _ = child.start_kill();
 }
 
-fn shell_escape(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('$', "\\$")
-        .replace('`', "\\`")
-        .replace('\'', "\\'")
-        .replace(';', "\\;")
-        .replace('|', "\\|")
-        .replace('&', "\\&")
-        .replace('<', "\\<")
-        .replace('>', "\\>")
-        .replace('(', "\\(")
-        .replace(')', "\\)")
-        .replace('*', "\\*")
-        .replace('?', "\\?")
-        .replace('[', "\\[")
-        .replace(']', "\\]")
-        .replace('\n', "\\n")
-}
-
-fn sanitize_prompt_for_opencode(prompt: &str) -> String {
-    let re = regex::Regex::new(r"(?m)^--[a-z0-9-]+$").unwrap();
-    re.replace_all(prompt, |caps: &regex::Captures| format!("`{}`", &caps[0]))
-        .to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::cli::opencode::OpencodeAdapter;
     use std::path::PathBuf;
+
+    /// Default adapter for tests where the specific CLI shape doesn't matter —
+    /// the OpenCode adapter's `build_command_string` shape matches the JSON
+    /// fixtures the existing tests pass through `bash -c`.
+    fn test_adapter() -> Arc<dyn CliAdapter> {
+        Arc::new(OpencodeAdapter::new())
+    }
 
     #[test]
     fn test_classify_stderr_line_rate_limit() {
@@ -528,31 +513,6 @@ mod tests {
         assert!(classify_stderr_line("--dangerously-skip-permissions enabled").is_none());
     }
 
-    #[test]
-    fn test_shell_escape_backslash() {
-        assert_eq!(shell_escape("a\\b"), "a\\\\b");
-    }
-
-    #[test]
-    fn test_shell_escape_quote() {
-        assert_eq!(shell_escape("say \"hi\""), "say \\\"hi\\\"");
-    }
-
-    #[test]
-    fn test_shell_escape_dollar() {
-        assert_eq!(shell_escape("$HOME"), "\\$HOME");
-    }
-
-    #[test]
-    fn test_shell_escape_backtick() {
-        assert_eq!(shell_escape("`cmd`"), "\\`cmd\\`");
-    }
-
-    #[test]
-    fn test_shell_escape_combined() {
-        assert_eq!(shell_escape("\\\"$`"), "\\\\\\\"\\$\\`");
-    }
-
     #[tokio::test]
     async fn test_local_backend_run_turn_timeout() {
         let mut raw = serde_json::Map::<String, serde_json::Value>::new();
@@ -576,7 +536,7 @@ mod tests {
         );
         raw.insert("cli".into(), serde_json::Value::Object(cli));
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
-        let backend = LocalBackend::new(&config).unwrap();
+        let backend = LocalBackend::new(&config, test_adapter()).unwrap();
         let issue = crate::tracker::model::Issue {
             id: "1".into(),
             identifier: "TEST-1".into(),
@@ -643,7 +603,7 @@ mod tests {
         );
         raw.insert("cli".into(), serde_json::Value::Object(cli));
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
-        let backend = LocalBackend::new(&config).unwrap();
+        let backend = LocalBackend::new(&config, test_adapter()).unwrap();
         let issue = crate::tracker::model::Issue {
             id: "1".into(),
             identifier: "TEST-1".into(),
@@ -700,7 +660,7 @@ mod tests {
         );
         raw.insert("cli".into(), serde_json::Value::Object(cli));
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
-        let backend = LocalBackend::new(&config).unwrap();
+        let backend = LocalBackend::new(&config, test_adapter()).unwrap();
         let issue = crate::tracker::model::Issue {
             id: "1".into(),
             identifier: "TEST-1".into(),
@@ -762,7 +722,7 @@ mod tests {
         );
         raw.insert("cli".into(), serde_json::Value::Object(cli));
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
-        let backend = LocalBackend::new(&config).unwrap();
+        let backend = LocalBackend::new(&config, test_adapter()).unwrap();
         let issue = crate::tracker::model::Issue {
             id: "1".into(),
             identifier: "TEST-1".into(),
@@ -818,7 +778,7 @@ mod tests {
         );
         raw.insert("cli".into(), serde_json::Value::Object(cli));
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
-        let backend = LocalBackend::new(&config).unwrap();
+        let backend = LocalBackend::new(&config, test_adapter()).unwrap();
         let issue = crate::tracker::model::Issue {
             id: "1".into(),
             identifier: "TEST-1".into(),
@@ -861,7 +821,7 @@ mod tests {
         );
         raw.insert("workspace".into(), serde_json::Value::Object(workspace));
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
-        let backend = LocalBackend::new(&config).unwrap();
+        let backend = LocalBackend::new(&config, test_adapter()).unwrap();
         let issue = crate::tracker::model::Issue {
             id: "1".into(),
             identifier: "TEST-1".into(),
@@ -917,7 +877,7 @@ mod tests {
         );
         raw.insert("cli".into(), serde_json::Value::Object(cli));
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
-        let backend = LocalBackend::new(&config).unwrap();
+        let backend = LocalBackend::new(&config, test_adapter()).unwrap();
         let issue = crate::tracker::model::Issue {
             id: "1".into(),
             identifier: "TEST-1".into(),
@@ -1014,7 +974,7 @@ mod tests {
             std::env::set_var("ANTHROPIC_API_KEY", "sk-host-must-not-leak");
         }
 
-        let backend = LocalBackend::new(&config).unwrap();
+        let backend = LocalBackend::new(&config, test_adapter()).unwrap();
         let issue = crate::tracker::model::Issue {
             id: "1".into(),
             identifier: "TEST-1".into(),
@@ -1116,7 +1076,7 @@ mod tests {
         );
         raw.insert("cli".into(), serde_json::Value::Object(cli));
         let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "".into());
-        let backend = LocalBackend::new(&config).unwrap();
+        let backend = LocalBackend::new(&config, test_adapter()).unwrap();
         let issue = crate::tracker::model::Issue {
             id: "1".into(),
             identifier: "TEST-1".into(),
@@ -1176,7 +1136,7 @@ mod tests {
     fn test_local_backend_new_rewrites_resolvable_bin_to_absolute() {
         let bash_abs = tool_resolver::resolve_tool("bash").expect("bash on host");
         let config = make_config_with_cli_command("bash -c \"echo hi\"");
-        let backend = LocalBackend::new(&config).expect("construct backend");
+        let backend = LocalBackend::new(&config, test_adapter()).expect("construct backend");
         let expected = format!("{} -c \"echo hi\"", bash_abs.display());
         assert_eq!(
             backend.command, expected,
@@ -1191,7 +1151,7 @@ mod tests {
     fn test_local_backend_new_falls_back_to_raw_when_unresolvable() {
         let raw = "definitely-not-a-binary-xyz123 --foo bar";
         let config = make_config_with_cli_command(raw);
-        let backend = LocalBackend::new(&config).expect("construct backend");
+        let backend = LocalBackend::new(&config, test_adapter()).expect("construct backend");
         assert_eq!(
             backend.command, raw,
             "raw command must pass through unchanged when resolution fails"
@@ -1205,7 +1165,7 @@ mod tests {
     fn test_local_backend_new_rewrites_bare_command_no_args() {
         let bash_abs = tool_resolver::resolve_tool("bash").expect("bash on host");
         let config = make_config_with_cli_command("bash");
-        let backend = LocalBackend::new(&config).expect("construct backend");
+        let backend = LocalBackend::new(&config, test_adapter()).expect("construct backend");
         assert_eq!(
             backend.command,
             bash_abs.display().to_string(),
@@ -1225,7 +1185,7 @@ mod tests {
             return;
         }
         let config = make_config_with_cli_command("gh issue list");
-        let backend = LocalBackend::new(&config).expect("construct backend");
+        let backend = LocalBackend::new(&config, test_adapter()).expect("construct backend");
         let mut seen = std::collections::HashSet::new();
         for d in &backend.resolved_bin_dirs {
             assert!(

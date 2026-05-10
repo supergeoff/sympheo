@@ -887,13 +887,22 @@ async fn test_orchestrator_tick_reconcile_unknown_state() {
 async fn test_orchestrator_process_retries_max_attempts_reached() {
     let mut raw = valid_config().raw().clone();
     let mut cli = serde_json::Map::<String, serde_json::Value>::new();
-    // SPEC §10.1: cli.command must select a known adapter. The test only
-    // exercises the retry budget logic, so any well-formed adapter command
-    // works here — `opencode run` keeps the original test intent.
+    // SPEC §10.1: cli.command must select a known adapter. We use the bundled
+    // `mock-cli` adapter pointed at a missing script so the worker fails fast
+    // and deterministically (MockBackend reads the script at run_turn and
+    // surfaces an AgentRunnerError on ENOENT). This isolates the test from
+    // whatever real agent CLIs (`opencode`, `pi`, ...) happen to be installed
+    // on the host — the previous `opencode run` made this race-prone.
     cli.insert(
         "command".into(),
-        serde_json::Value::String("opencode run".into()),
+        serde_json::Value::String("mock-cli".into()),
     );
+    let mut opts = serde_json::Map::<String, serde_json::Value>::new();
+    opts.insert(
+        "script".into(),
+        serde_json::Value::String("/tmp/sympheo-test-nonexistent-script.yaml".into()),
+    );
+    cli.insert("options".into(), serde_json::Value::Object(opts));
     raw.insert("cli".into(), serde_json::Value::Object(cli));
     let config = ServiceConfig::new(raw, PathBuf::from("/tmp"), "prompt".into());
     let issue = make_issue("1", "TEST-1", "todo");
@@ -920,8 +929,21 @@ async fn test_orchestrator_process_retries_max_attempts_reached() {
     }
 
     orch.process_retries().await;
-    // Wait for spawned worker to fail
-    tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
+    // Poll until the spawned worker has been cleaned up, with a generous
+    // overall budget. `mock-cli` + missing-script path fails in milliseconds,
+    // but a fixed sleep is fragile under load.
+    let deadline = std::time::Instant::now() + tokio::time::Duration::from_secs(5);
+    loop {
+        let state = orch.state.read().await;
+        if !state.running.contains_key("1") {
+            break;
+        }
+        drop(state);
+        if std::time::Instant::now() >= deadline {
+            panic!("worker did not exit within 5s");
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    }
 
     let state = orch.state.read().await;
     assert!(!state.running.contains_key("1"));

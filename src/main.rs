@@ -69,17 +69,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
-    // Local backend uses mise to resolve `cli.command` and any other tools the
-    // operator declared in their workspace (gh, opencode, bun, ...). Fail fast
-    // with a clear message when mise isn't installed; otherwise the worker
-    // would just emit `command not found` once a turn starts.
-    if !config.daytona_enabled() && sympheo::workspace::isolation::find_mise_paths().is_none() {
-        error!(
-            "startup validation failed: `mise` not found on host PATH. \
-             The local backend uses mise to resolve worker tools (gh, opencode, ...). \
-             Install mise (https://mise.jdx.dev) or enable the daytona backend."
-        );
-        std::process::exit(1);
+    // Local backend pre-resolves the agent CLI binary (`cli.command`) to its
+    // absolute host path so the worker can invoke it directly under a scrubbed
+    // env, without going through a shim. Fail fast at startup if the binary
+    // can't be found — otherwise the operator would only see the symptom once
+    // a turn starts ("turn failed: turn reported failure").
+    //
+    // `validate_for_dispatch` above already rejects empty `cli.command`, so
+    // `split_whitespace().next()` here is guaranteed to yield a non-empty bin.
+    if !config.daytona_enabled() {
+        let cmd = config.cli_command();
+        let bin = cmd
+            .split_whitespace()
+            .next()
+            .expect("validate_for_dispatch rejects empty cli.command");
+        if sympheo::agent::tool_resolver::resolve_tool(bin).is_none() {
+            error!(
+                tool = %bin,
+                "startup validation failed: agent CLI binary not found on host. \
+                 Install it (mise, brew, apt, manual) or enable the daytona backend."
+            );
+            std::process::exit(1);
+        }
     }
 
     info!("startup validation passed");

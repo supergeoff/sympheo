@@ -105,6 +105,20 @@ pub enum SympheoError {
 
     #[error("git error: {0}")]
     GitError(String),
+
+    // PRD-v2 §5.3 — workflow phases validation
+    #[error("workflow phase has unknown state '{0}' (not in tracker.active_states)")]
+    WorkflowPhaseUnknownState(String),
+
+    #[error("workflow phases declare duplicate state '{0}'")]
+    WorkflowPhaseDuplicateState(String),
+
+    #[error("workflow phase missing required field '{0}'")]
+    WorkflowPhaseMissingField(String),
+
+    // PRD-v2 §5.2.3 — verification failure
+    #[error("phase verification failed: {0}")]
+    VerificationFailed(String),
 }
 
 impl From<std::io::Error> for SympheoError {
@@ -248,6 +262,28 @@ mod tests {
         assert_eq!(
             format!("{}", SympheoError::TrackerGraphQLErrors("err".into())),
             "tracker graphql errors: err"
+        );
+        assert_eq!(
+            format!("{}", SympheoError::WorkflowPhaseUnknownState("X".into())),
+            "workflow phase has unknown state 'X' (not in tracker.active_states)"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                SympheoError::WorkflowPhaseDuplicateState("Spec".into())
+            ),
+            "workflow phases declare duplicate state 'Spec'"
+        );
+        assert_eq!(
+            format!("{}", SympheoError::WorkflowPhaseMissingField("name".into())),
+            "workflow phase missing required field 'name'"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                SympheoError::VerificationFailed("`cargo test` exited with 1".into())
+            ),
+            "phase verification failed: `cargo test` exited with 1"
         );
     }
 

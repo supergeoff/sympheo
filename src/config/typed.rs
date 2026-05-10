@@ -416,6 +416,13 @@ impl ServiceConfig {
     pub fn skill_mapping(&self) -> crate::skills::SkillMapping {
         crate::skills::SkillMapping::from_config(self)
     }
+
+    // PRD-v2 §5.2/§5.3 — parsed view of the `phases[]` block. Workflow
+    // concerns (phase lookup, validation) live on `WorkflowSpec`, not
+    // on `ServiceConfig`, so config doesn't depend on workflow logic.
+    pub fn workflow_spec(&self) -> crate::workflow::phase::WorkflowSpec {
+        crate::workflow::phase::WorkflowSpec::from_raw(&self.raw)
+    }
 }
 
 #[cfg(test)]
@@ -1049,5 +1056,24 @@ mod tests {
             config.validate_for_dispatch(),
             Err(SympheoError::InvalidConfiguration(_))
         ));
+    }
+
+    #[test]
+    fn test_workflow_spec_parses_phases_block() {
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        raw.insert(
+            "phases".into(),
+            serde_json::json!([
+                { "name": "build", "state": "In Progress", "prompt": "go" }
+            ]),
+        );
+        let spec = config_with(raw).workflow_spec();
+        assert_eq!(spec.phases().len(), 1);
+        assert_eq!(spec.phases()[0].name, "build");
+    }
+
+    #[test]
+    fn test_workflow_spec_empty_when_block_absent() {
+        assert!(empty_config().workflow_spec().is_empty());
     }
 }

@@ -31,3 +31,5 @@ lcov.info
 
 #mise
 mise.local.toml
+
+.loki

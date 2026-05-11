@@ -8,8 +8,10 @@
 //! [`crate::agent::backend::AgentBackend`] (`LocalBackend`, `MockBackend`).
 
 use crate::agent::cli::CliAdapter;
+use crate::agent::cli::shell_escape;
 use crate::error::SympheoError;
 use async_trait::async_trait;
+use std::path::Path;
 
 /// Tested OpenCode CLI version range (advisory; not enforced at runtime).
 /// SPEC §10.6 RECOMMENDED: adapters MUST document the CLI version range they support.
@@ -74,6 +76,58 @@ impl CliAdapter for OpencodeAdapter {
     fn sanitize_prompt(&self, prompt: &str) -> String {
         sanitize_prompt_for_opencode(prompt)
     }
+
+    /// `opencode run --session <id>` expects a UUID-shaped opencode session id
+    /// that already exists on disk. Sympheo's default `start_session` allocates
+    /// a synthetic `opencode-<pid>-<ts>` handle which opencode silently rejects
+    /// (the turn exits without emitting a stop-shaped `step_finish`, so the
+    /// backend classifies it as `Failed`). Until opencode's own session UUID is
+    /// captured from the `session.created` event and threaded back through, we
+    /// only emit `--session` when the caller's value already looks like a UUID.
+    fn build_command_string(
+        &self,
+        cli_command: &str,
+        prompt_path: &Path,
+        workspace_path: &Path,
+        session_id: Option<&str>,
+    ) -> String {
+        let mut cmd = format!(
+            r#"PROMPT=$(cat "{}"); {} "$PROMPT" --format json --dir "{}" --dangerously-skip-permissions"#,
+            shell_escape(&prompt_path.to_string_lossy()),
+            cli_command,
+            shell_escape(&workspace_path.to_string_lossy())
+        );
+        if let Some(sid) = session_id.filter(|s| is_uuid(s)) {
+            cmd.push_str(&format!(" --session {}", shell_escape(sid)));
+        }
+        cmd
+    }
+}
+
+/// Tightly-scoped UUID-shape check (8-4-4-4-12 hex). Mirrors the helper in
+/// `claude.rs`: both adapters wrap a synthetic non-UUID handle from sympheo's
+/// `start_session` and need to skip the per-turn `--resume`/`--session` flag
+/// when the value doesn't match the CLI's expected shape.
+fn is_uuid(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.len() != 36 {
+        return false;
+    }
+    for (i, &b) in bytes.iter().enumerate() {
+        match i {
+            8 | 13 | 18 | 23 => {
+                if b != b'-' {
+                    return false;
+                }
+            }
+            _ => {
+                if !b.is_ascii_hexdigit() {
+                    return false;
+                }
+            }
+        }
+    }
+    true
 }
 
 /// SPEC §10.6: lines matching `^--[a-z0-9-]+$` are wrapped in backticks so

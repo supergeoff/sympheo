@@ -237,17 +237,104 @@ Generate Workflow Md For Claude Code Phase
     ...    \ \ max_concurrent_agents: 1
     ...    \ \ max_turns: 1
     ...    \ \ max_retry_attempts: 0
+    ...    hooks:
+    ...    \ \ timeout_ms: 60000
+    ...    \ \ before_run: |
+    ...    \ \ \ \ set -euo pipefail
+    ...    \ \ \ \ branch="sympheo/$\{SYMPHEO_ISSUE_IDENTIFIER#\\#}"
+    ...    \ \ \ \ git config --local user.email "sympheo-bot@noreply.local"
+    ...    \ \ \ \ git config --local user.name "sympheo-bot"
+    ...    \ \ \ \ git fetch origin --quiet
+    ...    \ \ \ \ if git show-ref --verify --quiet "refs/heads/$\{branch}"; then
+    ...    \ \ \ \ \ \ git checkout "$\{branch}"
+    ...    \ \ \ \ else
+    ...    \ \ \ \ \ \ git checkout -b "$\{branch}" origin/main
+    ...    \ \ \ \ fi
     ...    phases:
     ...    \ \ - name: build
     ...    \ \ \ \ state: In Progress
     ...    \ \ \ \ prompt: |
-    ...    \ \ \ \ \ \ You are on a branch checked out from main for issue #${issue_number}: "${issue_title}".
-    ...    \ \ \ \ \ \ Read the issue body (use ``gh issue view ${issue_number} --repo ${slug}``) for the exact task description and implement it.
-    ...    \ \ \ \ \ \ Set up git auth + identity (GH_TOKEN is in your env):
-    ...    \ \ \ \ \ \ \ \ gh auth setup-git
-    ...    \ \ \ \ \ \ \ \ git config user.email sympheo-bot@noreply.local
-    ...    \ \ \ \ \ \ \ \ git config user.name "sympheo-bot"
-    ...    \ \ \ \ \ \ Stage and commit your change. Push the current branch to origin (use ``git push -u origin HEAD``).
+    ...    \ \ \ \ \ \ A working branch has already been checked out from main by the before_run hook, and git identity is already configured locally — do not change branch.
+    ...    \ \ \ \ \ \ Read the issue body (``gh issue view ${issue_number} --repo ${slug}``) for the exact task description and implement it.
+    ...    \ \ \ \ \ \ Run ``gh auth setup-git`` once so git push can authenticate via GH_TOKEN.
+    ...    \ \ \ \ \ \ Stage and commit your change, then push the current branch with ``git push -u origin HEAD``. Do NOT push to main directly; never run ``git checkout main`` or ``git push origin main``.
+    ...    \ \ \ \ \ \ Open a DRAFT pull request:
+    ...    \ \ \ \ \ \ \ \ gh pr create --draft --repo ${slug} --base main --title "[e2e-test] ${issue_title}" --body "Closes #${issue_number}"
+    ...    \ \ \ \ \ \ Then move the project item out of In Progress to stop the orchestrator's poll loop:
+    ...    \ \ \ \ \ \ \ \ gh project item-edit --id ${item_id} --project-id ${project_id} --field-id ${status_field_id} --single-select-option-id ${review_option_id}
+    ...    \ \ \ \ \ \ Print "DONE_BUILD" and stop.
+    ...    \ \ \ \ verifications: []
+    ...    ---
+    ...    {{ phase.prompt }}
+    ...    ${EMPTY}
+    Create File    ${workflow_dir}/WORKFLOW.md    ${content}
+
+Generate Workflow Md For Opencode Code Phase
+    [Arguments]    ${workflow_dir}    ${repo_url}    ${owner}    ${repo_name}    ${project_number}
+    ...    ${project_id}    ${status_field_id}    ${review_option_id}
+    ...    ${issue_number}    ${issue_title}    ${item_id}
+    ...    ${opencode_model}=openrouter/anthropic/claude-haiku-4.5    ${poll_ms}=15000
+    [Documentation]    Mirror of ``Generate Workflow Md For Claude Code Phase`` but driven by
+    ...                ``opencode run``. Same phase shape: implement, push branch, open draft PR,
+    ...                move the project item to Review. The model is pinned in ``cli.command``
+    ...                (``opencode run --model <id>``) — sympheo does not currently thread
+    ...                ``cli.options.model`` into the opencode argv, and opencode's compiled-in
+    ...                default points at a preview model that may have been retired.
+    ...                ``OPENROUTER_API_KEY`` and ``ANTHROPIC_API_KEY`` are passed through so
+    ...                opencode's env-based providers can authenticate inside the isolated
+    ...                workspace.
+    ${slug}=    Set Variable    ${owner}/${repo_name}
+    ${ws}=    Set Variable    ${workflow_dir}/workspace
+    ${content}=    Catenate    SEPARATOR=\n
+    ...    ---
+    ...    tracker:
+    ...    \ \ kind: github
+    ...    \ \ api_key: $GITHUB_TOKEN
+    ...    \ \ project_slug: ${slug}
+    ...    \ \ project_number: ${project_number}
+    ...    \ \ active_states: [In Progress]
+    ...    \ \ terminal_states: [Review, Done, Canceled]
+    ...    cli:
+    ...    \ \ command: opencode run --model ${opencode_model}
+    ...    \ \ env:
+    ...    \ \ \ \ HOME: ${OPENCODE_HOME_DIR}
+    ...    \ \ \ \ GITHUB_TOKEN: $GITHUB_TOKEN
+    ...    \ \ \ \ GH_TOKEN: $GITHUB_TOKEN
+    ...    \ \ \ \ OPENROUTER_API_KEY: $OPENROUTER_API_KEY
+    ...    \ \ \ \ ANTHROPIC_API_KEY: $ANTHROPIC_API_KEY
+    ...    \ \ turn_timeout_ms: 900000
+    ...    \ \ stall_timeout_ms: 240000
+    ...    \ \ read_timeout_ms: 90000
+    ...    workspace:
+    ...    \ \ root: ${ws}
+    ...    \ \ repo_url: ${repo_url}
+    ...    polling:
+    ...    \ \ interval_ms: ${poll_ms}
+    ...    agent:
+    ...    \ \ max_concurrent_agents: 1
+    ...    \ \ max_turns: 1
+    ...    \ \ max_retry_attempts: 0
+    ...    hooks:
+    ...    \ \ timeout_ms: 60000
+    ...    \ \ before_run: |
+    ...    \ \ \ \ set -euo pipefail
+    ...    \ \ \ \ branch="sympheo/$\{SYMPHEO_ISSUE_IDENTIFIER#\\#}"
+    ...    \ \ \ \ git config --local user.email "sympheo-bot@noreply.local"
+    ...    \ \ \ \ git config --local user.name "sympheo-bot"
+    ...    \ \ \ \ git fetch origin --quiet
+    ...    \ \ \ \ if git show-ref --verify --quiet "refs/heads/$\{branch}"; then
+    ...    \ \ \ \ \ \ git checkout "$\{branch}"
+    ...    \ \ \ \ else
+    ...    \ \ \ \ \ \ git checkout -b "$\{branch}" origin/main
+    ...    \ \ \ \ fi
+    ...    phases:
+    ...    \ \ - name: build
+    ...    \ \ \ \ state: In Progress
+    ...    \ \ \ \ prompt: |
+    ...    \ \ \ \ \ \ A working branch has already been checked out from main by the before_run hook, and git identity is already configured locally — do not change branch.
+    ...    \ \ \ \ \ \ Read the issue body (``gh issue view ${issue_number} --repo ${slug}``) for the exact task description and implement it.
+    ...    \ \ \ \ \ \ Run ``gh auth setup-git`` once so git push can authenticate via GH_TOKEN.
+    ...    \ \ \ \ \ \ Stage and commit your change, then push the current branch with ``git push -u origin HEAD``. Do NOT push to main directly; never run ``git checkout main`` or ``git push origin main``.
     ...    \ \ \ \ \ \ Open a DRAFT pull request:
     ...    \ \ \ \ \ \ \ \ gh pr create --draft --repo ${slug} --base main --title "[e2e-test] ${issue_title}" --body "Closes #${issue_number}"
     ...    \ \ \ \ \ \ Then move the project item out of In Progress to stop the orchestrator's poll loop:

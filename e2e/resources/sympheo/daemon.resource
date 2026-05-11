@@ -30,6 +30,25 @@ Ensure Github Token In Env
     ${len}=    Get Length    ${tok}
     Log To Console    [setup] GITHUB_TOKEN exported from `gh auth token` (length=${len})
 
+Stage Opencode Home
+    [Documentation]    Build a minimal HOME-shaped directory under ``${WORKFLOW_DIR}/opencode-home/``
+    ...                containing ``.local/share/opencode/`` (auth.json + adjacent files) and, if
+    ...                present, ``.config/opencode/``. The WORKFLOW.md generator points ``cli.env.HOME``
+    ...                at this directory so opencode — launched inside sympheo's isolated workspace —
+    ...                resolves its data + config dirs there and authenticates against whichever
+    ...                provider the host is logged into, without exposing the rest of ``~/``.
+    Directory Should Exist    ${HOST_OPENCODE_DATA}    msg=opencode data dir missing; run `opencode providers` once
+    ${oc_home}=    Set Variable    ${WORKFLOW_DIR}/opencode-home
+    Create Directory    ${oc_home}/.local/share
+    Copy Directory    ${HOST_OPENCODE_DATA}    ${oc_home}/.local/share/opencode
+    ${has_cfg}=    Run Keyword And Return Status    Directory Should Exist    ${HOST_OPENCODE_CONFIG}
+    IF    ${has_cfg}
+        Create Directory    ${oc_home}/.config
+        Copy Directory    ${HOST_OPENCODE_CONFIG}    ${oc_home}/.config/opencode
+    END
+    Set Suite Variable    ${OPENCODE_HOME_DIR}    ${oc_home}
+    Log To Console    [setup] staged opencode home at ${oc_home}
+
 Stage Claude OAuth Home
     [Documentation]    Build a minimal HOME-shaped directory under ``${WORKFLOW_DIR}/claude-home/``
     ...                containing only ``.claude/.credentials.json`` from the host. The WORKFLOW.md

@@ -1,3 +1,4 @@
 --pythonpath        .
 --outputdir         results
 --exclude           claude
+--exclude           opencode

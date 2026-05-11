@@ -74,8 +74,8 @@ workspace:
 # by name; the four names below are the only ones the daemon currently
 # invokes:
 #   • after_create   — when a fresh workspace dir is created
-#   • before_run     — before each agent turn
-#   • after_run      — after each agent turn
+#   • before_run     — once, just before the worker's turn loop starts
+#   • after_run      — once, after the worker's turn loop ends
 #   • before_remove  — just before the workspace is destroyed
 #
 # Execution surface:
@@ -104,8 +104,9 @@ hooks:
     if [ -f e2e/bun.lock ]; then (cd e2e && bun install --frozen-lockfile); fi
 
   # ─── before_run ───────────────────────────────────────────────────────
-  # Fires before EACH agent turn. Use it to make sure the working branch
-  # exists and is up to date.
+  # Fires ONCE per worker run, just before the turn loop starts. Use it
+  # to make sure the working branch exists and is up to date for that
+  # run.
   before_run: |
     set -euo pipefail
     branch="sympheo/${SYMPHEO_ISSUE_IDENTIFIER#\#}"
@@ -118,10 +119,10 @@ hooks:
     fi
 
   # ─── after_run ────────────────────────────────────────────────────────
-  # Fires after EACH agent turn. Belt-and-braces: `.githooks/pre-commit`
-  # already enforces fmt+clippy on every commit, so this hook is only
-  # here in case the agent failed to commit and there is still
-  # uncommitted output on disk. If the githooks did their job (which
+  # Fires ONCE per worker run, after the turn loop ends. Belt-and-braces:
+  # `.githooks/pre-commit` already enforces fmt+clippy on every commit, so
+  # this hook is only here in case the agent failed to commit and there is
+  # still uncommitted output on disk. If the githooks did their job (which
   # they should), the if-block below is a no-op.
   after_run: |
     set -euo pipefail

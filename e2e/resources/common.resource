@@ -25,3 +25,9 @@ ${SYMPHEO_BIN}       ${EXECDIR}/../target/release/sympheo
 # can authenticate inside the sympheo-isolated workspace. Override only if
 # the install stores them elsewhere.
 ${HOST_CLAUDE_CREDENTIALS}    %{HOME}/.claude/.credentials.json
+
+# Source dirs for opencode auth/config — same staging idea as claude. Both
+# are copied verbatim into a per-suite fake HOME so opencode resolves
+# ``~/.local/share/opencode`` and ``~/.config/opencode`` against that HOME.
+${HOST_OPENCODE_DATA}         %{HOME}/.local/share/opencode
+${HOST_OPENCODE_CONFIG}       %{HOME}/.config/opencode

@@ -227,26 +227,13 @@ impl Orchestrator {
         for issue in refreshed {
             let state_lc = issue.state.to_lowercase();
             if terminal_states.contains(&state_lc) {
+                // Signal the worker to stop, but leave the workspace + the
+                // entry in `running` in place. The worker's spawn-task wrapper
+                // observes `cancelled` after `run_worker` returns and is the
+                // single owner of `before_remove` + workspace deletion — this
+                // ordering guarantees `after_run` sees an intact workspace.
                 if let Some(entry) = state.running.get(&issue.id) {
                     entry.cancelled.store(true, Ordering::Relaxed);
-                }
-                if let Some(entry) = state.running.remove(&issue.id) {
-                    state.claimed.remove(&issue.id);
-                    let identifier = entry.issue.identifier.clone();
-                    let issue_id = entry.issue.id.clone();
-                    drop(state);
-                    let ws_path = self.workspace_manager.workspace_path(&identifier);
-                    if let Err(e) = self.runner.cleanup_workspace(&ws_path).await {
-                        warn!(error = %e, "backend cleanup failed during reconcile");
-                    }
-                    self.workspace_manager
-                        .remove_workspace(
-                            &identifier,
-                            &issue_id,
-                            config.hook_script("before_remove").as_deref(),
-                        )
-                        .await;
-                    state = self.state.write().await;
                 }
             } else if active_states.contains(&state_lc) {
                 if let Some(entry) = state.running.get_mut(&issue.id) {
@@ -289,9 +276,47 @@ impl Orchestrator {
                 tracker.as_ref(),
                 workspace_manager.as_ref(),
                 state.clone(),
-                cancelled,
+                cancelled.clone(),
             )
             .await;
+
+            // SPEC §9.4: the workspace-lifecycle hooks `after_run` and
+            // `before_remove` belong to the worker spawn-task wrapper — not
+            // to `run_worker` itself. Running them here means:
+            //   • `after_run` always fires once per worker run, even when the
+            //     turn loop returned early (TurnCancelled, verification fail).
+            //   • when the worker was asked to stop because the issue went
+            //     terminal, `before_remove` fires last (after `after_run`)
+            //     and the workspace is gone afterwards.
+            let workspace_path = workspace_manager.workspace_path(&issue.identifier);
+            if workspace_path.exists()
+                && let Some(script) = cfg.hook_script("after_run")
+            {
+                let mut env = crate::workspace::manager::sympheo_hook_env(
+                    &issue.identifier,
+                    &issue.id,
+                    &workspace_path,
+                );
+                if let Some(ph) = cfg.workflow_spec().phase_for_state(&issue.state) {
+                    env.insert("SYMPHEO_PHASE_NAME".into(), ph.name.clone());
+                }
+                if let Err(e) = workspace_manager
+                    .run_hook("after_run", &script, &workspace_path, &env)
+                    .await
+                {
+                    warn!(error = %e, "after_run hook failed");
+                }
+            }
+
+            if cancelled.load(Ordering::Relaxed) {
+                workspace_manager
+                    .remove_workspace(
+                        &issue.identifier,
+                        &issue.id,
+                        cfg.hook_script("before_remove").as_deref(),
+                    )
+                    .await;
+            }
 
             let mut st = state.write().await;
             // Accumulate runtime for the finished session
@@ -656,11 +681,14 @@ async fn run_worker(
 
     if let Some(script) = config.hook_script("before_run") {
         attempt_record.transition(AttemptStatus::PreparingWorkspace);
-        let env = crate::workspace::manager::sympheo_hook_env(
+        let mut env = crate::workspace::manager::sympheo_hook_env(
             &issue.identifier,
             &issue.id,
             &workspace.path,
         );
+        if let Some(ph) = config.workflow_spec().phase_for_state(&issue.state) {
+            env.insert("SYMPHEO_PHASE_NAME".into(), ph.name.clone());
+        }
         workspace_manager
             .run_hook("before_run", &script, &workspace.path, &env)
             .await?;
@@ -957,26 +985,16 @@ async fn run_worker(
 
     // SPEC §10.7 step 5: per-worker-run teardown after the turn loop exits
     // normally. Errors are logged and ignored — the worker has already done
-    // its productive work.
+    // its productive work. NOTE: the `after_run` workspace hook fires once
+    // per worker run in the spawn-task wrapper (around `run_worker`), so it
+    // runs even when the loop body returned early — e.g. on TurnCancelled
+    // or verification failure — and BEFORE `before_remove` deletes the
+    // workspace.
     if let Err(e) = runner.stop_session(&session_ctx).await {
         warn!(error = %e, "stop_session failed");
     }
 
     attempt_record.transition(AttemptStatus::Finishing);
-    if let Some(script) = config.hook_script("after_run") {
-        let env = crate::workspace::manager::sympheo_hook_env(
-            &issue.identifier,
-            &issue.id,
-            &workspace.path,
-        );
-        // SPEC §9.4: after_run failure is logged and ignored.
-        if let Err(e) = workspace_manager
-            .run_hook("after_run", &script, &workspace.path, &env)
-            .await
-        {
-            warn!(error = %e, "after_run hook failed");
-        }
-    }
 
     // Cleanup workspace via backend if issue is now terminal
     let refreshed = tracker

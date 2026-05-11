@@ -94,13 +94,21 @@ hooks:
   # this hook. Comment out `workspace.repo_url` if you want this hook
   # to do the clone.
   after_create: |
+    # Halt on any error / undefined var / failing pipe stage — a half-cloned
+    # workspace must never reach the agent.
     set -euo pipefail
-    # Clone the target repo into the (empty) workspace dir.
+    # Shallow clone the target repo into the (empty) workspace dir created
+    # by the daemon. Depth 50 keeps `git blame` / history reasonable without
+    # paying for the full repo history.
     git clone --depth 50 https://github.com/supergeoff/sympheo.git .
-    # Activate the repo's own githooks (fmt+clippy pre-commit, conv-commits commit-msg, …)
+    # Activate the repo's own githooks (fmt+clippy pre-commit, conv-commits
+    # commit-msg, …) so every commit the agent makes from this workspace
+    # passes through them.
     git config core.hooksPath .githooks
-    # Warm caches when a fresh lockfile is present.
+    # Warm the Rust crate cache when the lockfile is present, so the first
+    # `cargo` call inside the turn does not pay the cold-fetch tax.
     if [ -f Cargo.lock ]; then cargo fetch --locked; fi
+    # Same idea for the e2e harness's Bun dependencies.
     if [ -f e2e/bun.lock ]; then (cd e2e && bun install --frozen-lockfile); fi
 
   # ─── before_run ───────────────────────────────────────────────────────
@@ -108,13 +116,22 @@ hooks:
   # to make sure the working branch exists and is up to date for that
   # run.
   before_run: |
+    # Fail-fast guard (same rationale as after_create).
     set -euo pipefail
+    # Per-issue branch name. The leading `#` on GitHub identifiers is
+    # stripped so the branch stays git-safe (`#42` → `sympheo/42`).
     branch="sympheo/${SYMPHEO_ISSUE_IDENTIFIER#\#}"
+    # Refresh origin refs quietly so the lookup below sees the latest state
+    # without flooding the hook log.
     git fetch origin --quiet
+    # If the branch already exists locally, switch to it and fast-forward
+    # from origin. The `|| true` swallows the "no upstream yet" error on
+    # never-pushed branches — there is nothing to fast-forward.
     if git show-ref --verify --quiet "refs/heads/${branch}"; then
       git checkout "${branch}"
       git pull --ff-only origin "${branch}" 2>/dev/null || true
     else
+      # First touch for this issue: branch off the current origin/main.
       git checkout -b "${branch}" origin/main
     fi
 
@@ -126,10 +143,18 @@ hooks:
   # they should), the if-block below is a no-op.
   after_run: |
     set -euo pipefail
+    # Best-effort format + lint even if the agent forgot. The pre-commit
+    # hook already enforces both on every commit; this is a safety net for
+    # the uncommitted-diff case caught just below.
     cargo fmt --all
     cargo clippy --all-targets --all-features -- -D warnings
+    # If anything is still uncommitted (worktree OR index), wrap it in a
+    # WIP commit so `before_remove` can push it. The first `git diff` checks
+    # the worktree, the second (`--cached`) checks the index.
     if ! git diff --quiet || ! git diff --cached --quiet; then
       git add -A
+      # SYMPHEO_PHASE_NAME pins which phase produced the WIP — useful when
+      # archaeology comes from the PR log later.
       git commit -m "wip(${SYMPHEO_PHASE_NAME}): turn output for ${SYMPHEO_ISSUE_IDENTIFIER}"
     fi
 
@@ -138,11 +163,18 @@ hooks:
   # state and open a PR so the work survives the workspace teardown.
   before_remove: |
     set -euo pipefail
+    # Same branch convention as before_run.
     branch="sympheo/${SYMPHEO_ISSUE_IDENTIFIER#\#}"
-    # Nothing to push if the workspace was created but never committed.
+    # Brand-new workspace that never committed anything — nothing to push,
+    # exit clean before the git-log call below would fail.
     if ! git rev-parse --verify HEAD >/dev/null 2>&1; then exit 0; fi
+    # Only push / open the PR when the branch has at least one commit ahead
+    # of origin/main. `grep -q .` succeeds iff the log is non-empty.
     if git log "origin/main..HEAD" --oneline 2>/dev/null | grep -q .; then
+      # `-u` sets the upstream so any later push needs no ref args.
       git push -u origin "${branch}"
+      # Open the PR only when none exists yet for this head branch — the
+      # hook stays idempotent across re-runs.
       if ! gh pr view "${branch}" >/dev/null 2>&1; then
         gh pr create --base main --head "${branch}" \
           --title "feat: resolve ${SYMPHEO_ISSUE_IDENTIFIER}" \
@@ -150,7 +182,8 @@ hooks:
       fi
     fi
     # The daemon removes ${SYMPHEO_WORKSPACE_PATH} right after this hook
-    # returns. Clean any per-issue cache that lives outside that tree.
+    # returns; clean any per-issue cache that lives outside that tree.
+    # Best-effort: errors are silenced so the cleanup never fails the run.
     rm -rf "/tmp/sympheo-cache-${SYMPHEO_ISSUE_ID}" 2>/dev/null || true
 
 # ── agent ───────────────────────────────────────────────────────────────
@@ -197,37 +230,41 @@ agent:
 
 # ── cli ─────────────────────────────────────────────────────────────────
 # How Sympheo invokes the coding-agent CLI. The leading binary token of
-# `command` selects the adapter at boot. Four adapters are wired up
-# today:
+# `command` selects the adapter at boot. Four adapters are wired up:
 #
-#   binary    | known cli.options keys
-#   ----------+-----------------------------------
-#   opencode  | model · permissions · mcp_servers
-#   claude    | model · permission_mode · additional_args
-#   mock-cli  | script
-#   pi        | (stub — selection only, not runnable)
+#   binary    | cli.options
+#   ----------+----------------------------------------------------------
+#   opencode  | model, additional_args (permission has no native flag)
+#   claude    | model, permission, additional_args
+#   pi        | model, additional_args (permission has no native flag)
+#   mock-cli  | script (adapter-specific; not in the shared triplet)
 #
-# Unknown option keys are forwarded verbatim and logged as a warning at
-# session start, so adapters stay forward-compatible.
+# `cli.options` is a typed triplet shared by every production adapter:
+#   • model            — string, mapped to the adapter's `--model` flag
+#   • permission       — one of plan|acceptEdits|bypassPermissions|default
+#                        (claude maps to `--permission-mode`; opencode and
+#                        pi have no native equivalent and log a warn)
+#   • additional_args  — string[], appended verbatim (shell-escaped per
+#                        token, with `$VAR` resolution)
+#
+# Unknown keys are silently ignored by the typed view (mock reads its
+# `script` extra this way). Renamed legacy keys hard-fail at parse:
+#   • permission_mode  -> use permission
+#   • permissions      -> use permission (singular)
+#   • mcp_servers      -> declare via the agent's own config file
+#   • cli.args         -> use cli.options.additional_args
 cli:
   command: claude                             # default is "opencode run"
-
-  # Extra args appended to every turn invocation, AFTER the
-  # adapter-specific flags. `$VAR` indirection works.
-  args:
-    - --dangerously-skip-permissions
 
   # Subprocess env. Merged on top of the daemon's process env. `$VAR`
   # indirection works. Use this for adapter API keys.
   env:
     ANTHROPIC_API_KEY: $ANTHROPIC_API_KEY
 
-  # Adapter-specific options. Forwarded verbatim. Keys recognized by the
-  # active adapter are listed in the table above; any other key is
-  # forwarded too (with a warning log).
+  # Shared typed triplet — see the table above for per-adapter projection.
   options:
     model: claude-opus-4-7
-    permission_mode: acceptEdits
+    permission: acceptEdits
     additional_args: ["--verbose"]
 
   turn_timeout_ms: 1800000                    # wall-clock per turn (default 3,600,000)
@@ -241,10 +278,16 @@ cli:
 #     command: opencode run
 #     options:
 #       model: anthropic/claude-opus-4-7
-#       permissions:
-#         edit: true
-#         bash: true
-#       mcp_servers: []
+#       additional_args: ["--print"]
+#     turn_timeout_ms: 1800000
+#
+# To switch to pi.dev:
+#
+#   cli:
+#     command: pi
+#     options:
+#       model: sonnet:high
+#       additional_args: ["--thinking", "high"]
 #     turn_timeout_ms: 1800000
 #
 # For the mock pipeline (used by e2e tests — no real API spend):
@@ -264,34 +307,55 @@ server:
 
 # ── phases ──────────────────────────────────────────────────────────────
 # Each phase binds a Project v2 status to a per-state prompt,
-# verifications, and per-phase `cli.options` overrides.
+# verifications, and an optional `cli.options` override.
 #
-# Validation:
-#   • `name`, `state`, `prompt` are required and non-empty.
-#   • `phase.state` MUST be in tracker.active_states (case-insensitive).
-#   • No two phases may share the same `state` (case-insensitive).
-#   • An active_state without a matching phase falls back to the global
-#     markdown body below — emits a warning at boot, not an error.
+# ── Available placeholders ──
 #
-# Liquid template context — these are the ONLY root variables the strict
-# validator accepts:
-#   • `issue.*` — every field of the Issue struct exposed by the tracker:
-#         id, identifier, title, description, priority, state,
-#         branch_name, url, labels, blocked_by, node_id,
-#         project_item_id, created_at, updated_at
-#   • `attempt`  — retry counter (only set on retries; nil otherwise)
-#   • `phase.name`, `phase.state`, `phase.prompt`
-# Any other root variable raises a render error at runtime.
+# In `prompt:` (Liquid template; strict mode — unknown root names raise
+# TemplateRenderError at runtime):
+#   {{ issue.id }}               opaque tracker id
+#   {{ issue.identifier }}       human identifier (e.g. "#42")
+#   {{ issue.title }}            issue title
+#   {{ issue.description }}      full issue body (string or nil)
+#   {{ issue.state }}            current Project v2 status
+#   {{ issue.priority }}         integer or nil
+#   {{ issue.url }}              web URL
+#   {{ issue.branch_name }}      branch name from the tracker, or nil
+#   {{ issue.labels }}           array — render inline with `| join: ", "`
+#   {{ issue.blocked_by }}       array of {id, identifier, state}
+#   {{ issue.node_id }}          GitHub node id, or nil
+#   {{ issue.project_item_id }}  Project v2 item id, or nil
+#   {{ issue.created_at }}       RFC 3339 timestamp
+#   {{ issue.updated_at }}       RFC 3339 timestamp
+#   {{ attempt }}                retry counter — nil on the first try;
+#                                gate retry-only copy behind `{% if attempt %}`
+#   {{ phase.name }}             this entry's `name:`
+#   {{ phase.state }}            this entry's `state:`
+#   {{ phase.prompt }}           this entry's `prompt:` (self-reference)
 #
-# Verifications: a list of shell commands run after the agent's turn
-# finishes. A non-zero exit causes the worker to retry the turn (subject
-# to `agent.max_retry_attempts`). Empty / whitespace entries are
-# silently dropped. Each command runs in `bash -lc` with the same
-# SYMPHEO_* env as the hooks above.
+# In `verifications:` (bash -lc; cwd = workspace; SYMPHEO_* env):
+#   $SYMPHEO_ISSUE_IDENTIFIER
+#   $SYMPHEO_ISSUE_ID
+#   $SYMPHEO_WORKSPACE_PATH
+#   $SYMPHEO_PHASE_NAME          (also exposed in before_run / after_run)
 #
-# Per-phase `cli_options` overlay the global `cli.options` for the
-# duration of the phase. Use it to tighten permissions on spec-only
-# phases and relax them on code phases.
+# ── Validation ──
+#   • `name`, `state`, `prompt` required and non-empty
+#   • `phase.state` ∈ tracker.active_states (case-insensitive)
+#   • No two phases may share the same `state`
+#   • An active_state without a matching phase falls back to the markdown
+#     body after the closing `---` (warn at boot, not an error)
+#
+# ── Verifications ──
+#   Shell commands run after each turn. Non-zero exit triggers a retry
+#   (bounded by agent.max_retry_attempts). Empty / whitespace entries
+#   are dropped silently.
+#
+# ── Per-phase cli.options ──
+#   Shallow-merged over the global `cli.options` for the duration of the
+#   phase: keys set here REPLACE the global value, absent keys keep it.
+#   Use it to tighten permissions on spec-only phases and relax them on
+#   code phases.
 phases:
 
   # ──────────────────────────────────────────────────────────────────
@@ -303,24 +367,18 @@ phases:
   - name: triage
     state: Todo
     prompt: |
-      You just picked up issue {{ issue.identifier }} from the backlog.
+      You picked up {{ issue.identifier }} ("{{ issue.title }}") from the backlog.
+      URL: {{ issue.url }} · Priority: {{ issue.priority }} · Labels: {{ issue.labels | join: ", " }}
 
-      Title : {{ issue.title }}
-      URL   : {{ issue.url }}
-      Labels: {{ issue.labels | join: ", " }}
-
-      Decide whether the ticket is ready for spec authoring.
-
-        • If yes: flip its Project v2 status to `Spec` with
-          `gh project item-edit ...` and stop. Do NOT open files.
-
-        • If it is under-specified (no acceptance criteria, no clear
-          ask, conflicting requirements): post a single comment listing
-          exactly what is missing, then stop without changing status.
-
-      Body
-      ----
+      Body:
       {{ issue.description }}
+
+      Decide:
+        • Shovel-ready → move the Project v2 status to `Spec` with
+          `gh project item-edit ...` and stop. Open no file.
+        • Under-specified (no acceptance criteria, no clear ask, conflicting
+          requirements) → post ONE comment listing exactly what is missing
+          and stop without changing the status.
     verifications:
       - "true"
 
@@ -333,52 +391,31 @@ phases:
   - name: spec
     state: Spec
     prompt: |
-      You are the SENIOR ARCHITECT for issue {{ issue.identifier }}:
-      {{ issue.title }}.
+      You are the senior architect for {{ issue.identifier }} ("{{ issue.title }}").
 
-      Goal: produce the architectural blueprint a downstream `code` phase
-      will implement. Do NOT write production code. Do NOT touch any
-      source file. Your sole deliverable is a single "Architecture
-      decision" comment posted on the GitHub issue itself.
+      Deliverable: ONE "Architecture decision" comment posted on the GitHub
+      issue. No production code, no source-file edits.
 
-      Use the GitHub CLI to post the comment:
+      Post it with:
         gh issue comment {{ issue.identifier }} --body-file - <<'MD'
-        ... your architecture decision below ...
+        ... decision below ...
         MD
 
-      The comment MUST contain these sections, with EXACTLY these
-      headings so downstream verifications can grep them:
+      The comment MUST contain these headings verbatim (a verification
+      greps them — drift them and the turn fails):
 
-        ## Problem statement
-        ## Scope / non-goals
-        ## Options considered
-        ## Decision & rationale
-        ## Risks & open questions
-        ## Acceptance criteria
-        ## Test strategy
+        ## Problem statement     — the concrete user/operator pain, one paragraph.
+        ## Scope / non-goals     — what is in, what is out, and why.
+        ## Options considered    — 2–4 named designs, one-line each. No straw-men.
+        ## Decision & rationale  — which option wins, and the load-bearing trade-off.
+        ## Risks & open questions — anything that could turn the decision on its head.
+        ## Acceptance criteria   — testable bullets the implementer ticks off.
+        ## Test strategy         — which layer (unit / integration / e2e) covers what.
 
-      Cover each section as a senior architect would:
-        • Problem statement: what concrete user/operator pain are we
-          solving, expressed in one paragraph.
-        • Scope / non-goals: what is in, what is explicitly out — and
-          why the non-goals are non-goals.
-        • Options considered: 2–4 plausible designs, named, with a
-          one-line summary each. No straw-men.
-        • Decision & rationale: which option wins, and the decisive
-          criteria. Mention the load-bearing trade-off.
-        • Risks & open questions: anything that could turn the decision
-          on its head; flag unknowns the implementer needs to resolve.
-        • Acceptance criteria: a bullet list the implementer can tick
-          off; testable, not aspirational.
-        • Test strategy: which layer (unit / integration / e2e) covers
-          which acceptance criterion.
-
-      Do NOT move the issue forward — a human reviews the comment and
-      flips the status to `In Progress` when satisfied.
-
-      Issue body
-      ----------
+      Issue body:
       {{ issue.description }}
+
+      Do not advance the status — a human moves it to `In Progress`.
     verifications:
       # The architecture comment must exist on the issue and contain
       # every required heading. Verifications run with cwd = workspace
@@ -398,10 +435,11 @@ phases:
           printf '%s\n' "$body" | grep -qxF "$heading" \
             || { echo "missing heading on issue ${SYMPHEO_ISSUE_IDENTIFIER}: $heading" >&2 ; exit 1 ; }
         done
-    cli_options:
-      # Tighter permissions for spec authoring — the architect should
-      # only call `gh`, never edit files.
-      permission_mode: plan
+    cli:
+      options:
+        # Tighter permissions for spec authoring — the architect should
+        # only call `gh`, never edit files.
+        permission: plan
 
   # ──────────────────────────────────────────────────────────────────
   # 3) In Progress — implement under RED-RED-GREEN TDD discipline
@@ -416,76 +454,39 @@ phases:
   - name: code
     state: In Progress
     prompt: |
-      You are entering the CODE phase of issue {{ issue.identifier }}:
-      {{ issue.title }}.
+      You are in the CODE phase of {{ issue.identifier }} ("{{ issue.title }}").
+      {% if attempt %}Retry #{{ attempt }} — re-read the previous turn's verification output before doing anything new.{% endif %}
 
-      {% if attempt %}This is retry #{{ attempt }} — re-read the
-      verification output from the previous turn before doing anything
-      new.{% endif %}
+      Read the architect's blueprint:
+        gh issue view {{ issue.identifier }} --json comments --jq '.comments[].body'
 
-      Read the "Architecture decision" comment posted during the spec
-      phase — that is your blueprint:
-        gh issue view {{ issue.identifier }} --json comments \
-          --jq '.comments[].body'
+      Work the Acceptance criteria top-down. For EACH criterion, follow
+      strict RED-RED-GREEN:
 
-      Work the Acceptance criteria checklist top-down. For EACH
-      criterion, follow the RED-RED-GREEN discipline strictly:
+        1. RED — write the failing test FIRST, in the layer prescribed by
+           "Test strategy". No production-code edit yet. Commit alone:
+             git commit -m "test(<scope>): cover <criterion>"
+        2. RED (diagnostic) — run the test and confirm it fails for the
+           RIGHT reason (the intended assertion, not a compile error /
+           typo / missing import / setup panic). Stay here until the
+           failure is meaningful.
+             cargo test --workspace --all-features <test_name>
+        3. GREEN — smallest production change that flips the test, then
+           the full suite to prove nothing else broke. Commit:
+             cargo test --workspace --all-features
+             git commit -m "feat(<scope>): <criterion>"
 
-        ┌─ RED ──────────────────────────────────────────────────────┐
-        │ 1. Write the failing test FIRST.                           │
-        │    • Use the test layer the architect prescribed in the   │
-        │      "Test strategy" section (unit / integration / e2e).  │
-        │    • The test encodes the criterion as an executable      │
-        │      assertion — nothing more, nothing less.              │
-        │    • Do NOT touch production code yet.                    │
-        │    • Commit the test alone:                               │
-        │        git commit -m "test(<scope>): cover <criterion>"   │
-        └────────────────────────────────────────────────────────────┘
+      Rules:
+        • Never more than one RED test in the index at a time. Finish the
+          current cycle before starting the next criterion.
+        • Never edit a test alongside the production code that makes it
+          green — that breaks the discipline.
+        • Never delete a failing test to make CI green; fix the production
+          code or push back on the architect comment.
 
-        ┌─ RED (again — diagnostic) ────────────────────────────────┐
-        │ 2. Run the test and confirm it fails for the RIGHT reason.│
-        │      cargo test --workspace --all-features <test_name>    │
-        │    • The failure must come from the intended assertion —  │
-        │      NOT a compile error, a typo, a missing import, or a  │
-        │      panic in setup.                                      │
-        │    • If the failure is for the wrong reason, fix the test │
-        │      until the failure is meaningful, then re-run.        │
-        │    • You stay in this step until the test fails the way   │
-        │      you expect it to.                                    │
-        └────────────────────────────────────────────────────────────┘
-
-        ┌─ GREEN ────────────────────────────────────────────────────┐
-        │ 3. Make the test pass with the SMALLEST possible change.  │
-        │    • Add only the production code needed to flip this one │
-        │      test from red to green.                              │
-        │    • Re-run                                               │
-        │        cargo test --workspace --all-features <test_name>  │
-        │      then the full suite                                  │
-        │        cargo test --workspace --all-features              │
-        │      to prove nothing else broke.                         │
-        │    • If a refactor is obvious now (rename / extract /     │
-        │      dedupe), do it AFTER green and re-run the full       │
-        │      suite again.                                         │
-        │    • Commit:                                              │
-        │        git commit -m "feat(<scope>): <criterion>"         │
-        └────────────────────────────────────────────────────────────┘
-
-      Loop until every acceptance criterion is green. Constraints:
-        • Never have more than one RED test in the index at a time.
-          If you discover a second criterion mid-flight, finish the
-          current cycle first.
-        • Never edit a test alongside the production code that makes
-          it green — that breaks the discipline.
-        • Never delete a failing test to "make CI green". Either fix
-          the production code or push back on the architect comment.
-
-      The before_run / after_run hooks above keep the branch alive
-      across turns; before_remove opens the PR when the issue leaves
-      the active states. You do NOT need to push or open the PR
-      yourself.
-
-      Do NOT move the issue forward — a human flips it to `Review`
-      once CI is green.
+      before_run / after_run / before_remove handle branching, WIP commits,
+      and the PR. Do not push or open the PR yourself. A human moves the
+      issue to `Review` once CI is green.
     verifications:
       - "cargo fmt --all -- --check"
       - "cargo clippy --all-targets --all-features -- -D warnings"
@@ -522,18 +523,18 @@ phases:
   - name: review
     state: Review
     prompt: |
-      You are entering the REVIEW phase of issue {{ issue.identifier }}.
+      You are in the REVIEW phase of {{ issue.identifier }} ("{{ issue.title }}").
+      {% if attempt %}Retry #{{ attempt }} — start by re-reading the previous turn's failure output.{% endif %}
 
-      The PR is already open. Read CI logs and reviewer comments via:
-        • `gh pr view`
-        • `gh pr checks`
-        • `gh api repos/supergeoff/sympheo/pulls/<n>/comments`
+      The PR is open. Read CI and reviewer feedback:
+        gh pr view
+        gh pr checks
+        gh api repos/supergeoff/sympheo/pulls/<n>/comments
 
-      Address every actionable comment with a fixup commit (do NOT
-      amend; do NOT force-push). Reply to each thread you resolve.
+      Address every actionable comment with a fixup commit (no amend, no
+      force-push). Reply to each thread you resolve.
 
-      Stop when every actionable comment is either resolved or
-      explicitly replied to.
+      Stop once every actionable comment is resolved or explicitly replied to.
     verifications:
       # All required CI checks must be green before the issue can move on.
       - "gh pr checks --required"
@@ -544,21 +545,20 @@ phases:
   - name: test
     state: Test
     prompt: |
-      You are entering the TEST phase of issue {{ issue.identifier }}.
+      You are in the TEST phase of {{ issue.identifier }} ("{{ issue.title }}").
 
-      The PR has merged into `main`. Run the e2e harness against the
-      live environment:
-
+      The PR is merged into `main`. Run the e2e harness against the live
+      environment:
         cd e2e && bun run e2e
 
-      If anything fails: open a follow-up issue with the failure log
-      attached, link it to {{ issue.identifier }}, and do NOT revert
-      the merge.
+      On failure: open a follow-up issue with the failure log attached,
+      link it to {{ issue.identifier }}, and do NOT revert the merge.
     verifications:
       - "cd e2e && bun run e2e --include happy_path"
-    cli_options:
-      # Test phase is read-heavy — use the cheaper model.
-      model: claude-sonnet-4-6
+    cli:
+      options:
+        # Test phase is read-heavy — use the cheaper model.
+        model: claude-sonnet-4-6
 
   # ──────────────────────────────────────────────────────────────────
   # 6) Doc — finalise user-facing documentation
@@ -566,22 +566,21 @@ phases:
   - name: doc
     state: Doc
     prompt: |
-      You are entering the DOC phase of issue {{ issue.identifier }}.
+      You are in the DOC phase of {{ issue.identifier }} ("{{ issue.title }}").
 
-      Update user-facing docs to match the now-merged change:
-        • README.md (if user-visible behaviour changed)
-        • CHANGELOG.md — add to the Unreleased section
-        • The architecture decision comment on the issue if the
-          implementation deviated from the original design — append
-          a "## Implementation notes" section there, do not rewrite
-          the original decision.
+      Update user-facing docs to match the merged change:
+        • README.md — if user-visible behaviour changed
+        • CHANGELOG.md — append to the Unreleased section
+        • The issue's architecture decision comment — ONLY if the
+          implementation diverged from the original; append a
+          "## Implementation notes" section, do not rewrite the decision.
 
-      Write present-tense, snapshot-style prose. Do NOT describe what
-      used to be the behaviour, only what it is now ("Sympheo reads…",
-      never "Sympheo now reads…" or "Sympheo no longer reads…").
+      Write present-tense, snapshot-style prose. State what the system IS,
+      never what it used to be ("Sympheo reads…", never "Sympheo now
+      reads…" or "Sympheo no longer reads…").
 
-      Commit and push. A human flips the issue to `Done` once the doc
-      PR merges.
+      Commit and push. A human moves the issue to `Done` when the doc PR
+      merges.
     verifications:
       - "test -f CHANGELOG.md"
       # Snapshot-style guard — block any "nouvelle", "retiré", "désormais",

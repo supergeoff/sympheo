@@ -2,14 +2,14 @@
 //!
 //! Selected when `cli.command` starts with the literal token `mock-cli`. Used
 //! exclusively for tests and dry-runs; never for production traffic.
+//!
+//! Mock intentionally lives outside the shared `cli.options` triplet
+//! (`model` / `permission` / `additional_args`) — it reads its scripted
+//! event fixture from `cli.options.script` via the raw options accessor on
+//! [`ServiceConfig`](crate::config::typed::ServiceConfig).
 
 use crate::agent::cli::CliAdapter;
-use crate::error::SympheoError;
 use async_trait::async_trait;
-
-/// SPEC §10.6 (mock parallel): `cli.options.script` points at a YAML/JSON
-/// fixture; the mock execution backend reads it and replays scripted events.
-pub const MOCK_KNOWN_OPTION_KEYS: &[&str] = &["script"];
 
 pub struct MockCliAdapter;
 
@@ -34,32 +34,12 @@ impl CliAdapter for MockCliAdapter {
     fn binary_names(&self) -> &[&'static str] {
         &["mock-cli"]
     }
-
-    fn known_option_keys(&self) -> &[&'static str] {
-        MOCK_KNOWN_OPTION_KEYS
-    }
-
-    fn validate(&self, cli_command: &str) -> Result<(), SympheoError> {
-        if cli_command.trim().is_empty() {
-            return Err(SympheoError::InvalidConfiguration(
-                "cli.command is empty".into(),
-            ));
-        }
-        let leading = cli_command.split_whitespace().next().unwrap_or("");
-        let bin = std::path::Path::new(leading)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or(leading);
-        if bin != "mock-cli" {
-            return Err(SympheoError::CliAdapterNotFound(cli_command.to_string()));
-        }
-        Ok(())
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::SympheoError;
 
     #[test]
     fn test_kind_and_names() {

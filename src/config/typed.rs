@@ -256,19 +256,6 @@ impl ServiceConfig {
             .unwrap_or(300000)
     }
 
-    /// SPEC §5.3.6: `cli.args` — additional arguments appended to `cli.command` for each turn.
-    pub fn cli_args(&self) -> Vec<String> {
-        self.cli()
-            .and_then(|m| m.get("args"))
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(resolver::resolve_value))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
     /// SPEC §5.3.6: `cli.env` — environment variables added to the subprocess for each turn.
     /// Values support `$VAR_NAME` indirection (§6.1).
     pub fn cli_env(&self) -> HashMap<String, String> {
@@ -285,9 +272,11 @@ impl ServiceConfig {
         map
     }
 
-    /// SPEC §5.3.6: `cli.options` — adapter-specific opaque options.
-    /// Sympheo does not interpret this map; it is forwarded verbatim to the adapter.
-    pub fn cli_options(&self) -> serde_json::Value {
+    /// SPEC §5.3.6: `cli.options` — raw (untyped) view of the options map.
+    /// Used by callers that need adapter-specific extras (e.g. mock's
+    /// `script`). The typed triplet (`model`, `permission`, `additional_args`)
+    /// is parsed via [`crate::agent::cli::CliOptions::parse`].
+    pub fn cli_options_raw(&self) -> serde_json::Value {
         self.cli()
             .and_then(|m| m.get("options"))
             .cloned()
@@ -328,6 +317,22 @@ impl ServiceConfig {
                 "cli.command is empty".into(),
             ));
         }
+        // SPEC §10.6: `cli.args` is no longer supported — the typed
+        // `cli.options.additional_args` array replaces it. We surface a
+        // configuration error rather than silently dropping the keys so
+        // operators can migrate before dispatch starts.
+        if let Some(cli) = self.cli()
+            && cli.contains_key("args")
+        {
+            return Err(SympheoError::InvalidConfiguration(
+                "cli.args is no longer supported; move arguments into cli.options.additional_args (an array of strings)".into(),
+            ));
+        }
+        // SPEC §10.6: parse the typed `cli.options` triplet to surface
+        // legacy-key rejections (permission_mode/permissions/mcp_servers)
+        // before dispatch starts. Result is discarded — adapters reparse
+        // for their own use.
+        let _ = crate::agent::cli::CliOptions::parse(&self.cli_options_raw())?;
         // SPEC §6.3 + §10.1: resolve a CLI adapter from cli.command's leading binary token.
         // Fails with CliAdapterNotFound if no adapter matches (§5.5).
         let _ = crate::agent::cli::select_adapter(&cmd)?;
@@ -337,7 +342,12 @@ impl ServiceConfig {
     // PRD-v2 §5.2/§5.3 — parsed view of the `phases[]` block. Workflow
     // concerns (phase lookup, validation) live on `WorkflowSpec`, not
     // on `ServiceConfig`, so config doesn't depend on workflow logic.
-    pub fn workflow_spec(&self) -> crate::workflow::phase::WorkflowSpec {
+    //
+    // SPEC §10.6: parsing may fail when a phase declares legacy keys
+    // (`cli_options` → `cli.options`, banned `permission_mode`, etc.), so
+    // this accessor returns a `Result` rather than silently dropping the
+    // override.
+    pub fn workflow_spec(&self) -> Result<crate::workflow::phase::WorkflowSpec, SympheoError> {
         crate::workflow::phase::WorkflowSpec::from_raw(&self.raw)
     }
 }
@@ -687,43 +697,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cli_args_default_empty() {
-        assert!(empty_config().cli_args().is_empty());
-    }
-
-    #[test]
-    fn test_cli_args_custom() {
-        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
-        let mut cli = serde_json::Map::<String, serde_json::Value>::new();
-        cli.insert(
-            "args".into(),
-            serde_json::Value::Array(vec![
-                serde_json::Value::String("--verbose".into()),
-                serde_json::Value::String("--model=claude".into()),
-            ]),
-        );
-        raw.insert("cli".into(), serde_json::Value::Object(cli));
-        assert_eq!(
-            config_with(raw).cli_args(),
-            vec!["--verbose".to_string(), "--model=claude".to_string()]
-        );
-    }
-
-    #[test]
-    fn test_cli_args_env_resolution() {
-        unsafe { std::env::set_var("TEST_CLI_FLAG", "--strict") };
-        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
-        let mut cli = serde_json::Map::<String, serde_json::Value>::new();
-        cli.insert(
-            "args".into(),
-            serde_json::Value::Array(vec![serde_json::Value::String("$TEST_CLI_FLAG".into())]),
-        );
-        raw.insert("cli".into(), serde_json::Value::Object(cli));
-        assert_eq!(config_with(raw).cli_args(), vec!["--strict".to_string()]);
-        unsafe { std::env::remove_var("TEST_CLI_FLAG") };
-    }
-
-    #[test]
     fn test_cli_env_default_empty() {
         assert!(empty_config().cli_env().is_empty());
     }
@@ -751,26 +724,87 @@ mod tests {
     }
 
     #[test]
-    fn test_cli_options_default_empty_object() {
-        let opts = empty_config().cli_options();
+    fn test_cli_options_raw_default_empty_object() {
+        let opts = empty_config().cli_options_raw();
         assert!(opts.is_object());
         assert!(opts.as_object().unwrap().is_empty());
     }
 
     #[test]
-    fn test_cli_options_passthrough() {
+    fn test_cli_options_raw_passthrough() {
         let mut raw = serde_json::Map::<String, serde_json::Value>::new();
         let mut cli = serde_json::Map::<String, serde_json::Value>::new();
         let mut opts = serde_json::Map::<String, serde_json::Value>::new();
         opts.insert("model".into(), serde_json::Value::String("opus".into()));
-        opts.insert("permissions".into(), serde_json::Value::Bool(true));
+        opts.insert("script".into(), serde_json::Value::String("s.yaml".into()));
         cli.insert("options".into(), serde_json::Value::Object(opts));
         raw.insert("cli".into(), serde_json::Value::Object(cli));
-        let result = config_with(raw).cli_options();
+        let result = config_with(raw).cli_options_raw();
         assert_eq!(result.get("model").and_then(|v| v.as_str()), Some("opus"));
         assert_eq!(
-            result.get("permissions").and_then(|v| v.as_bool()),
-            Some(true)
+            result.get("script").and_then(|v| v.as_str()),
+            Some("s.yaml")
+        );
+    }
+
+    #[test]
+    fn test_validate_for_dispatch_rejects_legacy_cli_args() {
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut tracker = serde_json::Map::<String, serde_json::Value>::new();
+        tracker.insert("kind".into(), serde_json::Value::String("github".into()));
+        tracker.insert("api_key".into(), serde_json::Value::String("k".into()));
+        tracker.insert(
+            "project_slug".into(),
+            serde_json::Value::String("o/r".into()),
+        );
+        tracker.insert(
+            "project_number".into(),
+            serde_json::Value::Number(serde_json::Number::from(1)),
+        );
+        raw.insert("tracker".into(), serde_json::Value::Object(tracker));
+        let mut cli = serde_json::Map::<String, serde_json::Value>::new();
+        cli.insert(
+            "command".into(),
+            serde_json::Value::String("opencode run".into()),
+        );
+        cli.insert(
+            "args".into(),
+            serde_json::Value::Array(vec![serde_json::Value::String("--x".into())]),
+        );
+        raw.insert("cli".into(), serde_json::Value::Object(cli));
+        let err = config_with(raw).validate_for_dispatch().unwrap_err();
+        assert!(
+            matches!(err, SympheoError::InvalidConfiguration(s) if s.contains("cli.args") && s.contains("additional_args"))
+        );
+    }
+
+    #[test]
+    fn test_validate_for_dispatch_rejects_legacy_options_keys() {
+        let mut raw = serde_json::Map::<String, serde_json::Value>::new();
+        let mut tracker = serde_json::Map::<String, serde_json::Value>::new();
+        tracker.insert("kind".into(), serde_json::Value::String("github".into()));
+        tracker.insert("api_key".into(), serde_json::Value::String("k".into()));
+        tracker.insert(
+            "project_slug".into(),
+            serde_json::Value::String("o/r".into()),
+        );
+        tracker.insert(
+            "project_number".into(),
+            serde_json::Value::Number(serde_json::Number::from(1)),
+        );
+        raw.insert("tracker".into(), serde_json::Value::Object(tracker));
+        let mut cli = serde_json::Map::<String, serde_json::Value>::new();
+        cli.insert("command".into(), serde_json::Value::String("claude".into()));
+        let mut opts = serde_json::Map::<String, serde_json::Value>::new();
+        opts.insert(
+            "permission_mode".into(),
+            serde_json::Value::String("plan".into()),
+        );
+        cli.insert("options".into(), serde_json::Value::Object(opts));
+        raw.insert("cli".into(), serde_json::Value::Object(cli));
+        let err = config_with(raw).validate_for_dispatch().unwrap_err();
+        assert!(
+            matches!(err, SympheoError::InvalidConfiguration(s) if s.contains("permission_mode"))
         );
     }
 
@@ -888,13 +922,13 @@ mod tests {
                 { "name": "build", "state": "In Progress", "prompt": "go" }
             ]),
         );
-        let spec = config_with(raw).workflow_spec();
+        let spec = config_with(raw).workflow_spec().unwrap();
         assert_eq!(spec.phases().len(), 1);
         assert_eq!(spec.phases()[0].name, "build");
     }
 
     #[test]
     fn test_workflow_spec_empty_when_block_absent() {
-        assert!(empty_config().workflow_spec().is_empty());
+        assert!(empty_config().workflow_spec().unwrap().is_empty());
     }
 }

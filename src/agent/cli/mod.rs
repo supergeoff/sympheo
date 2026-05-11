@@ -2,7 +2,7 @@
 //!
 //! This module declares the language-neutral CLI adapter contract Sympheo expects from a
 //! coding-agent CLI binary. The reference adapter is OpenCode (`opencode run`); other
-//! adapters (e.g. `pi.dev`) MUST satisfy the same contract.
+//! adapters (e.g. `claude`, `pi`) MUST satisfy the same contract.
 //!
 //! Selection (§10.1): the orchestrator inspects the **leading binary token** of
 //! `cli.command` and selects the first adapter whose claimed binaries match. If no
@@ -12,6 +12,10 @@
 //! scriptable mock) is provided by an
 //! [`crate::agent::backend::AgentBackend`] and is intentionally distinct from
 //! the protocol the adapter speaks with the CLI binary.
+//!
+//! Options (§10.6): `cli.options` is a typed triplet shared across every
+//! production adapter — see [`CliOptions`]. Each adapter projects the typed
+//! fields onto its native flag set in [`CliAdapter::build_command_string`].
 
 pub mod claude;
 pub mod mock;
@@ -54,6 +58,207 @@ pub(crate) fn shell_escape(s: &str) -> String {
         .replace('\n', "\\n")
 }
 
+/// Shared 8-4-4-4-12 hex UUID-shape check. Both `claude --resume` and
+/// `opencode --session` reject non-UUID values; pi accepts a UUID *prefix*
+/// but never invents one. Each adapter calls this helper before splicing
+/// the session id into its argv.
+pub(crate) fn is_uuid(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.len() != 36 {
+        return false;
+    }
+    for (i, &b) in bytes.iter().enumerate() {
+        match i {
+            8 | 13 | 18 | 23 => {
+                if b != b'-' {
+                    return false;
+                }
+            }
+            _ => {
+                if !b.is_ascii_hexdigit() {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+/// SPEC §10.1: leading-binary check shared by every adapter's `validate`.
+/// Inspects the first whitespace-separated token of `cli_command` (stripping
+/// any directory prefix), and verifies it matches one of the adapter's
+/// claimed binary names.
+pub(crate) fn validate_command_binary(
+    cli_command: &str,
+    binary_names: &[&'static str],
+) -> Result<(), SympheoError> {
+    if cli_command.trim().is_empty() {
+        return Err(SympheoError::InvalidConfiguration(
+            "cli.command is empty".into(),
+        ));
+    }
+    let leading = cli_command.split_whitespace().next().unwrap_or("");
+    let bin = Path::new(leading)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(leading);
+    if !binary_names.contains(&bin) {
+        return Err(SympheoError::CliAdapterNotFound(cli_command.to_string()));
+    }
+    Ok(())
+}
+
+/// SPEC §10.6: agent permission mode, shared across production adapters. Each
+/// adapter projects this variant onto its native flag (see
+/// `CliAdapter::build_command_string`). Variants mirror the four modes the
+/// claude CLI accepts; adapters with no native equivalent (opencode, pi)
+/// ignore the value and emit a structured warn on construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Permission {
+    Plan,
+    AcceptEdits,
+    BypassPermissions,
+    Default,
+}
+
+impl Permission {
+    /// Canonical string form, also the value claude expects under
+    /// `--permission-mode`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Permission::Plan => "plan",
+            Permission::AcceptEdits => "acceptEdits",
+            Permission::BypassPermissions => "bypassPermissions",
+            Permission::Default => "default",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "plan" => Some(Permission::Plan),
+            "acceptEdits" => Some(Permission::AcceptEdits),
+            "bypassPermissions" => Some(Permission::BypassPermissions),
+            "default" => Some(Permission::Default),
+            _ => None,
+        }
+    }
+}
+
+/// SPEC §10.6: the typed triplet that every production adapter consumes.
+/// `model` and `permission` are scalar overrides; `additional_args` is a
+/// verbatim tail appended to the assembled argv (shell-escape applied
+/// per-token). Unknown keys in the source map are silently ignored from the
+/// typed view but remain available to adapter-specific extras (e.g. mock's
+/// `script`).
+///
+/// Legacy keys (`permission_mode`, `permissions`, `mcp_servers`) are rejected
+/// with a parse error pointing to the rename.
+#[derive(Debug, Clone, Default)]
+pub struct CliOptions {
+    pub model: Option<String>,
+    pub permission: Option<Permission>,
+    pub additional_args: Vec<String>,
+}
+
+impl CliOptions {
+    /// Parse the typed view from a raw `cli.options` map. Returns an empty
+    /// instance if `value` is not an object. Errors on banned legacy keys.
+    pub fn parse(value: &serde_json::Value) -> Result<Self, SympheoError> {
+        let Some(map) = value.as_object() else {
+            return Ok(Self::default());
+        };
+
+        if map.contains_key("permission_mode") {
+            return Err(SympheoError::InvalidConfiguration(
+                "cli.options.permission_mode is renamed to cli.options.permission".into(),
+            ));
+        }
+        if map.contains_key("permissions") {
+            return Err(SympheoError::InvalidConfiguration(
+                "cli.options.permissions is renamed to cli.options.permission (singular)".into(),
+            ));
+        }
+        if map.contains_key("mcp_servers") {
+            return Err(SympheoError::InvalidConfiguration(
+                "cli.options.mcp_servers is no longer supported; declare MCP servers via the agent's own config file".into(),
+            ));
+        }
+
+        let model = map
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let permission = match map.get("permission") {
+            None => None,
+            Some(serde_json::Value::String(s)) => Some(Permission::parse(s).ok_or_else(|| {
+                SympheoError::InvalidConfiguration(format!(
+                    "cli.options.permission: invalid value '{s}' (expected one of: plan, acceptEdits, bypassPermissions, default)"
+                ))
+            })?),
+            Some(_) => {
+                return Err(SympheoError::InvalidConfiguration(
+                    "cli.options.permission: expected a string (one of: plan, acceptEdits, bypassPermissions, default)"
+                        .into(),
+                ));
+            }
+        };
+
+        let additional_args = match map.get("additional_args") {
+            None => Vec::new(),
+            Some(serde_json::Value::Array(arr)) => arr
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(crate::config::resolver::resolve_value)
+                .collect(),
+            Some(_) => {
+                return Err(SympheoError::InvalidConfiguration(
+                    "cli.options.additional_args: expected an array of strings".into(),
+                ));
+            }
+        };
+
+        Ok(Self {
+            model,
+            permission,
+            additional_args,
+        })
+    }
+
+    /// Shallow merge: every field set in `override_` replaces the
+    /// corresponding field in `self`. `additional_args` is treated as a single
+    /// field — a non-empty override REPLACES the base entirely (not
+    /// concatenated). Used to layer per-phase `cli.options` over the global
+    /// `cli.options`.
+    pub fn merge_over(&self, override_: &CliOptions) -> CliOptions {
+        CliOptions {
+            model: override_.model.clone().or_else(|| self.model.clone()),
+            permission: override_.permission.or(self.permission),
+            additional_args: if override_.additional_args.is_empty() {
+                self.additional_args.clone()
+            } else {
+                override_.additional_args.clone()
+            },
+        }
+    }
+}
+
+/// Append `--<flag> <value>` to a shell-string, shell-escaping the value.
+pub(crate) fn append_flag(cmd: &mut String, flag: &str, value: &str) {
+    cmd.push(' ');
+    cmd.push_str(flag);
+    cmd.push(' ');
+    cmd.push_str(&shell_escape(value));
+}
+
+/// Append a verbatim tail of additional args, each shell-escaped.
+pub(crate) fn append_additional_args(cmd: &mut String, args: &[String]) {
+    for a in args {
+        cmd.push(' ');
+        cmd.push_str(&shell_escape(a));
+    }
+}
+
 /// SPEC §10.2.1: opaque session handle returned by `start_session` and threaded
 /// through every `run_turn` / `stop_session` call within one worker run.
 #[derive(Debug, Clone)]
@@ -70,9 +275,8 @@ pub struct SessionContext {
 #[derive(Debug, Clone)]
 pub struct CliConfig {
     pub command: String,
-    pub args: Vec<String>,
     pub env: HashMap<String, String>,
-    pub options: serde_json::Value,
+    pub options: CliOptions,
     /// SPEC §10.2.2: per-stdout-read stall timeout (default 5000 ms).
     pub read_timeout_ms: u64,
     /// SPEC §10.2.2: total wall-clock per turn (default 3600000 ms).
@@ -80,14 +284,28 @@ pub struct CliConfig {
 }
 
 impl CliConfig {
-    pub fn from_service(config: &ServiceConfig) -> Self {
-        Self {
+    pub fn from_service(config: &ServiceConfig) -> Result<Self, SympheoError> {
+        let raw_options = config.cli_options_raw();
+        let options = CliOptions::parse(&raw_options)?;
+        Ok(Self {
             command: config.cli_command(),
-            args: config.cli_args(),
             env: config.cli_env(),
-            options: config.cli_options(),
+            options,
             read_timeout_ms: config.cli_read_timeout_ms(),
             turn_timeout_ms: config.cli_turn_timeout_ms(),
+        })
+    }
+
+    /// Build a per-turn variant where the global `options` are overridden by
+    /// `phase_options` (shallow merge). Used by the orchestrator to project
+    /// `phases[<active>].cli.options` over the dispatch-time config.
+    pub fn with_effective_options(&self, phase_options: &CliOptions) -> Self {
+        Self {
+            command: self.command.clone(),
+            env: self.env.clone(),
+            options: self.options.merge_over(phase_options),
+            read_timeout_ms: self.read_timeout_ms,
+            turn_timeout_ms: self.turn_timeout_ms,
         }
     }
 }
@@ -102,26 +320,22 @@ pub trait CliAdapter: Send + Sync {
     fn kind(&self) -> &str;
     fn binary_names(&self) -> &[&'static str];
 
-    /// SPEC §10.1: static configuration check — no network calls.
-    fn validate(&self, cli_command: &str) -> Result<(), SympheoError>;
-
-    /// SPEC §10.6: keys the adapter recognizes inside `cli.options`. Anything
-    /// outside this set is forwarded for forward-compatibility but emits a
-    /// `tracing::warn!` from `start_session` so operators can detect typos.
-    fn known_option_keys(&self) -> &[&'static str] {
-        &[]
+    /// SPEC §10.1: static configuration check — no network calls. Default
+    /// implementation accepts any command whose leading binary token matches
+    /// one of `binary_names()`. Adapters that need bespoke validation
+    /// (subcommand checks, etc.) override.
+    fn validate(&self, cli_command: &str) -> Result<(), SympheoError> {
+        validate_command_binary(cli_command, self.binary_names())
     }
 
     /// SPEC §10.2.1: one-time setup per worker run. Default implementation
-    /// allocates a Sympheo-side session id and emits a warning for unknown
-    /// `cli.options` keys; adapters that need a CLI-managed identifier
-    /// (or stateful setup) override this.
+    /// allocates a Sympheo-side session id; adapters that need a CLI-managed
+    /// identifier (or stateful setup) override.
     async fn start_session(
         &self,
         _workspace_path: &Path,
-        cli_config: &CliConfig,
+        _cli_config: &CliConfig,
     ) -> Result<SessionContext, SympheoError> {
-        warn_unknown_options(self.kind(), self.known_option_keys(), &cli_config.options);
         let id = generate_session_id(self.kind());
         Ok(SessionContext {
             agent_session_handle: id.clone(),
@@ -145,7 +359,7 @@ pub trait CliAdapter: Send + Sync {
         cancelled: Arc<AtomicBool>,
         on_event: Sender<EmittedEvent>,
         executor: &dyn AgentBackend,
-        _cli_config: &CliConfig,
+        cli_config: &CliConfig,
         workspace_path: &Path,
     ) -> Result<TurnResult, SympheoError> {
         executor
@@ -156,6 +370,7 @@ pub trait CliAdapter: Send + Sync {
                 workspace_path,
                 cancelled,
                 on_event,
+                &cli_config.options,
             )
             .await
     }
@@ -168,13 +383,15 @@ pub trait CliAdapter: Send + Sync {
 
     /// SPEC §10.6: build the shell command `LocalBackend` will spawn for this
     /// adapter. Default produces the OpenCode-shaped invocation; CLIs with
-    /// different flag conventions (e.g. `claude --print`) override.
+    /// different flag conventions (e.g. `claude --print`, `pi --mode json`)
+    /// override.
     fn build_command_string(
         &self,
         cli_command: &str,
         prompt_path: &Path,
         workspace_path: &Path,
         session_id: Option<&str>,
+        cli_options: &CliOptions,
     ) -> String {
         let mut cmd = format!(
             r#"PROMPT=$(cat "{}"); {} "$PROMPT" --format json --dir "{}" --dangerously-skip-permissions"#,
@@ -182,9 +399,13 @@ pub trait CliAdapter: Send + Sync {
             cli_command,
             shell_escape(&workspace_path.to_string_lossy())
         );
-        if let Some(sid) = session_id {
-            cmd.push_str(&format!(" --session {}", shell_escape(sid)));
+        if let Some(model) = &cli_options.model {
+            append_flag(&mut cmd, "--model", model);
         }
+        if let Some(sid) = session_id.filter(|s| is_uuid(s)) {
+            append_flag(&mut cmd, "--session", sid);
+        }
+        append_additional_args(&mut cmd, &cli_options.additional_args);
         cmd
     }
 
@@ -199,28 +420,6 @@ pub trait CliAdapter: Send + Sync {
     /// OpenCode overrides this to escape lines that look like flags.
     fn sanitize_prompt(&self, prompt: &str) -> String {
         prompt.to_string()
-    }
-}
-
-/// SPEC §10.6: emit a `tracing::warn!` for each `cli.options` key the adapter
-/// does not recognize. Unknown keys are not a fatal error (forward
-/// compatibility) but operators need a signal to spot typos.
-pub fn warn_unknown_options(
-    adapter_kind: &str,
-    known_keys: &[&'static str],
-    options: &serde_json::Value,
-) {
-    let Some(map) = options.as_object() else {
-        return;
-    };
-    for key in map.keys() {
-        if !known_keys.contains(&key.as_str()) {
-            tracing::warn!(
-                adapter = %adapter_kind,
-                option = %key,
-                "unknown cli.options key (forwarded but not recognized; check for typos)"
-            );
-        }
     }
 }
 
@@ -319,16 +518,6 @@ mod tests {
     }
 
     #[test]
-    fn test_warn_unknown_options_does_not_panic_on_non_object() {
-        warn_unknown_options("opencode", &["model"], &serde_json::Value::Null);
-        warn_unknown_options(
-            "opencode",
-            &["model"],
-            &serde_json::Value::String("scalar".into()),
-        );
-    }
-
-    #[test]
     fn test_generate_session_id_starts_with_kind() {
         let id = generate_session_id("opencode");
         assert!(id.starts_with("opencode-"));
@@ -358,5 +547,153 @@ mod tests {
     #[test]
     fn test_shell_escape_combined() {
         assert_eq!(shell_escape("\\\"$`"), "\\\\\\\"\\$\\`");
+    }
+
+    #[test]
+    fn test_is_uuid() {
+        assert!(is_uuid("33595f82-f956-4338-854d-f6332a296842"));
+        assert!(is_uuid("00000000-0000-0000-0000-000000000000"));
+        assert!(!is_uuid(""));
+        assert!(!is_uuid("claude-1234-5678"));
+        assert!(!is_uuid("33595f82_f956_4338_854d_f6332a296842"));
+        assert!(!is_uuid("33595f82-f956-4338-854d-f6332a296842-extra"));
+        assert!(!is_uuid("zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz"));
+    }
+
+    #[test]
+    fn test_validate_command_binary_ok() {
+        assert!(validate_command_binary("opencode run", &["opencode"]).is_ok());
+        assert!(validate_command_binary("/usr/local/bin/opencode run", &["opencode"]).is_ok());
+    }
+
+    #[test]
+    fn test_validate_command_binary_empty() {
+        let err = validate_command_binary("", &["opencode"]).unwrap_err();
+        assert!(matches!(err, SympheoError::InvalidConfiguration(_)));
+    }
+
+    #[test]
+    fn test_validate_command_binary_wrong_bin() {
+        let err = validate_command_binary("foo run", &["opencode"]).unwrap_err();
+        assert!(matches!(err, SympheoError::CliAdapterNotFound(_)));
+    }
+
+    #[test]
+    fn test_permission_roundtrip() {
+        for p in [
+            Permission::Plan,
+            Permission::AcceptEdits,
+            Permission::BypassPermissions,
+            Permission::Default,
+        ] {
+            assert_eq!(Permission::parse(p.as_str()), Some(p));
+        }
+        assert_eq!(Permission::parse("bogus"), None);
+    }
+
+    #[test]
+    fn test_cli_options_empty() {
+        let opts = CliOptions::parse(&serde_json::Value::Null).unwrap();
+        assert!(opts.model.is_none());
+        assert!(opts.permission.is_none());
+        assert!(opts.additional_args.is_empty());
+    }
+
+    #[test]
+    fn test_cli_options_parse_typed() {
+        let v = serde_json::json!({
+            "model": "sonnet",
+            "permission": "plan",
+            "additional_args": ["--verbose", "--debug"]
+        });
+        let opts = CliOptions::parse(&v).unwrap();
+        assert_eq!(opts.model.as_deref(), Some("sonnet"));
+        assert_eq!(opts.permission, Some(Permission::Plan));
+        assert_eq!(opts.additional_args, vec!["--verbose", "--debug"]);
+    }
+
+    #[test]
+    fn test_cli_options_rejects_legacy_permission_mode() {
+        let v = serde_json::json!({ "permission_mode": "plan" });
+        let err = CliOptions::parse(&v).unwrap_err();
+        assert!(
+            matches!(err, SympheoError::InvalidConfiguration(s) if s.contains("permission_mode") && s.contains("renamed"))
+        );
+    }
+
+    #[test]
+    fn test_cli_options_rejects_legacy_permissions_plural() {
+        let v = serde_json::json!({ "permissions": { "edit": true } });
+        let err = CliOptions::parse(&v).unwrap_err();
+        assert!(
+            matches!(err, SympheoError::InvalidConfiguration(s) if s.contains("permissions") && s.contains("singular"))
+        );
+    }
+
+    #[test]
+    fn test_cli_options_rejects_legacy_mcp_servers() {
+        let v = serde_json::json!({ "mcp_servers": {} });
+        let err = CliOptions::parse(&v).unwrap_err();
+        assert!(matches!(err, SympheoError::InvalidConfiguration(s) if s.contains("mcp_servers")));
+    }
+
+    #[test]
+    fn test_cli_options_rejects_invalid_permission_value() {
+        let v = serde_json::json!({ "permission": "yolo" });
+        let err = CliOptions::parse(&v).unwrap_err();
+        assert!(
+            matches!(err, SympheoError::InvalidConfiguration(s) if s.contains("invalid value 'yolo'"))
+        );
+    }
+
+    #[test]
+    fn test_cli_options_rejects_non_array_additional_args() {
+        let v = serde_json::json!({ "additional_args": "single" });
+        let err = CliOptions::parse(&v).unwrap_err();
+        assert!(
+            matches!(err, SympheoError::InvalidConfiguration(s) if s.contains("additional_args"))
+        );
+    }
+
+    #[test]
+    fn test_cli_options_ignores_unknown_keys() {
+        // mock's `script` lives outside the typed triplet — the parser must
+        // not error on extras.
+        let v = serde_json::json!({ "script": "fixtures/run.yaml" });
+        let opts = CliOptions::parse(&v).unwrap();
+        assert!(opts.model.is_none());
+        assert!(opts.permission.is_none());
+        assert!(opts.additional_args.is_empty());
+    }
+
+    #[test]
+    fn test_cli_options_merge_override_wins() {
+        let base = CliOptions {
+            model: Some("sonnet".into()),
+            permission: Some(Permission::Plan),
+            additional_args: vec!["--global".into()],
+        };
+        let over = CliOptions {
+            model: Some("haiku".into()),
+            permission: None,
+            additional_args: vec!["--phase".into()],
+        };
+        let merged = base.merge_over(&over);
+        assert_eq!(merged.model.as_deref(), Some("haiku"));
+        assert_eq!(merged.permission, Some(Permission::Plan));
+        assert_eq!(merged.additional_args, vec!["--phase"]);
+    }
+
+    #[test]
+    fn test_cli_options_merge_empty_override_keeps_base() {
+        let base = CliOptions {
+            model: Some("sonnet".into()),
+            permission: Some(Permission::Plan),
+            additional_args: vec!["--a".into(), "--b".into()],
+        };
+        let merged = base.merge_over(&CliOptions::default());
+        assert_eq!(merged.model.as_deref(), Some("sonnet"));
+        assert_eq!(merged.permission, Some(Permission::Plan));
+        assert_eq!(merged.additional_args, vec!["--a", "--b"]);
     }
 }

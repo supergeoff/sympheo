@@ -9,22 +9,18 @@
 //! [`crate::agent::cli::SessionContext`] / `LocalBackend::run_turn`'s
 //! `session_id` parameter.
 
-use crate::agent::cli::{CliAdapter, shell_escape};
+use crate::agent::cli::{
+    CliAdapter, CliOptions, append_additional_args, append_flag, is_uuid, shell_escape,
+};
 use crate::agent::parser::{
     AgentEvent, StepFinishPart, StepStartPart, TextPart, TextTime, TokenInfo,
 };
-use crate::error::SympheoError;
 use async_trait::async_trait;
 use std::path::Path;
 
 /// Tested Claude CLI version range (advisory; not enforced at runtime).
 /// SPEC §10.6 RECOMMENDED: adapters MUST document the CLI version range they support.
 pub const SUPPORTED_CLAUDE_VERSION_RANGE: &str = ">=0.1";
-
-/// SPEC §10.6: keys the Claude adapter recognizes inside `cli.options`. Any
-/// other key is forwarded for forward-compatibility and logged as a warning
-/// from `start_session`.
-pub const CLAUDE_KNOWN_OPTION_KEYS: &[&str] = &["model", "permission_mode", "additional_args"];
 
 pub struct ClaudeAdapter;
 
@@ -50,33 +46,13 @@ impl CliAdapter for ClaudeAdapter {
         &["claude"]
     }
 
-    fn known_option_keys(&self) -> &[&'static str] {
-        CLAUDE_KNOWN_OPTION_KEYS
-    }
-
-    fn validate(&self, cli_command: &str) -> Result<(), SympheoError> {
-        if cli_command.trim().is_empty() {
-            return Err(SympheoError::InvalidConfiguration(
-                "cli.command is empty".into(),
-            ));
-        }
-        let leading = cli_command.split_whitespace().next().unwrap_or("");
-        let bin = std::path::Path::new(leading)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or(leading);
-        if bin != "claude" {
-            return Err(SympheoError::CliAdapterNotFound(cli_command.to_string()));
-        }
-        Ok(())
-    }
-
     fn build_command_string(
         &self,
         cli_command: &str,
         prompt_path: &Path,
         workspace_path: &Path,
         session_id: Option<&str>,
+        cli_options: &CliOptions,
     ) -> String {
         // Claude requires `--verbose` whenever `--output-format=stream-json`
         // is used together with `--print`. `--add-dir` widens the workspace
@@ -87,6 +63,12 @@ impl CliAdapter for ClaudeAdapter {
             cli_command,
             shell_escape(&workspace_path.to_string_lossy()),
         );
+        if let Some(model) = &cli_options.model {
+            append_flag(&mut cmd, "--model", model);
+        }
+        if let Some(permission) = cli_options.permission {
+            append_flag(&mut cmd, "--permission-mode", permission.as_str());
+        }
         // `claude --print --resume <id>` requires the id to be a UUID (or a
         // session title that already exists). Sympheo's default
         // `start_session` allocates a synthetic identifier of the shape
@@ -97,8 +79,9 @@ impl CliAdapter for ClaudeAdapter {
         // caller provides a value that already looks like a UUID. First turn
         // (no continuation) always omits the flag.
         if let Some(sid) = session_id.filter(|s| is_uuid(s)) {
-            cmd.push_str(&format!(" --resume {}", shell_escape(sid)));
+            append_flag(&mut cmd, "--resume", sid);
         }
+        append_additional_args(&mut cmd, &cli_options.additional_args);
         cmd
     }
 
@@ -201,35 +184,11 @@ impl CliAdapter for ClaudeAdapter {
     }
 }
 
-/// Tightly-scoped UUID-shape check (8-4-4-4-12 hex). The claude CLI rejects
-/// `--resume` values that are neither a valid UUID nor a saved session title;
-/// rather than parse the full RFC, we accept the canonical 36-char hyphenated
-/// form which is what claude emits in its `system.init` event.
-fn is_uuid(s: &str) -> bool {
-    let bytes = s.as_bytes();
-    if bytes.len() != 36 {
-        return false;
-    }
-    for (i, &b) in bytes.iter().enumerate() {
-        match i {
-            8 | 13 | 18 | 23 => {
-                if b != b'-' {
-                    return false;
-                }
-            }
-            _ => {
-                if !b.is_ascii_hexdigit() {
-                    return false;
-                }
-            }
-        }
-    }
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::cli::Permission;
+    use crate::error::SympheoError;
 
     #[test]
     fn test_kind_and_names() {
@@ -261,20 +220,11 @@ mod tests {
     }
 
     #[test]
-    fn test_known_option_keys_documented() {
-        let a = ClaudeAdapter::new();
-        let keys = a.known_option_keys();
-        assert!(keys.contains(&"model"));
-        assert!(keys.contains(&"permission_mode"));
-        assert!(keys.contains(&"additional_args"));
-    }
-
-    #[test]
     fn test_build_command_string_first_turn() {
         let a = ClaudeAdapter::new();
         let prompt = Path::new("/ws/.sympheo_prompt.txt");
         let ws = Path::new("/ws");
-        let cmd = a.build_command_string("claude", prompt, ws, None);
+        let cmd = a.build_command_string("claude", prompt, ws, None, &CliOptions::default());
         assert!(cmd.contains("claude --print"));
         assert!(cmd.contains("--output-format stream-json"));
         assert!(cmd.contains("--verbose"));
@@ -284,6 +234,8 @@ mod tests {
             !cmd.contains("--resume"),
             "first turn must not include --resume"
         );
+        assert!(!cmd.contains("--model"));
+        assert!(!cmd.contains("--permission-mode"));
     }
 
     #[test]
@@ -292,7 +244,7 @@ mod tests {
         let prompt = Path::new("/ws/.sympheo_prompt.txt");
         let ws = Path::new("/ws");
         let uuid = "33595f82-f956-4338-854d-f6332a296842";
-        let cmd = a.build_command_string("claude", prompt, ws, Some(uuid));
+        let cmd = a.build_command_string("claude", prompt, ws, Some(uuid), &CliOptions::default());
         assert!(cmd.contains(&format!("--resume {uuid}")));
     }
 
@@ -303,7 +255,13 @@ mod tests {
         let a = ClaudeAdapter::new();
         let prompt = Path::new("/ws/.sympheo_prompt.txt");
         let ws = Path::new("/ws");
-        let cmd = a.build_command_string("claude", prompt, ws, Some("claude-1234-5678"));
+        let cmd = a.build_command_string(
+            "claude",
+            prompt,
+            ws,
+            Some("claude-1234-5678"),
+            &CliOptions::default(),
+        );
         assert!(
             !cmd.contains("--resume"),
             "non-UUID handle must not produce --resume; cmd={cmd}"
@@ -311,14 +269,42 @@ mod tests {
     }
 
     #[test]
-    fn test_is_uuid() {
-        assert!(is_uuid("33595f82-f956-4338-854d-f6332a296842"));
-        assert!(is_uuid("00000000-0000-0000-0000-000000000000"));
-        assert!(!is_uuid(""));
-        assert!(!is_uuid("claude-1234-5678"));
-        assert!(!is_uuid("33595f82_f956_4338_854d_f6332a296842"));
-        assert!(!is_uuid("33595f82-f956-4338-854d-f6332a296842-extra"));
-        assert!(!is_uuid("zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz"));
+    fn test_build_command_string_splices_model_and_permission() {
+        let a = ClaudeAdapter::new();
+        let prompt = Path::new("/ws/.sympheo_prompt.txt");
+        let ws = Path::new("/ws");
+        let opts = CliOptions {
+            model: Some("sonnet".into()),
+            permission: Some(Permission::Plan),
+            additional_args: vec!["--debug".into()],
+        };
+        let cmd = a.build_command_string("claude", prompt, ws, None, &opts);
+        assert!(cmd.contains("--model sonnet"));
+        assert!(cmd.contains("--permission-mode plan"));
+        assert!(cmd.contains("--debug"));
+    }
+
+    #[test]
+    fn test_build_command_string_permission_variants() {
+        let a = ClaudeAdapter::new();
+        let prompt = Path::new("/ws/.sympheo_prompt.txt");
+        let ws = Path::new("/ws");
+        for (p, expected) in [
+            (Permission::Plan, "plan"),
+            (Permission::AcceptEdits, "acceptEdits"),
+            (Permission::BypassPermissions, "bypassPermissions"),
+            (Permission::Default, "default"),
+        ] {
+            let opts = CliOptions {
+                permission: Some(p),
+                ..Default::default()
+            };
+            let cmd = a.build_command_string("claude", prompt, ws, None, &opts);
+            assert!(
+                cmd.contains(&format!("--permission-mode {expected}")),
+                "missing --permission-mode {expected} in: {cmd}"
+            );
+        }
     }
 
     #[test]

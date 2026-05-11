@@ -1,6 +1,6 @@
 use crate::agent::backend::AgentBackend;
 use crate::agent::backend::{local::LocalBackend, mock::MockBackend};
-use crate::agent::cli::{CliAdapter, CliConfig, SessionContext, select_adapter};
+use crate::agent::cli::{CliAdapter, CliConfig, CliOptions, SessionContext, select_adapter};
 use crate::agent::parser::{EmittedEvent, TurnResult};
 use crate::config::typed::ServiceConfig;
 use crate::error::SympheoError;
@@ -18,7 +18,7 @@ pub struct AgentRunner {
 
 impl AgentRunner {
     pub fn new(config: &ServiceConfig) -> Result<Self, SympheoError> {
-        let cli_config = CliConfig::from_service(config);
+        let cli_config = CliConfig::from_service(config)?;
         let adapter = select_adapter(&cli_config.command)?;
         let leading = cli_config
             .command
@@ -66,6 +66,12 @@ impl AgentRunner {
     }
 
     /// SPEC §10.2.2: one CLI subprocess invocation for one turn.
+    ///
+    /// `phase_options` is the per-phase override map looked up from
+    /// `phases[<active>].cli.options` and shallow-merged over the global
+    /// `cli.options` at dispatch time. Pass `None` when no phase is active
+    /// (continuation turn outside a phased workflow) — the global options
+    /// apply verbatim.
     #[allow(clippy::too_many_arguments)] // Reason: forwards verbatim to `CliAdapter::run_turn`, whose arity is fixed by SPEC §10.2.2; refactoring here would only diverge the two signatures.
     pub async fn run_turn(
         &self,
@@ -76,7 +82,12 @@ impl AgentRunner {
         workspace_path: &Path,
         cancelled: Arc<AtomicBool>,
         event_tx: Sender<EmittedEvent>,
+        phase_options: Option<&CliOptions>,
     ) -> Result<TurnResult, SympheoError> {
+        let effective_cli_config = match phase_options {
+            Some(po) => self.cli_config.with_effective_options(po),
+            None => self.cli_config.clone(),
+        };
         self.adapter
             .run_turn(
                 session,
@@ -86,7 +97,7 @@ impl AgentRunner {
                 cancelled,
                 event_tx,
                 self.backend.as_ref(),
-                &self.cli_config,
+                &effective_cli_config,
                 workspace_path,
             )
             .await

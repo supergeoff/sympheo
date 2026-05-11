@@ -575,6 +575,7 @@ async fn test_orchestrator_tick_reconcile_terminal() {
     });
     let orch = Orchestrator::new(config, tracker, None).unwrap();
 
+    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     {
         let mut state = orch.state.write().await;
         state.running.insert(
@@ -585,7 +586,7 @@ async fn test_orchestrator_tick_reconcile_terminal() {
                 started_at: chrono::Utc::now(),
                 retry_attempt: None,
                 turn_count: 0,
-                cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                cancelled: cancelled.clone(),
                 stagnation_counter: 0,
                 last_state_change_at: chrono::Utc::now(),
             },
@@ -595,9 +596,15 @@ async fn test_orchestrator_tick_reconcile_terminal() {
 
     orch.tick().await;
 
+    // Reconcile-terminal now only signals the worker via `cancelled` — the
+    // spawn-task wrapper around `run_worker` is the single owner of removing
+    // the entry from `running`/`claimed` and tearing the workspace down. The
+    // entry stays in place until the wrapper fires; in this test there is no
+    // real worker, so the entry remains and only `cancelled` is asserted.
+    assert!(cancelled.load(std::sync::atomic::Ordering::Relaxed));
     let state = orch.state.read().await;
-    assert!(!state.running.contains_key("1"));
-    assert!(!state.claimed.contains("1"));
+    assert!(state.running.contains_key("1"));
+    assert!(state.claimed.contains("1"));
 }
 
 #[tokio::test]

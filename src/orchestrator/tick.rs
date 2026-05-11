@@ -289,7 +289,9 @@ impl Orchestrator {
             //     terminal, `before_remove` fires last (after `after_run`)
             //     and the workspace is gone afterwards.
             let workspace_path = workspace_manager.workspace_path(&issue.identifier);
-            if workspace_path.exists() && let Some(script) = cfg.hook_script("after_run") {
+            if workspace_path.exists()
+                && let Some(script) = cfg.hook_script("after_run")
+            {
                 let mut env = crate::workspace::manager::sympheo_hook_env(
                     &issue.identifier,
                     &issue.id,

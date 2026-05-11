@@ -71,6 +71,80 @@ Generate Workflow Md For Mock
     ...    ${EMPTY}
     Create File    ${workflow_dir}/WORKFLOW.md    ${content}
 
+Generate Hook Recorder Script
+    [Arguments]    ${workflow_dir}    ${evidence_dir}
+    [Documentation]    Writes ``hook.sh`` once: it takes the hook name as ``$1`` and dumps the
+    ...                SYMPHEO_* env vars seen + ``pwd`` into ``${evidence_dir}/$1.env``. The
+    ...                YAML hook bodies just call ``bash <path> <name>`` — keeps the WORKFLOW.md
+    ...                free of multi-line shell content that Robot would have to escape twice.
+    ${recorder}=    Catenate    SEPARATOR=\n
+    ...    #!/usr/bin/env bash
+    ...    set -euo pipefail
+    ...    hook="$\{1:?hook name required}"
+    ...    mkdir -p "${evidence_dir}"
+    ...    {
+    ...    \ \ echo "HOOK=$\{hook}"
+    ...    \ \ echo "SYMPHEO_ISSUE_IDENTIFIER=$\{SYMPHEO_ISSUE_IDENTIFIER:-}"
+    ...    \ \ echo "SYMPHEO_ISSUE_ID=$\{SYMPHEO_ISSUE_ID:-}"
+    ...    \ \ echo "SYMPHEO_WORKSPACE_PATH=$\{SYMPHEO_WORKSPACE_PATH:-}"
+    ...    \ \ echo "SYMPHEO_PHASE_NAME=$\{SYMPHEO_PHASE_NAME:-}"
+    ...    \ \ echo "CWD=$(pwd)"
+    ...    } > "${evidence_dir}/$\{hook}.env"
+    ...    ${EMPTY}
+    Create File    ${workflow_dir}/hook.sh    ${recorder}
+    Run Process    chmod    +x    ${workflow_dir}/hook.sh
+
+Generate Workflow Md For Hooks
+    [Arguments]    ${workflow_dir}    ${owner}    ${repo_name}    ${project_number}    ${evidence_dir}    ${poll_ms}=2000
+    [Documentation]    Mock-backed workflow that wires all four lifecycle hooks to a single
+    ...                recorder script (one ``${hook_name}.env`` proof per hook in
+    ...                ``${evidence_dir}``). The workflow deliberately OMITS
+    ...                ``workspace.repo_url`` so the daemon falls back to ``after_create``
+    ...                instead of cloning — that is the only path on which that hook fires.
+    Generate Mock Script    ${workflow_dir}
+    Generate Hook Recorder Script    ${workflow_dir}    ${evidence_dir}
+    ${slug}=    Set Variable    ${owner}/${repo_name}
+    ${ws}=    Set Variable    ${workflow_dir}/workspace
+    ${recorder}=    Set Variable    ${workflow_dir}/hook.sh
+    ${content}=    Catenate    SEPARATOR=\n
+    ...    ---
+    ...    tracker:
+    ...    \ \ kind: github
+    ...    \ \ api_key: $GITHUB_TOKEN
+    ...    \ \ project_slug: ${slug}
+    ...    \ \ project_number: ${project_number}
+    ...    \ \ active_states: [In Progress]
+    ...    \ \ terminal_states: [Done, Canceled]
+    ...    cli:
+    ...    \ \ command: mock-cli
+    ...    \ \ options:
+    ...    \ \ \ \ script: ${workflow_dir}/script.yaml
+    ...    \ \ turn_timeout_ms: 30000
+    ...    \ \ stall_timeout_ms: 15000
+    ...    workspace:
+    ...    \ \ root: ${ws}
+    ...    polling:
+    ...    \ \ interval_ms: ${poll_ms}
+    ...    agent:
+    ...    \ \ max_concurrent_agents: 1
+    ...    \ \ max_turns: 1
+    ...    \ \ max_retry_attempts: 0
+    ...    hooks:
+    ...    \ \ timeout_ms: 15000
+    ...    \ \ after_create: bash ${recorder} after_create
+    ...    \ \ before_run: bash ${recorder} before_run
+    ...    \ \ after_run: bash ${recorder} after_run
+    ...    \ \ before_remove: bash ${recorder} before_remove
+    ...    phases:
+    ...    \ \ - name: build
+    ...    \ \ \ \ state: In Progress
+    ...    \ \ \ \ prompt: "Hooks e2e mock phase for {{issue.identifier}}"
+    ...    \ \ \ \ verifications: []
+    ...    ---
+    ...    Hooks e2e — issue {{issue.identifier}}.
+    ...    ${EMPTY}
+    Create File    ${workflow_dir}/WORKFLOW.md    ${content}
+
 Generate Workflow Md For Claude Spec Phase
     [Arguments]    ${workflow_dir}    ${repo_url}    ${owner}    ${repo_name}    ${project_number}
     ...    ${project_id}    ${status_field_id}    ${in_progress_option_id}

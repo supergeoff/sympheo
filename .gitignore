@@ -25,6 +25,9 @@ log/
 # Workspaces (runtime data)
 sympheo_workspaces/
 
+# e2e test artifacts (markers, harness scratch) — must never reach main
+e2e-marker-*.txt
+
 # Coverage
 lcov.info
 *.profraw

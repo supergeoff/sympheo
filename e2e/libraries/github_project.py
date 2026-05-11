@@ -382,3 +382,200 @@ def get_remote_branches(owner: str, repo_name: str) -> list[str]:
         "--paginate", "--jq", ".[].name",
     ])
     return [line.strip() for line in raw.splitlines() if line.strip()]
+
+
+@keyword
+def list_stale_e2e_prs(owner: str, repo_name: str) -> list:
+    """Return open PRs whose title contains ``[e2e-test]`` — leftover claude-driven runs.
+
+    Each entry is ``{number, head_ref, title}``. Used to close + delete-branch
+    stragglers before the next suite starts.
+    """
+    rc, out, err = _run_no_check([
+        "gh", "pr", "list",
+        "--repo", f"{owner}/{repo_name}",
+        "--state", "open",
+        "--search", ISSUE_TITLE_PREFIX,
+        "--json", "number,title,headRefName",
+        "--limit", "200",
+    ])
+    if rc != 0:
+        logger.warn(f"failed to list stale e2e PRs: {err.strip()}")
+        return []
+    out_list = []
+    for pr in json.loads(out):
+        title = pr.get("title", "")
+        if ISSUE_TITLE_PREFIX in title:
+            out_list.append({
+                "number": pr["number"],
+                "head_ref": pr.get("headRefName", ""),
+                "title": title,
+            })
+    return out_list
+
+
+@keyword
+def list_stale_e2e_issues(owner: str, repo_name: str) -> list:
+    """Return open issues whose title starts with ``[e2e-test]`` — leftovers from prior runs.
+
+    Each entry is ``{number, node_id, title}``. Used by ``Cleanup Stale E2E Issues``
+    to wipe state before the suite provisions its own ticket.
+    """
+    rc, out, err = _run_no_check([
+        "gh", "issue", "list",
+        "--repo", f"{owner}/{repo_name}",
+        "--state", "open",
+        "--search", ISSUE_TITLE_PREFIX,
+        "--json", "number,id,title",
+        "--limit", "200",
+    ])
+    if rc != 0:
+        logger.warn(f"failed to list stale e2e issues: {err.strip()}")
+        return []
+    issues = []
+    for it in json.loads(out):
+        title = it.get("title", "")
+        if title.startswith(ISSUE_TITLE_PREFIX):
+            issues.append({
+                "number": it["number"],
+                "node_id": it["id"],
+                "title": title,
+            })
+    return issues
+
+
+# ---- Project status metadata (for prompt injection) ------------------------
+
+@keyword
+def get_project_status_metadata(owner: str, project_number: int) -> dict:
+    """Return ``{project_id, status_field_id, options: {name_lower: option_id}}``.
+
+    Used to bake the ids the agent needs into the WORKFLOW.md phase prompt
+    (so claude can call ``gh project item-edit`` with literal arguments
+    instead of having to query the field-list itself).
+    """
+    project_id, field_id, options = _cached_project_status(owner, int(project_number))
+    return {
+        "project_id": project_id,
+        "status_field_id": field_id,
+        "options": options,
+    }
+
+
+# ---- Issue body / state inspection -----------------------------------------
+
+@keyword
+def get_issue_body(owner: str, repo_name: str, issue_number: int) -> str:
+    """Return the current body of the issue (empty string if absent)."""
+    rc, out, err = _run_no_check([
+        "gh", "api", f"/repos/{owner}/{repo_name}/issues/{issue_number}",
+        "--jq", ".body // \"\"",
+    ])
+    if rc != 0:
+        raise AssertionError(f"failed to read issue #{issue_number} body: {err.strip()}")
+    return out.strip()
+
+
+@keyword
+def get_project_item_status(
+    owner: str, project_number: int, item_id: str
+) -> str:
+    """Return the current Status option name for the project item, or '' if unknown."""
+    rc, out, err = _run_no_check([
+        "gh", "project", "item-list",
+        str(project_number), "--owner", owner,
+        "--format", "json", "--limit", "200",
+    ])
+    if rc != 0:
+        raise AssertionError(f"failed to list project items: {err.strip()}")
+    items = json.loads(out).get("items", [])
+    for it in items:
+        if it.get("id") == item_id:
+            return (it.get("status") or "").strip()
+    return ""
+
+
+# ---- PR-aware cleanup ------------------------------------------------------
+
+@keyword
+def find_open_pr_for_issue(
+    owner: str, repo_name: str, issue_number: int, head_prefix: str = ""
+) -> dict:
+    """Locate an open PR that references ``issue_number`` in its head branch, body, or title.
+
+    Returns ``{number, node_id, head_ref, url}`` or an empty dict if nothing
+    matches. ``head_prefix`` is an optional additional filter; when empty
+    (the default) any head branch is accepted as long as the PR references
+    the issue. Claude does not always honour the orchestrator-pushed branch
+    name, so the filter has to stay lax.
+    """
+    rc, out, err = _run_no_check([
+        "gh", "pr", "list",
+        "--repo", f"{owner}/{repo_name}",
+        "--state", "open",
+        "--limit", "200",
+        "--json", "number,title,body,headRefName,url,id",
+    ])
+    if rc != 0:
+        raise AssertionError(f"gh pr list failed: {err.strip()}")
+    issue_token = str(issue_number)
+    needles = (f"#{issue_token}", f"closes #{issue_token}", f"Closes #{issue_token}")
+    for pr in json.loads(out):
+        head = (pr.get("headRefName") or "").strip()
+        if head_prefix and not head.startswith(head_prefix):
+            continue
+        title = pr.get("title") or ""
+        body = pr.get("body") or ""
+        if (
+            issue_token in head
+            or any(n in body for n in needles)
+            or any(n in title for n in needles)
+        ):
+            return {
+                "number": pr.get("number"),
+                "node_id": pr.get("id"),
+                "head_ref": head,
+                "url": pr.get("url"),
+            }
+    return {}
+
+
+@keyword
+def assert_safe_to_close_pr(
+    owner: str, repo_name: str, pr_number: int, expected_head_prefix: str = BRANCH_PREFIX
+) -> None:
+    """Refuse to touch a PR whose head branch does not start with ``sympheo/``."""
+    rc, out, err = _run_no_check([
+        "gh", "pr", "view", str(pr_number),
+        "--repo", f"{owner}/{repo_name}",
+        "--json", "headRefName,state,title",
+    ])
+    if rc != 0:
+        raise AssertionError(f"gh pr view #{pr_number} failed: {err.strip()}")
+    data = json.loads(out)
+    head = (data.get("headRefName") or "").strip()
+    if not head.startswith(expected_head_prefix):
+        raise AssertionError(
+            f"safety: PR #{pr_number} head={head!r} does not start with "
+            f"{expected_head_prefix!r}; refusing to close"
+        )
+    state = (data.get("state") or "").upper()
+    if state not in ("OPEN", "DRAFT"):
+        logger.info(f"PR #{pr_number} already in state {state}; nothing to close")
+
+
+@keyword
+def close_pr(owner: str, repo_name: str, pr_number: int) -> None:
+    """Close a PR. Does not delete its branch — that is a separate step."""
+    rc, _out, err = _run_no_check([
+        "gh", "pr", "close", str(pr_number),
+        "--repo", f"{owner}/{repo_name}",
+        "--delete-branch",
+    ])
+    if rc != 0:
+        if "already closed" in err.lower() or "Not Found" in err:
+            logger.info(f"PR #{pr_number} already closed or absent")
+            return
+        logger.warn(f"failed to close PR #{pr_number}: {err.strip()}")
+        return
+    logger.info(f"closed PR #{pr_number} and deleted its branch")

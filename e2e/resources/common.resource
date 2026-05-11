@@ -20,3 +20,8 @@ ${KEEP_ON_FAILURE}   0
 # Binary path — relative to the e2e/ root (where ``robot -A robot.args`` runs).
 # ``${EXECDIR}`` is the directory robot was launched from.
 ${SYMPHEO_BIN}       ${EXECDIR}/../target/release/sympheo
+
+# Source of the OAuth credentials file copied into a staged HOME so claude
+# can authenticate inside the sympheo-isolated workspace. Override only if
+# the install stores them elsewhere.
+${HOST_CLAUDE_CREDENTIALS}    %{HOME}/.claude/.credentials.json

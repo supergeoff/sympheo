@@ -100,13 +100,32 @@ impl WorkspaceManager {
         };
 
         if created_now {
+            tracing::info!(
+                workspace = %path.display(),
+                has_adapter = self.git_adapter.is_some(),
+                has_repo_url = self.repo_url.is_some(),
+                "workspace created; deciding between git clone vs after_create hook"
+            );
             if let (Some(adapter), Some(url)) = (&self.git_adapter, &self.repo_url) {
+                tracing::info!(workspace = %path.display(), repo_url = %url, "cloning repo");
                 crate::git::GitAdapter::clone(&**adapter, url, &path)
                     .await
                     .map_err(|e| SympheoError::WorkspaceError(format!("git clone failed: {e}")))?;
+                tracing::info!(workspace = %path.display(), "clone complete");
             } else if let Some(script) = after_create_hook {
+                tracing::info!(
+                    workspace = %path.display(),
+                    "no git_adapter/repo_url; running after_create hook"
+                );
                 let env = sympheo_hook_env(identifier, issue_id, &path);
                 self.run_hook("after_create", script, &path, &env).await?;
+            } else {
+                tracing::warn!(
+                    workspace = %path.display(),
+                    has_adapter = self.git_adapter.is_some(),
+                    has_repo_url = self.repo_url.is_some(),
+                    "workspace created but no clone path and no after_create hook ran"
+                );
             }
         }
 

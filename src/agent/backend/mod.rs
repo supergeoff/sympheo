@@ -1,6 +1,7 @@
 pub mod local;
 pub mod mock;
 
+use crate::agent::cli::CliOptions;
 use crate::agent::parser::{EmittedEvent, TurnResult};
 use crate::error::SympheoError;
 use crate::tracker::model::Issue;
@@ -32,6 +33,7 @@ pub trait AgentBackend: Send + Sync {
     /// of waiting for the turn to finish. The sender is consumed by
     /// ownership: when this function returns, all clones must have been
     /// dropped so the consumer task can drain and exit.
+    #[allow(clippy::too_many_arguments)] // Reason: SPEC §10.2.2 mandates the exact arity; bundling into a struct would add indirection without changing the contract.
     async fn run_turn(
         &self,
         issue: &Issue,
@@ -40,6 +42,7 @@ pub trait AgentBackend: Send + Sync {
         workspace_path: &Path,
         cancelled: Arc<AtomicBool>,
         event_tx: Sender<EmittedEvent>,
+        cli_options: &CliOptions,
     ) -> Result<TurnResult, SympheoError>;
 
     async fn cleanup_workspace(&self, _workspace_path: &Path) -> Result<(), SympheoError> {

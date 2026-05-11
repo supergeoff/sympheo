@@ -297,7 +297,9 @@ impl Orchestrator {
                     &issue.id,
                     &workspace_path,
                 );
-                if let Some(ph) = cfg.workflow_spec().phase_for_state(&issue.state) {
+                if let Ok(spec) = cfg.workflow_spec()
+                    && let Some(ph) = spec.phase_for_state(&issue.state)
+                {
                     env.insert("SYMPHEO_PHASE_NAME".into(), ph.name.clone());
                 }
                 if let Err(e) = workspace_manager
@@ -686,7 +688,7 @@ async fn run_worker(
             &issue.id,
             &workspace.path,
         );
-        if let Some(ph) = config.workflow_spec().phase_for_state(&issue.state) {
+        if let Some(ph) = config.workflow_spec()?.phase_for_state(&issue.state) {
             env.insert("SYMPHEO_PHASE_NAME".into(), ph.name.clone());
         }
         workspace_manager
@@ -742,7 +744,7 @@ async fn run_worker(
         // PRD-v2 §4.1 — phase is selected from the tracker state every turn,
         // so a hot-reloaded WORKFLOW.md picks up the new phase fragment on
         // the very next dispatch cycle without restarting in-flight workers.
-        let workflow_spec = config.workflow_spec();
+        let workflow_spec = config.workflow_spec()?;
         let phase = workflow_spec.phase_for_state(&issue.state);
 
         let prompt = if turn_number == 1 {
@@ -779,6 +781,10 @@ async fn run_worker(
         });
 
         attempt_record.transition(AttemptStatus::StreamingTurn);
+        // SPEC §10.6: thread the per-phase `cli.options` override (looked up
+        // from the same `WorkflowSpec` we used to pick `phase.prompt`) so the
+        // adapter sees the merged effective options for this turn.
+        let phase_options = phase.map(|p| &p.cli_options);
         let turn_result = match runner
             .run_turn(
                 &session_ctx,
@@ -788,6 +794,7 @@ async fn run_worker(
                 &workspace.path,
                 cancelled.clone(),
                 event_tx,
+                phase_options,
             )
             .await
         {
@@ -1355,7 +1362,7 @@ mod tests {
             state: "In Progress".into(),
             prompt: "Implement the LLD then move to Review.".into(),
             verifications: vec![],
-            cli_options: serde_json::Map::new(),
+            cli_options: crate::agent::cli::CliOptions::default(),
         };
         let prompt = build_prompt_strict(&config, &issue, None, Some(&phase)).unwrap();
         assert!(prompt.contains("Issue: bug"));

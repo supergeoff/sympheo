@@ -197,37 +197,41 @@ agent:
 
 # ── cli ─────────────────────────────────────────────────────────────────
 # How Sympheo invokes the coding-agent CLI. The leading binary token of
-# `command` selects the adapter at boot. Four adapters are wired up
-# today:
+# `command` selects the adapter at boot. Four adapters are wired up:
 #
-#   binary    | known cli.options keys
-#   ----------+-----------------------------------
-#   opencode  | model · permissions · mcp_servers
-#   claude    | model · permission_mode · additional_args
-#   mock-cli  | script
-#   pi        | (stub — selection only, not runnable)
+#   binary    | cli.options
+#   ----------+----------------------------------------------------------
+#   opencode  | model, additional_args (permission has no native flag)
+#   claude    | model, permission, additional_args
+#   pi        | model, additional_args (permission has no native flag)
+#   mock-cli  | script (adapter-specific; not in the shared triplet)
 #
-# Unknown option keys are forwarded verbatim and logged as a warning at
-# session start, so adapters stay forward-compatible.
+# `cli.options` is a typed triplet shared by every production adapter:
+#   • model            — string, mapped to the adapter's `--model` flag
+#   • permission       — one of plan|acceptEdits|bypassPermissions|default
+#                        (claude maps to `--permission-mode`; opencode and
+#                        pi have no native equivalent and log a warn)
+#   • additional_args  — string[], appended verbatim (shell-escaped per
+#                        token, with `$VAR` resolution)
+#
+# Unknown keys are silently ignored by the typed view (mock reads its
+# `script` extra this way). Renamed legacy keys hard-fail at parse:
+#   • permission_mode  -> use permission
+#   • permissions      -> use permission (singular)
+#   • mcp_servers      -> declare via the agent's own config file
+#   • cli.args         -> use cli.options.additional_args
 cli:
   command: claude                             # default is "opencode run"
-
-  # Extra args appended to every turn invocation, AFTER the
-  # adapter-specific flags. `$VAR` indirection works.
-  args:
-    - --dangerously-skip-permissions
 
   # Subprocess env. Merged on top of the daemon's process env. `$VAR`
   # indirection works. Use this for adapter API keys.
   env:
     ANTHROPIC_API_KEY: $ANTHROPIC_API_KEY
 
-  # Adapter-specific options. Forwarded verbatim. Keys recognized by the
-  # active adapter are listed in the table above; any other key is
-  # forwarded too (with a warning log).
+  # Shared typed triplet — see the table above for per-adapter projection.
   options:
     model: claude-opus-4-7
-    permission_mode: acceptEdits
+    permission: acceptEdits
     additional_args: ["--verbose"]
 
   turn_timeout_ms: 1800000                    # wall-clock per turn (default 3,600,000)
@@ -241,10 +245,16 @@ cli:
 #     command: opencode run
 #     options:
 #       model: anthropic/claude-opus-4-7
-#       permissions:
-#         edit: true
-#         bash: true
-#       mcp_servers: []
+#       additional_args: ["--print"]
+#     turn_timeout_ms: 1800000
+#
+# To switch to pi.dev:
+#
+#   cli:
+#     command: pi
+#     options:
+#       model: sonnet:high
+#       additional_args: ["--thinking", "high"]
 #     turn_timeout_ms: 1800000
 #
 # For the mock pipeline (used by e2e tests — no real API spend):
@@ -289,9 +299,11 @@ server:
 # silently dropped. Each command runs in `bash -lc` with the same
 # SYMPHEO_* env as the hooks above.
 #
-# Per-phase `cli_options` overlay the global `cli.options` for the
-# duration of the phase. Use it to tighten permissions on spec-only
-# phases and relax them on code phases.
+# Per-phase `cli.options` overlay the global `cli.options` for the
+# duration of the phase via shallow merge (each key in the phase
+# override REPLACES the global value; absent keys keep the global).
+# Use it to tighten permissions on spec-only phases and relax them on
+# code phases.
 phases:
 
   # ──────────────────────────────────────────────────────────────────
@@ -398,10 +410,11 @@ phases:
           printf '%s\n' "$body" | grep -qxF "$heading" \
             || { echo "missing heading on issue ${SYMPHEO_ISSUE_IDENTIFIER}: $heading" >&2 ; exit 1 ; }
         done
-    cli_options:
-      # Tighter permissions for spec authoring — the architect should
-      # only call `gh`, never edit files.
-      permission_mode: plan
+    cli:
+      options:
+        # Tighter permissions for spec authoring — the architect should
+        # only call `gh`, never edit files.
+        permission: plan
 
   # ──────────────────────────────────────────────────────────────────
   # 3) In Progress — implement under RED-RED-GREEN TDD discipline
@@ -556,9 +569,10 @@ phases:
       the merge.
     verifications:
       - "cd e2e && bun run e2e --include happy_path"
-    cli_options:
-      # Test phase is read-heavy — use the cheaper model.
-      model: claude-sonnet-4-6
+    cli:
+      options:
+        # Test phase is read-heavy — use the cheaper model.
+        model: claude-sonnet-4-6
 
   # ──────────────────────────────────────────────────────────────────
   # 6) Doc — finalise user-facing documentation

@@ -1,202 +1,154 @@
-# CLI config audit — what's actually wired vs what's only parsed
+# CLI config — shared contract across adapters
 
-Date: 2026-05-11. Scope: every `cli.*` field that `ServiceConfig` parses
-from `WORKFLOW.md`, plus the per-phase `phases[].cli_options` override,
-mapped against what each `CliAdapter` (`claude`, `opencode`, `mock`,
-`pi`) and the `LocalBackend` actually consume at runtime.
+`cli.*` in `WORKFLOW.md` is the operator-facing config surface that drives
+every coding-agent CLI Sympheo can spawn (`opencode`, `claude`, `pi`, plus
+the test-only `mock-cli`). The contract is identical across adapters: the
+same typed schema lands in the same place, and each adapter projects the
+typed fields onto its own native flag set.
 
-The trigger for this audit was the question: *"if I drop
-`cli.options.model: sonnet` in my workflow, does it pin the model?"*
-Answer: no. The reason is below.
+## Top-level `cli.*` fields
 
-## TL;DR
+Source of truth: `src/config/typed.rs` (`cli_*` accessors) and
+`src/agent/cli/mod.rs` (`CliConfig`, `CliOptions`).
 
-- The only knob that actually changes the agent argv at runtime is
-  `cli.command`. Everything you put inside `cli.options` for `claude`
-  or `opencode` is silently dropped on the floor — same for
-  `cli.args`, and same for `phases[].cli_options`.
-- `cli.env` works, but only via `LocalBackend` (subprocess env merge).
-  `MockBackend` ignores it.
-- The three `cli.*_timeout_ms` keys work; they're enforced by
-  `LocalBackend`.
-- `mock` is the only adapter that actually reads `cli.options`
-  (specifically `script`). `claude` / `opencode` declare option keys
-  in `known_option_keys()` (so they don't warn) but never thread them
-  into the argv.
+| Field                   | Default      | Consumer                                                                     |
+|-------------------------|--------------|-------------------------------------------------------------------------------|
+| `cli.command`           | (required)   | adapter `validate()` + `build_command_string()`; spawned by `LocalBackend` via `bash -lc` |
+| `cli.env`               | `{}`         | `LocalBackend` merges into subprocess env. `MockBackend` ignores.             |
+| `cli.options`           | `{}`         | typed triplet (`model`, `permission`, `additional_args`) — see below           |
+| `cli.turn_timeout_ms`   | `3600000`    | `LocalBackend` turn-wide timeout                                              |
+| `cli.read_timeout_ms`   | `5000`       | `LocalBackend` per-stdout-line timeout                                        |
+| `cli.stall_timeout_ms`  | `300000`     | `LocalBackend` stall detection                                                |
 
-## Field-by-field table (top-level `cli.*`)
+`validate_for_dispatch` rejects any `cli.*` field outside this surface; in
+particular, `cli.args` is no longer accepted — its replacement is
+`cli.options.additional_args`.
 
-Source of truth: `src/config/typed.rs`, accessors prefixed `cli_*`.
+## `cli.options` — the shared typed triplet
 
-| Field                   | Parser accessor              | Default      | Real consumer                                                                     | Status |
-|-------------------------|------------------------------|--------------|------------------------------------------------------------------------------------|--------|
-| `cli.command`           | `cli_command()`              | (required)   | adapter `validate()` + `build_command_string()`; spawned by `LocalBackend` via `bash -lc` | ✅ live |
-| `cli.args`              | `cli_args()`                 | `[]`         | loaded into `CliConfig.args` and **never read again**                              | 💀 dead |
-| `cli.env`               | `cli_env()`                  | `{}`         | `LocalBackend` merges into subprocess env. `MockBackend` ignores.                  | ⚠️ partial (LocalBackend only) |
-| `cli.options`           | `cli_options()`              | `{}`         | forwarded to adapter; see per-adapter table below                                  | ⚠️ adapter-dependent |
-| `cli.turn_timeout_ms`   | `cli_turn_timeout_ms()`      | `3600000`    | `LocalBackend` turn-wide timeout                                                   | ✅ live |
-| `cli.read_timeout_ms`   | `cli_read_timeout_ms()`      | `5000`       | `LocalBackend` per-stdout-line timeout                                             | ✅ live |
-| `cli.stall_timeout_ms`  | `cli_stall_timeout_ms()`     | `300000`     | `LocalBackend` stall detection                                                     | ✅ live |
+The single typed view consumed by every production adapter
+(`src/agent/cli/mod.rs::CliOptions`):
 
-## `cli.options.*` per adapter — declared vs effective
+| Key              | Type                                  | Meaning                                                                 |
+|------------------|---------------------------------------|-------------------------------------------------------------------------|
+| `model`          | `string?`                             | Native model identifier passed via the adapter's `--model` flag         |
+| `permission`     | enum `plan` \| `acceptEdits` \| `bypassPermissions` \| `default` | Agent permission mode (see per-adapter projection)        |
+| `additional_args`| `string[]`                            | Verbatim shell tokens appended to the assembled argv, shell-escaped per token, with `$VAR` resolution |
 
-`known_option_keys()` only suppresses the "unknown option" warning
-(see `warn_unknown_options()` in `src/agent/cli/mod.rs`). Declaring a
-key there does **not** mean the adapter actually does anything with
-it.
+The parser hard-rejects three legacy keys with a rename-pointing error:
 
-| Adapter    | `known_option_keys` (declared)                  | Actually consumed | Gap                |
-|------------|-------------------------------------------------|-------------------|--------------------|
-| `claude`   | `model`, `permission_mode`, `additional_args`   | (none)            | 💀 3 dead keys     |
-| `opencode` | `model`, `permissions`, `mcp_servers`           | (none)            | 💀 3 dead keys     |
-| `mock`     | `script`                                        | `script` (read by `MockBackend`) | ✅ wired |
-| `pi`       | (default `[]`)                                  | —                 | n/a                |
+- `permission_mode` → `permission`
+- `permissions` (plural) → `permission` (singular)
+- `mcp_servers` → no longer supported (declare MCP servers via the agent's
+  own config file)
 
-The most user-hostile shape here is that the dead keys are *declared*
-as known, so the operator gets no warning when they set
-`cli.options.model: sonnet` in a real workflow. The value is parsed,
-forwarded, and then silently discarded.
+Unknown keys are silently ignored from the typed view but remain accessible
+through `ServiceConfig::cli_options_raw()` for adapters that own extras
+(`mock-cli` reads its `script` fixture path this way).
 
-**Workaround for today**: pin the model inline in `cli.command`:
+## Per-adapter projection
+
+`known_option_keys` no longer exists; the projection happens inside each
+adapter's `build_command_string`.
+
+| Adapter    | `--model` | `permission` projection                                                       | `additional_args`             | Adapter-specific extras |
+|------------|-----------|-------------------------------------------------------------------------------|-------------------------------|--------------------------|
+| `claude`   | `--model <m>` | `--permission-mode plan\|acceptEdits\|bypassPermissions\|default`         | appended verbatim             | —                        |
+| `opencode` | `--model <m>` | no native flag — logged as a `tracing::warn` (set permission via `cli.command` if you need it) | appended verbatim             | —                        |
+| `pi`       | `--model <m>` (e.g. `sonnet:high`) | no native flag — logged as a `tracing::warn`                                  | appended verbatim             | —                        |
+| `mock`     | ignored   | ignored                                                                       | ignored                       | `script` (path to YAML/JSON event fixture; resolved against the workspace) |
+
+`additional_args` ordering is: adapter's canonical argv first (model,
+permission, session resume), then `additional_args` appended last. Each
+token is `shell_escape`d individually before joining.
+
+## Per-phase override: `phases[].cli.options`
+
+The `phases[]` block in `WORKFLOW.md` front matter accepts a `cli.options`
+sub-map that **mirrors the global `cli.options` schema exactly** (same
+typed triplet, same legacy-key rejections). At dispatch time the
+orchestrator looks up the phase for the current tracker state and
+shallow-merges the override over the global map:
+
+- Each key set in `phase.cli.options` REPLACES the corresponding global
+  value (`model`, `permission`, `additional_args`).
+- A key absent from the phase override keeps the global value.
+- `additional_args` is treated atomically: a non-empty phase override
+  replaces the entire global array (no concatenation).
+
+The legacy `phases[].cli_options` (flat map at phase level) is hard-rejected
+at parse time with an error pointing at the rename.
+
+Implementation: `src/orchestrator/tick.rs` builds `phase_options` from the
+active phase and threads it through `AgentRunner::run_turn`, which calls
+`CliConfig::with_effective_options` to produce a per-turn config the adapter
+sees in `build_command_string`.
+
+## Adapter trait surface
+
+Trait: `src/agent/cli/mod.rs::CliAdapter`. Every adapter overrides only the
+hooks that diverge from the OpenCode reference shape:
+
+| Method                  | claude | opencode | pi | mock |
+|-------------------------|--------|----------|----|------|
+| `kind()`                | own    | own      | own| own  |
+| `binary_names()`        | own    | own      | own| own  |
+| `validate()`            | default (leading-binary check via shared `validate_command_binary`) | default | default | default |
+| `start_session()`       | default (synthetic `<kind>-<pid>-<ts>` id) | default | default | default |
+| `run_turn()`            | default (delegates to `AgentBackend::run_turn`) | default | default | default |
+| `stop_session()`        | default (no-op) | default | default | default |
+| `build_command_string()`| own (`--print`, `--output-format stream-json`, `--add-dir`, `--model`, `--permission-mode`, `--resume` on UUID) | own (`opencode run`, `--format json`, `--dir`, `--model`, `--session` on UUID) | own (`pi --mode json`, `--model`, `--session` on UUID, no `--dir`) | default |
+| `parse_stdout_line()`   | own (Claude `stream-json` envelope) | default (opencode-shaped) | own (pi JSONL: `session`, `message_update` text deltas, `turn_end`/`agent_end`) | — |
+| `sanitize_prompt()`     | default (identity) | own (wraps `^--<flag>$` lines in backticks) | default | default |
+
+Shared helpers live in `src/agent/cli/mod.rs`:
+
+- `is_uuid` — single 8-4-4-4-12 hex check, used by claude / opencode / pi
+  before splicing a session id into `--resume` / `--session`.
+- `validate_command_binary` — single leading-binary identity check used as
+  the trait's default `validate`.
+- `append_flag(cmd, "--flag", value)` — shell-escapes the value.
+- `append_additional_args(cmd, args)` — shell-escapes each token.
+
+## Reference invocations
 
 ```yaml
 cli:
-  command: claude --model sonnet
-# or
-  command: opencode run --model openrouter/anthropic/claude-haiku-4.5
+  command: claude
+  options:
+    model: claude-haiku-4.5
+    permission: acceptEdits
+    additional_args: ["--add-dir", "/extra"]
 ```
 
-(The e2e `Generate Workflow Md For Opencode Code Phase` generator
-does exactly this, with a comment pointing back at the gap.)
-
-## `phases[].cli_options` — parsed, documented, never read
-
-`src/workflow/phase.rs:7`:
-
-> *"Each phase maps a tracker state to a prompt fragment (interpolated
-> as `{{ phase.prompt }}` into the global template), post-turn
-> verifications, and per-phase cli_options overrides."*
-
-`src/workflow/phase.rs:14`:
-
-```rust
-pub cli_options: serde_json::Map<String, serde_json::Value>,
+```yaml
+cli:
+  command: opencode run
+  options:
+    model: openrouter/anthropic/claude-haiku-4.5
+    additional_args: ["--print"]
 ```
 
-`src/workflow/phase.rs:46` — populated from the YAML front matter via
-`resolver::get_string_map(m, "cli_options")`.
+```yaml
+cli:
+  command: pi
+  options:
+    model: sonnet:high
+    additional_args: ["--thinking", "high"]
+```
 
-Then: `rg "phase\.cli_options|p\.cli_options" src/` filtered through
-non-test, non-comment, returns zero hits. The only references outside
-`phase.rs`'s own tests are:
+```yaml
+cli:
+  command: mock-cli
+  options:
+    script: fixtures/run.yaml
 
-- `src/orchestrator/tick.rs:1358` — inside a `#[cfg(test)]` block,
-  building a `Phase` literal with an empty map.
-
-So: the field is parsed, the documentation calls it a "per-phase
-override", and no production code path reads it. Even `MockBackend`,
-which is the one place that reads top-level `cli.options`, does not
-look at the phase-level equivalent.
-
-Implication: any per-phase `cli_options:` block in a `WORKFLOW.md`
-today is no-op. Worse, since the parser accepts it silently, an
-operator reading the PRD will reasonably believe they can scope a
-permission or a model to a single phase.
-
-## Adapter trait surface — implemented vs default
-
-Trait: `src/agent/cli/mod.rs:101`.
-
-| Method                  | claude                    | opencode                  | mock              | pi                |
-|-------------------------|---------------------------|---------------------------|-------------------|-------------------|
-| `kind()`                | `"claude"`                | `"opencode"`              | `"mock-cli"`      | `"pi"`            |
-| `binary_names()`        | `["claude"]`              | `["opencode"]`            | `["mock-cli"]`    | `["pi"]`          |
-| `validate()`            | own impl                  | own impl                  | own impl          | own impl (checks `"pi run"`) |
-| `known_option_keys()`   | 3 declarative-only        | 3 declarative-only        | active (`script`) | default `[]`      |
-| `start_session()`       | trait default (`<kind>-<pid>-<ts>` synthetic id) | trait default | mock-specific | trait default     |
-| `run_turn()`            | trait default (`LocalBackend`) | trait default        | mock-specific     | trait default     |
-| `stop_session()`        | trait default (no-op)     | trait default             | mock-specific     | trait default     |
-| `build_command_string()`| own impl, UUID guard on `--resume` | own impl, UUID guard on `--session` | — | trait default |
-| `parse_stdout_line()`   | own impl (`stream-json`)  | own impl (json events)    | —                 | trait default     |
-| `sanitize_prompt()`     | identity (default)        | `sanitize_prompt_for_opencode` | identity     | identity          |
-
-The session-id synthetic-handle pattern is duplicated across `claude`
-and `opencode`, and both adapters have a near-identical
-`is_uuid()`-shape guard to skip `--resume` / `--session` when the
-synthetic handle isn't a real UUID. That helper is duplicated, not
-shared — a tiny consolidation opportunity but not the bordel.
-
-## Why the bordel feels like a bordel
-
-Three intersecting causes:
-
-1. **Two parallel "options" channels** (`cli.options`,
-   `phases[].cli_options`), only one of them ever consumed, and only
-   for one adapter (`mock`). The other adapters advertise option
-   *keys* but don't implement them, which reads like support.
-2. **Silent acceptance + no warning** for keys that are declared but
-   not threaded. `known_option_keys()` should mean "the adapter does
-   something with this key"; in practice it means "the adapter
-   doesn't complain about this key". Those are different contracts.
-3. **`cli.args`** is fully parsed and stored in `CliConfig.args` but
-   no code reads `CliConfig.args` after that. It looks supported,
-   isn't.
-
-The PRD's intent for `phases[].cli_options` was probably: merge
-`phases[<active>].cli_options` over the top-level `cli.options` at
-dispatch time, hand the merged map to the adapter. That merge layer
-doesn't exist anywhere.
-
-## Recommended remediation (not yet implemented)
-
-Ordered cheapest → most invasive.
-
-1. **Strip the declarative-only entries from `known_option_keys()`**
-   for `claude` and `opencode`. With the keys gone, setting
-   `cli.options.model` in a workflow will at least produce the
-   "unknown option" warning, which is honest. Cost: 2 lines + a
-   couple of tests.
-
-2. **Drop `cli.args` from the spec** OR wire it into
-   `CliAdapter::build_command_string` as a trailing append. Pick one,
-   document the choice. Cost: small.
-
-3. **Drop `phases[].cli_options` from the spec** OR implement the
-   per-phase override merge. The merge is straightforward —
-   `tick.rs` already looks up `phase_for_state` to inject
-   `SYMPHEO_PHASE_NAME` into hook env, so it has the right entry
-   point. Cost: one merge function + adapter plumbing to thread the
-   merged map. Probably the biggest win because it's the most
-   user-facing surprise.
-
-4. **Implement the declarative-only keys for `claude` and `opencode`**:
-   `model`, `permission_mode`, `additional_args`, `permissions`,
-   `mcp_servers`. Each adapter's `build_command_string` would
-   translate keys it owns into argv flags. Cost: moderate, but pays
-   off as soon as anyone wants a per-phase model.
-
-5. **Consolidate the duplicated `is_uuid` guard** between `claude.rs`
-   and `opencode.rs` into a single helper in `cli/mod.rs`. Cosmetic.
-
-Items 1, 2 and 3 together would already remove the "feels like
-bordel" surface, even without item 4. Item 4 is what lets the
-docstring of `Phase::cli_options` actually mean what it says.
-
-## Reproduction commands
-
-```bash
-# Show the dead field
-grep -rn 'phase\.cli_options\|p\.cli_options' src/ \
-  | grep -v test | grep -v '//'
-
-# Show the dead args field
-grep -rn 'CliConfig\.args\|config\.args' src/ \
-  | grep -v test
-
-# Show what each adapter declares vs implements
-grep -nE 'known_option_keys|build_command_string|\.options' \
-  src/agent/cli/claude.rs src/agent/cli/opencode.rs
-
-# Confirm only mock actually reads cli.options
-grep -rn 'cli_options()' src/
+phases:
+  - name: build
+    state: In Progress
+    prompt: "Implement the LLD."
+    cli:
+      options:
+        model: claude-opus-4-7
+        permission: bypassPermissions
 ```

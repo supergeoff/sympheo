@@ -1,26 +1,28 @@
 //! SPEC §10.6 OpenCode Reference Adapter.
 //!
-//! This is the reference adapter: `cli.command = "opencode run"` (default).
-//! Identity/selection/validate live here; the protocol-specific lifecycle
+//! `cli.command = "opencode run"` (default). The protocol-specific lifecycle
 //! (`start_session` / `run_turn` / `stop_session`) is provided through the
 //! [`crate::agent::cli::CliAdapter`] trait defaults, which delegate the
 //! subprocess-spawning + stdout-parsing surface to the configured execution
 //! [`crate::agent::backend::AgentBackend`] (`LocalBackend`, `MockBackend`).
+//!
+//! Permission projection: opencode does not currently expose a native
+//! permission-mode flag analogous to claude's `--permission-mode`. Setting
+//! `cli.options.permission` is therefore a no-op for this adapter (logged as
+//! a warning so operators can spot the gap).
 
 use crate::agent::cli::CliAdapter;
+use crate::agent::cli::CliOptions;
+use crate::agent::cli::append_additional_args;
+use crate::agent::cli::append_flag;
+use crate::agent::cli::is_uuid;
 use crate::agent::cli::shell_escape;
-use crate::error::SympheoError;
 use async_trait::async_trait;
 use std::path::Path;
 
 /// Tested OpenCode CLI version range (advisory; not enforced at runtime).
 /// SPEC §10.6 RECOMMENDED: adapters MUST document the CLI version range they support.
 pub const SUPPORTED_OPENCODE_VERSION_RANGE: &str = ">=0.1, <0.5";
-
-/// SPEC §10.6: keys the OpenCode adapter recognizes inside `cli.options`. Any
-/// other key is forwarded for forward-compatibility and logged as a warning
-/// from `start_session`.
-pub const OPENCODE_KNOWN_OPTION_KEYS: &[&str] = &["model", "permissions", "mcp_servers"];
 
 pub struct OpencodeAdapter;
 
@@ -46,30 +48,6 @@ impl CliAdapter for OpencodeAdapter {
         &["opencode"]
     }
 
-    fn known_option_keys(&self) -> &[&'static str] {
-        OPENCODE_KNOWN_OPTION_KEYS
-    }
-
-    /// SPEC §10.1 + §10.6: static validation of the CLI command.
-    /// We only verify shape; the binary's PATH discoverability is checked at runtime.
-    fn validate(&self, cli_command: &str) -> Result<(), SympheoError> {
-        if cli_command.trim().is_empty() {
-            return Err(SympheoError::InvalidConfiguration(
-                "cli.command is empty".into(),
-            ));
-        }
-        // SPEC §10.6 default: "opencode run". Any "opencode <subcommand>" form is accepted.
-        let leading = cli_command.split_whitespace().next().unwrap_or("");
-        let bin = std::path::Path::new(leading)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or(leading);
-        if bin != "opencode" {
-            return Err(SympheoError::CliAdapterNotFound(cli_command.to_string()));
-        }
-        Ok(())
-    }
-
     /// SPEC §10.6: opencode mistakes prompt lines that look like CLI flags
     /// (`^--foo$`) for actual flag arguments. Wrap such lines in backticks so
     /// the CLI treats them as literal prompt content.
@@ -90,6 +68,7 @@ impl CliAdapter for OpencodeAdapter {
         prompt_path: &Path,
         workspace_path: &Path,
         session_id: Option<&str>,
+        cli_options: &CliOptions,
     ) -> String {
         let mut cmd = format!(
             r#"PROMPT=$(cat "{}"); {} "$PROMPT" --format json --dir "{}" --dangerously-skip-permissions"#,
@@ -97,37 +76,26 @@ impl CliAdapter for OpencodeAdapter {
             cli_command,
             shell_escape(&workspace_path.to_string_lossy())
         );
-        if let Some(sid) = session_id.filter(|s| is_uuid(s)) {
-            cmd.push_str(&format!(" --session {}", shell_escape(sid)));
+        if let Some(model) = &cli_options.model {
+            append_flag(&mut cmd, "--model", model);
         }
+        if let Some(permission) = cli_options.permission {
+            // Opencode has no native --permission-mode equivalent today. We
+            // record the intent in a tracing event so operators can spot
+            // misconfiguration (and so the adapter remains a no-op
+            // deliberately, not by oversight).
+            tracing::warn!(
+                adapter = "opencode",
+                permission = permission.as_str(),
+                "cli.options.permission is set but opencode has no native permission-mode flag; ignoring"
+            );
+        }
+        if let Some(sid) = session_id.filter(|s| is_uuid(s)) {
+            append_flag(&mut cmd, "--session", sid);
+        }
+        append_additional_args(&mut cmd, &cli_options.additional_args);
         cmd
     }
-}
-
-/// Tightly-scoped UUID-shape check (8-4-4-4-12 hex). Mirrors the helper in
-/// `claude.rs`: both adapters wrap a synthetic non-UUID handle from sympheo's
-/// `start_session` and need to skip the per-turn `--resume`/`--session` flag
-/// when the value doesn't match the CLI's expected shape.
-fn is_uuid(s: &str) -> bool {
-    let bytes = s.as_bytes();
-    if bytes.len() != 36 {
-        return false;
-    }
-    for (i, &b) in bytes.iter().enumerate() {
-        match i {
-            8 | 13 | 18 | 23 => {
-                if b != b'-' {
-                    return false;
-                }
-            }
-            _ => {
-                if !b.is_ascii_hexdigit() {
-                    return false;
-                }
-            }
-        }
-    }
-    true
 }
 
 /// SPEC §10.6: lines matching `^--[a-z0-9-]+$` are wrapped in backticks so
@@ -142,6 +110,8 @@ fn sanitize_prompt_for_opencode(prompt: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::cli::Permission;
+    use crate::error::SympheoError;
 
     #[test]
     fn test_kind() {
@@ -185,15 +155,6 @@ mod tests {
     }
 
     #[test]
-    fn test_known_option_keys_documented() {
-        let a = OpencodeAdapter::new();
-        let keys = a.known_option_keys();
-        assert!(keys.contains(&"model"));
-        assert!(keys.contains(&"permissions"));
-        assert!(keys.contains(&"mcp_servers"));
-    }
-
-    #[test]
     fn test_sanitize_prompt_wraps_flag_like_lines() {
         let a = OpencodeAdapter::new();
         let raw = "hello\n--foo-bar\nworld";
@@ -208,5 +169,67 @@ mod tests {
         let a = OpencodeAdapter::new();
         let raw = "no flags here";
         assert_eq!(a.sanitize_prompt(raw), raw);
+    }
+
+    #[test]
+    fn test_build_command_string_default() {
+        let a = OpencodeAdapter::new();
+        let prompt = Path::new("/ws/.sympheo_prompt.txt");
+        let ws = Path::new("/ws");
+        let cmd = a.build_command_string("opencode run", prompt, ws, None, &CliOptions::default());
+        assert!(cmd.contains("opencode run"));
+        assert!(cmd.contains("--format json"));
+        assert!(cmd.contains("--dir"));
+        assert!(cmd.contains("--dangerously-skip-permissions"));
+        assert!(!cmd.contains("--session"));
+        assert!(!cmd.contains("--model"));
+    }
+
+    #[test]
+    fn test_build_command_string_splices_model_and_additional_args() {
+        let a = OpencodeAdapter::new();
+        let prompt = Path::new("/ws/.sympheo_prompt.txt");
+        let ws = Path::new("/ws");
+        let opts = CliOptions {
+            model: Some("openrouter/anthropic/claude-haiku-4.5".into()),
+            permission: None,
+            additional_args: vec!["--print".into()],
+        };
+        let cmd = a.build_command_string("opencode run", prompt, ws, None, &opts);
+        assert!(cmd.contains("--model openrouter/anthropic/claude-haiku-4.5"));
+        assert!(cmd.contains("--print"));
+    }
+
+    #[test]
+    fn test_build_command_string_permission_is_noop_for_opencode() {
+        // Opencode does not currently expose a permission-mode flag; setting
+        // permission must not splice anything into the command. The warning
+        // is observable via tracing, not via the command string.
+        let a = OpencodeAdapter::new();
+        let prompt = Path::new("/ws/.sympheo_prompt.txt");
+        let ws = Path::new("/ws");
+        let opts = CliOptions {
+            permission: Some(Permission::Plan),
+            ..Default::default()
+        };
+        let cmd = a.build_command_string("opencode run", prompt, ws, None, &opts);
+        assert!(!cmd.contains("--permission"));
+        assert!(!cmd.contains("plan"));
+    }
+
+    #[test]
+    fn test_build_command_string_with_uuid_session() {
+        let a = OpencodeAdapter::new();
+        let prompt = Path::new("/ws/.sympheo_prompt.txt");
+        let ws = Path::new("/ws");
+        let uuid = "33595f82-f956-4338-854d-f6332a296842";
+        let cmd = a.build_command_string(
+            "opencode run",
+            prompt,
+            ws,
+            Some(uuid),
+            &CliOptions::default(),
+        );
+        assert!(cmd.contains(&format!("--session {uuid}")));
     }
 }

@@ -1,5 +1,5 @@
 use crate::agent::backend::AgentBackend;
-use crate::agent::cli::CliAdapter;
+use crate::agent::cli::{CliAdapter, CliOptions};
 use crate::agent::parser::{AgentEvent, EmittedEvent, TokenInfo, TurnOutcome, TurnResult};
 use crate::agent::tool_resolver;
 use crate::config::typed::ServiceConfig;
@@ -125,6 +125,7 @@ impl AgentBackend for LocalBackend {
         workspace_path: &Path,
         cancelled: Arc<AtomicBool>,
         event_tx: Sender<EmittedEvent>,
+        cli_options: &CliOptions,
     ) -> Result<TurnResult, SympheoError> {
         let sid = session_id.unwrap_or("new");
         let span = tracing::info_span!(
@@ -184,6 +185,7 @@ impl AgentBackend for LocalBackend {
                 &prompt_file,
                 workspace_path,
                 session_id,
+                cli_options,
             );
             cmd.arg(&cli_cmd_str);
             cmd.current_dir(workspace_path);
@@ -559,6 +561,7 @@ mod tests {
                 &tmp,
                 std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 event_tx,
+                &crate::agent::cli::CliOptions::default(),
             )
             .await;
         // SPEC §10.5: a process that produces zero output stalls the per-line
@@ -626,6 +629,7 @@ mod tests {
                 &tmp,
                 std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 event_tx,
+                &crate::agent::cli::CliOptions::default(),
             )
             .await;
         assert!(
@@ -683,6 +687,7 @@ mod tests {
                 &tmp,
                 std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 event_tx,
+                &crate::agent::cli::CliOptions::default(),
             )
             .await
             .unwrap();
@@ -745,6 +750,7 @@ mod tests {
                 &tmp,
                 std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 event_tx,
+                &crate::agent::cli::CliOptions::default(),
             )
             .await
             .unwrap();
@@ -801,6 +807,7 @@ mod tests {
                 &tmp,
                 std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 event_tx,
+                &crate::agent::cli::CliOptions::default(),
             )
             .await
             .unwrap();
@@ -844,6 +851,7 @@ mod tests {
                 Path::new("/etc"),
                 std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 event_tx,
+                &crate::agent::cli::CliOptions::default(),
             )
             .await;
         assert!(matches!(result, Err(SympheoError::WorkspaceError(_))));
@@ -913,6 +921,7 @@ mod tests {
                 &tmp,
                 std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 event_tx,
+                &crate::agent::cli::CliOptions::default(),
             )
             .await
             .unwrap();
@@ -997,6 +1006,7 @@ mod tests {
                 &tmp,
                 std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 event_tx,
+                &crate::agent::cli::CliOptions::default(),
             )
             .await
             .unwrap();
@@ -1099,6 +1109,7 @@ mod tests {
                 &tmp,
                 std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 event_tx,
+                &crate::agent::cli::CliOptions::default(),
             )
             .await
             .unwrap();

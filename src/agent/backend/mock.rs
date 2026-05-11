@@ -36,6 +36,7 @@
 //! documented as an extension in docs/extensions.md.
 
 use crate::agent::backend::AgentBackend;
+use crate::agent::cli::CliOptions;
 use crate::agent::parser::{
     AgentEvent, EmittedEvent, StepFinishPart, StepStartPart, TextPart, TokenInfo, TurnOutcome,
     TurnResult,
@@ -100,7 +101,7 @@ pub struct MockBackend {
 
 impl MockBackend {
     pub fn new(config: &ServiceConfig) -> Result<Self, SympheoError> {
-        let opts = config.cli_options();
+        let opts = config.cli_options_raw();
         let script_path = opts
             .get("script")
             .and_then(|v| v.as_str())
@@ -138,6 +139,7 @@ impl AgentBackend for MockBackend {
         workspace_path: &Path,
         cancelled: Arc<AtomicBool>,
         event_tx: Sender<EmittedEvent>,
+        _cli_options: &CliOptions,
     ) -> Result<TurnResult, SympheoError> {
         let path = self.resolve_script_path(workspace_path);
         let raw = tokio::fs::read_to_string(&path).await.map_err(|e| {
@@ -396,6 +398,7 @@ events:
                 &tmp,
                 Arc::new(AtomicBool::new(false)),
                 event_tx,
+                &crate::agent::cli::CliOptions::default(),
             )
             .await
             .unwrap();
@@ -446,6 +449,7 @@ events:
                 &tmp,
                 Arc::new(AtomicBool::new(false)),
                 event_tx,
+                &crate::agent::cli::CliOptions::default(),
             )
             .await
             .unwrap();
@@ -483,7 +487,15 @@ events:
             cancelled_setter.store(true, Ordering::Relaxed);
         });
         let result = backend
-            .run_turn(&dummy_issue(), "prompt", None, &tmp, cancelled, event_tx)
+            .run_turn(
+                &dummy_issue(),
+                "prompt",
+                None,
+                &tmp,
+                cancelled,
+                event_tx,
+                &crate::agent::cli::CliOptions::default(),
+            )
             .await;
         assert!(matches!(result, Err(SympheoError::TurnCancelled)));
         let _ = std::fs::remove_dir_all(&tmp);
@@ -516,6 +528,7 @@ events:
                 &tmp,
                 Arc::new(AtomicBool::new(false)),
                 event_tx,
+                &crate::agent::cli::CliOptions::default(),
             )
             .await
             .unwrap();
@@ -540,6 +553,7 @@ events:
                 &tmp,
                 Arc::new(AtomicBool::new(false)),
                 event_tx,
+                &crate::agent::cli::CliOptions::default(),
             )
             .await;
         assert!(matches!(result, Err(SympheoError::AgentRunnerError(_))));

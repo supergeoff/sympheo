@@ -18,7 +18,7 @@
 #  daemon restart needed.
 #
 #  Boot validation rejects the daemon if any of these are missing:
-#    • tracker.kind == "github"
+#    • tracker.kind
 #    • tracker.api_key
 #    • tracker.project_slug
 #    • tracker.project_number
@@ -248,11 +248,7 @@ agent:
 #                        token, with `$VAR` resolution)
 #
 # Unknown keys are silently ignored by the typed view (mock reads its
-# `script` extra this way). Renamed legacy keys hard-fail at parse:
-#   • permission_mode  -> use permission
-#   • permissions      -> use permission (singular)
-#   • mcp_servers      -> declare via the agent's own config file
-#   • cli.args         -> use cli.options.additional_args
+# `script` extra this way). 
 cli:
   command: claude                             # default is "opencode run"
 
@@ -435,11 +431,6 @@ phases:
           printf '%s\n' "$body" | grep -qxF "$heading" \
             || { echo "missing heading on issue ${SYMPHEO_ISSUE_IDENTIFIER}: $heading" >&2 ; exit 1 ; }
         done
-    cli:
-      options:
-        # Tighter permissions for spec authoring — the architect should
-        # only call `gh`, never edit files.
-        permission: plan
 
   # ──────────────────────────────────────────────────────────────────
   # 3) In Progress — implement under RED-RED-GREEN TDD discipline
@@ -555,10 +546,6 @@ phases:
       link it to {{ issue.identifier }}, and do NOT revert the merge.
     verifications:
       - "cd e2e && bun run e2e --include happy_path"
-    cli:
-      options:
-        # Test phase is read-heavy — use the cheaper model.
-        model: claude-sonnet-4-6
 
   # ──────────────────────────────────────────────────────────────────
   # 6) Doc — finalise user-facing documentation

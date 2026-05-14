@@ -1,8 +1,10 @@
-/// Translate an ACP [`SessionUpdate`] notification into a Sympheo [`AgentEvent`].
+/// Translate an ACP [`SessionUpdate`] notification into one or more Sympheo [`AgentEvent`]s.
 ///
-/// The translation is deterministic and pure (no I/O). All unrecognised or
-/// future ACP update types map to `AgentEvent::Other` via the mandatory
-/// catch-all arm — required because `SessionUpdate` is `#[non_exhaustive]`.
+/// The translation is deterministic and pure (no I/O).  Most updates produce a single event;
+/// a `ToolCallUpdate` that contains diff content produces an `AgentEvent::Diff` followed by
+/// the `AgentEvent::ToolCallUpdate`.  All unrecognised or future ACP update types map to
+/// `AgentEvent::Other` via the mandatory catch-all arm — required because `SessionUpdate`
+/// is `#[non_exhaustive]`.
 use agent_client_protocol::schema::{
     ContentBlock, Plan, SessionUpdate, ToolCall, ToolCallContent, ToolCallUpdate,
 };
@@ -12,40 +14,43 @@ use crate::agent::parser::{
     ToolKind, ToolStatus,
 };
 
-/// Convert an ACP `SessionUpdate` to a Sympheo `AgentEvent`.
-pub fn translate(update: SessionUpdate) -> AgentEvent {
+/// Convert an ACP `SessionUpdate` to zero or more Sympheo `AgentEvent`s.
+///
+/// * `session_id` — the ACP session identifier from the outer `SessionNotification`.
+/// * `now` — current Unix timestamp in milliseconds, used to populate `timestamp` fields.
+pub fn translate(session_id: &str, update: SessionUpdate, now: i64) -> Vec<AgentEvent> {
     match update {
         // agent_message_chunk → Text (spec: §6.3, canonical ACP name)
         SessionUpdate::AgentMessageChunk(chunk) => {
             let text = extract_text(&chunk.content);
-            AgentEvent::Text {
-                timestamp: 0,
-                session_id: String::new(),
+            vec![AgentEvent::Text {
+                timestamp: now,
+                session_id: session_id.to_string(),
                 part: crate::agent::parser::TextPart {
                     id: String::new(),
                     message_id: String::new(),
-                    session_id: String::new(),
+                    session_id: session_id.to_string(),
                     part_type: "text".to_string(),
                     text,
                     time: None,
                 },
-            }
+            }]
         }
         // agent_thought_chunk → Thinking (spec: canonical ACP name, NOT thinking_chunk)
         SessionUpdate::AgentThoughtChunk(chunk) => {
             let delta = extract_text(&chunk.content);
-            AgentEvent::Thinking { delta }
+            vec![AgentEvent::Thinking { delta }]
         }
         // ToolCall initiation
-        SessionUpdate::ToolCall(tc) => translate_tool_call(tc),
-        // ToolCallUpdate (incremental or final)
+        SessionUpdate::ToolCall(tc) => vec![translate_tool_call(tc)],
+        // ToolCallUpdate — may emit a Diff event before the ToolCallUpdate event
         SessionUpdate::ToolCallUpdate(tcu) => translate_tool_call_update(tcu),
         // Plan
-        SessionUpdate::Plan(plan) => translate_plan(plan),
+        SessionUpdate::Plan(plan) => vec![translate_plan(plan)],
         // All other variants (AvailableCommandsUpdate, CurrentModeUpdate, ConfigOptionUpdate,
         // SessionInfoUpdate, UserMessageChunk, UsageUpdate, …) → Other.
         // The `#[non_exhaustive]` attribute on SessionUpdate makes this arm mandatory.
-        _ => AgentEvent::Other,
+        _ => vec![AgentEvent::Other],
     }
 }
 
@@ -119,14 +124,13 @@ fn map_content(content: ToolCallContent) -> SympheoToolCallContent {
                 text,
             }
         }
-        ToolCallContent::Diff(_) => SympheoToolCallContent {
-            content_type: "diff".to_string(),
-            text: None,
-        },
         ToolCallContent::Terminal(_) => SympheoToolCallContent {
             content_type: "terminal".to_string(),
             text: None,
         },
+        // Diff is handled before map_content is called (in translate_tool_call_update).
+        // This catch-all covers Diff if it ever reaches here and all future #[non_exhaustive]
+        // variants — both require an exhaustive wildcard arm for external crates.
         _ => SympheoToolCallContent {
             content_type: "other".to_string(),
             text: None,
@@ -144,19 +148,44 @@ fn translate_tool_call(tc: ToolCall) -> AgentEvent {
     }
 }
 
-fn translate_tool_call_update(tcu: ToolCallUpdate) -> AgentEvent {
+/// Translate a `ToolCallUpdate`, emitting an `AgentEvent::Diff` for each diff content item
+/// followed by the `AgentEvent::ToolCallUpdate`.  Most updates produce exactly one event.
+fn translate_tool_call_update(tcu: ToolCallUpdate) -> Vec<AgentEvent> {
+    let id_str = tcu.tool_call_id.0.to_string();
     let fields = tcu.fields;
-    AgentEvent::ToolCallUpdate {
-        id: tcu.tool_call_id.0.to_string(),
-        status: fields.status.map(map_tool_status),
-        content: fields
-            .content
-            .unwrap_or_default()
-            .into_iter()
-            .map(map_content)
-            .collect(),
-        raw_output: fields.raw_output,
+    let content_list = fields.content.unwrap_or_default();
+
+    let mut diff_events: Vec<AgentEvent> = Vec::new();
+    let mut mapped_content: Vec<SympheoToolCallContent> = Vec::new();
+
+    for item in content_list {
+        match item {
+            ToolCallContent::Diff(diff) => {
+                diff_events.push(AgentEvent::Diff {
+                    tool_call_id: id_str.clone(),
+                    path: diff.path,
+                    old_text: diff.old_text,
+                    new_text: diff.new_text,
+                });
+                mapped_content.push(SympheoToolCallContent {
+                    content_type: "diff".to_string(),
+                    text: None,
+                });
+            }
+            other => mapped_content.push(map_content(other)),
+        }
     }
+
+    let update_event = AgentEvent::ToolCallUpdate {
+        id: id_str,
+        status: fields.status.map(map_tool_status),
+        content: mapped_content,
+        raw_output: fields.raw_output,
+    };
+
+    let mut events = diff_events;
+    events.push(update_event);
+    events
 }
 
 fn translate_plan(plan: Plan) -> AgentEvent {
@@ -180,9 +209,16 @@ fn translate_plan(plan: Plan) -> AgentEvent {
 mod tests {
     use super::*;
     use agent_client_protocol::schema::{
-        ContentChunk, PlanEntry, PlanEntryPriority, PlanEntryStatus,
+        ContentChunk, Diff as AcpDiff, PlanEntry, PlanEntryPriority, PlanEntryStatus,
         ToolCallId, ToolCallUpdate as AcpToolCallUpdate, ToolCallUpdateFields,
     };
+
+    /// Convenience wrapper: translate a single update and assert exactly one event is returned.
+    fn translate_one(update: SessionUpdate) -> AgentEvent {
+        let mut v = translate("", update, 0);
+        assert_eq!(v.len(), 1, "expected exactly one event");
+        v.remove(0)
+    }
 
     fn text_chunk(s: &str) -> agent_client_protocol::schema::ContentChunk {
         ContentChunk::new(ContentBlock::from(s))
@@ -192,7 +228,7 @@ mod tests {
 
     #[test]
     fn agent_message_chunk_to_text() {
-        let event = translate(SessionUpdate::AgentMessageChunk(text_chunk("hello")));
+        let event = translate_one(SessionUpdate::AgentMessageChunk(text_chunk("hello")));
         match event {
             AgentEvent::Text { part, .. } => assert_eq!(part.text, "hello"),
             _ => panic!("expected Text"),
@@ -204,9 +240,30 @@ mod tests {
         let chunk = ContentChunk::new(ContentBlock::ResourceLink(
             agent_client_protocol::schema::ResourceLink::new("foo", "file:///foo"),
         ));
-        let event = translate(SessionUpdate::AgentMessageChunk(chunk));
+        let event = translate_one(SessionUpdate::AgentMessageChunk(chunk));
         match event {
             AgentEvent::Text { part, .. } => assert_eq!(part.text, ""),
+            _ => panic!("expected Text"),
+        }
+    }
+
+    // --- session_id and timestamp propagation ---
+
+    #[test]
+    fn session_id_and_timestamp_propagate_to_text() {
+        let events = translate(
+            "my-session",
+            SessionUpdate::AgentMessageChunk(text_chunk("hi")),
+            12345,
+        );
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            AgentEvent::Text { timestamp, session_id, part } => {
+                assert_eq!(*timestamp, 12345);
+                assert_eq!(session_id, "my-session");
+                assert_eq!(part.session_id, "my-session");
+                assert_eq!(part.text, "hi");
+            }
             _ => panic!("expected Text"),
         }
     }
@@ -215,7 +272,7 @@ mod tests {
 
     #[test]
     fn agent_thought_chunk_to_thinking() {
-        let event = translate(SessionUpdate::AgentThoughtChunk(text_chunk("pondering")));
+        let event = translate_one(SessionUpdate::AgentThoughtChunk(text_chunk("pondering")));
         match event {
             AgentEvent::Thinking { delta } => assert_eq!(delta, "pondering"),
             _ => panic!("expected Thinking"),
@@ -229,7 +286,7 @@ mod tests {
         let tc = ToolCall::new(ToolCallId::new("tc-1"), "Read file")
             .kind(agent_client_protocol::schema::ToolKind::Read)
             .raw_input(serde_json::json!({"path": "/tmp/foo"}));
-        let event = translate(SessionUpdate::ToolCall(tc));
+        let event = translate_one(SessionUpdate::ToolCall(tc));
         match event {
             AgentEvent::ToolCall { id, title, kind, raw_input, locations } => {
                 assert_eq!(id, "tc-1");
@@ -246,7 +303,7 @@ mod tests {
     fn tool_call_switch_mode_maps_to_other_kind() {
         let tc = ToolCall::new(ToolCallId::new("tc-2"), "switch")
             .kind(agent_client_protocol::schema::ToolKind::SwitchMode);
-        let event = translate(SessionUpdate::ToolCall(tc));
+        let event = translate_one(SessionUpdate::ToolCall(tc));
         match event {
             AgentEvent::ToolCall { kind, .. } => assert_eq!(kind, ToolKind::Other),
             _ => panic!("expected ToolCall"),
@@ -261,7 +318,7 @@ mod tests {
         let mut fields = ToolCallUpdateFields::default();
         fields.status = Some(agent_client_protocol::schema::ToolCallStatus::Completed);
         let tcu = AcpToolCallUpdate::new(ToolCallId::new("tc-3"), fields);
-        let event = translate(SessionUpdate::ToolCallUpdate(tcu));
+        let event = translate_one(SessionUpdate::ToolCallUpdate(tcu));
         match event {
             AgentEvent::ToolCallUpdate { id, status, content, raw_output } => {
                 assert_eq!(id, "tc-3");
@@ -277,7 +334,7 @@ mod tests {
     fn tool_call_update_partial_id_only() {
         let fields = ToolCallUpdateFields::default();
         let tcu = AcpToolCallUpdate::new(ToolCallId::new("tc-4"), fields);
-        let event = translate(SessionUpdate::ToolCallUpdate(tcu));
+        let event = translate_one(SessionUpdate::ToolCallUpdate(tcu));
         match event {
             AgentEvent::ToolCallUpdate { id, status, content, raw_output } => {
                 assert_eq!(id, "tc-4");
@@ -289,6 +346,65 @@ mod tests {
         }
     }
 
+    // --- Diff — emitted as a separate event before the ToolCallUpdate ---
+
+    #[test]
+    fn tool_call_update_with_diff_emits_diff_and_update_events() {
+        let diff = AcpDiff::new("/path/file.rs", "new content").old_text("old content");
+        let mut fields = ToolCallUpdateFields::default();
+        fields.content = Some(vec![ToolCallContent::Diff(diff)]);
+        let tcu = AcpToolCallUpdate::new(ToolCallId::new("tc-diff"), fields);
+
+        let events = translate("", SessionUpdate::ToolCallUpdate(tcu), 0);
+        assert_eq!(events.len(), 2, "expected AgentEvent::Diff + AgentEvent::ToolCallUpdate");
+
+        match &events[0] {
+            AgentEvent::Diff { tool_call_id, path, old_text, new_text } => {
+                assert_eq!(tool_call_id, "tc-diff");
+                assert_eq!(path.to_str().unwrap(), "/path/file.rs");
+                assert_eq!(old_text.as_deref(), Some("old content"));
+                assert_eq!(new_text, "new content");
+            }
+            _ => panic!("expected Diff as first event, got {:?}", events[0]),
+        }
+
+        match &events[1] {
+            AgentEvent::ToolCallUpdate { id, content, .. } => {
+                assert_eq!(id, "tc-diff");
+                assert_eq!(content.len(), 1);
+                assert_eq!(content[0].content_type, "diff");
+            }
+            _ => panic!("expected ToolCallUpdate as second event"),
+        }
+    }
+
+    #[test]
+    fn tool_call_update_diff_without_old_text() {
+        let diff = AcpDiff::new("/new_file.rs", "fn main() {}");
+        let mut fields = ToolCallUpdateFields::default();
+        fields.content = Some(vec![ToolCallContent::Diff(diff)]);
+        let tcu = AcpToolCallUpdate::new(ToolCallId::new("tc-new"), fields);
+
+        let events = translate("", SessionUpdate::ToolCallUpdate(tcu), 0);
+        assert_eq!(events.len(), 2);
+        match &events[0] {
+            AgentEvent::Diff { old_text, new_text, .. } => {
+                assert!(old_text.is_none());
+                assert_eq!(new_text, "fn main() {}");
+            }
+            _ => panic!("expected Diff"),
+        }
+    }
+
+    #[test]
+    fn tool_call_update_no_diff_produces_single_event() {
+        let fields = ToolCallUpdateFields::default();
+        let tcu = AcpToolCallUpdate::new(ToolCallId::new("tc-nodiff"), fields);
+        let events = translate("", SessionUpdate::ToolCallUpdate(tcu), 0);
+        assert_eq!(events.len(), 1, "no diff content → single ToolCallUpdate event");
+        assert!(matches!(events[0], AgentEvent::ToolCallUpdate { .. }));
+    }
+
     // --- Plan ---
 
     #[test]
@@ -298,7 +414,7 @@ mod tests {
             PlanEntry::new("Step 2", PlanEntryPriority::Medium, PlanEntryStatus::InProgress),
             PlanEntry::new("Step 3", PlanEntryPriority::Low, PlanEntryStatus::Completed),
         ]);
-        let event = translate(SessionUpdate::Plan(plan));
+        let event = translate_one(SessionUpdate::Plan(plan));
         match event {
             AgentEvent::Plan { steps } => {
                 assert_eq!(steps.len(), 3);
@@ -313,7 +429,7 @@ mod tests {
 
     #[test]
     fn empty_plan() {
-        let event = translate(SessionUpdate::Plan(Plan::new(vec![])));
+        let event = translate_one(SessionUpdate::Plan(Plan::new(vec![])));
         match event {
             AgentEvent::Plan { steps } => assert!(steps.is_empty()),
             _ => panic!("expected Plan"),
@@ -325,7 +441,7 @@ mod tests {
     #[test]
     fn available_commands_update_maps_to_other() {
         use agent_client_protocol::schema::AvailableCommandsUpdate;
-        let event = translate(SessionUpdate::AvailableCommandsUpdate(
+        let event = translate_one(SessionUpdate::AvailableCommandsUpdate(
             AvailableCommandsUpdate::new(vec![]),
         ));
         assert!(matches!(event, AgentEvent::Other));
@@ -334,7 +450,7 @@ mod tests {
     #[test]
     fn current_mode_update_maps_to_other() {
         use agent_client_protocol::schema::CurrentModeUpdate;
-        let event = translate(SessionUpdate::CurrentModeUpdate(
+        let event = translate_one(SessionUpdate::CurrentModeUpdate(
             CurrentModeUpdate::new("build"),
         ));
         assert!(matches!(event, AgentEvent::Other));
@@ -342,7 +458,7 @@ mod tests {
 
     #[test]
     fn user_message_chunk_maps_to_other() {
-        let event = translate(SessionUpdate::UserMessageChunk(text_chunk("user msg")));
+        let event = translate_one(SessionUpdate::UserMessageChunk(text_chunk("user msg")));
         assert!(matches!(event, AgentEvent::Other));
     }
 
@@ -364,7 +480,8 @@ mod tests {
             (AcpKind::Other, ToolKind::Other),
         ];
         for (acp, expected) in cases {
-            assert_eq!(map_tool_kind(acp.clone()), expected, "kind={acp:?}");
+            // AcpKind is Copy — no .clone() needed
+            assert_eq!(map_tool_kind(acp), expected, "kind={acp:?}");
         }
     }
 

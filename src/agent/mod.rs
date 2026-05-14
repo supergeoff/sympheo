@@ -1,3 +1,4 @@
+pub mod acp;
 pub mod backend;
 pub mod cli;
 pub mod parser;

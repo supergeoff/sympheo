@@ -18,7 +18,6 @@
 /// let fixture = Fixture::default().with_stop_reason(FakeStopReason::EndTurn);
 /// let (client_rx, server_handle) = fixture.run_in_background().await;
 /// ```
-
 #[cfg(any(test, feature = "fake-acp"))]
 pub use inner::*;
 
@@ -29,9 +28,10 @@ mod inner {
 
     use agent_client_protocol::schema::{
         AgentCapabilities, ContentBlock, InitializeRequest, InitializeResponse,
-        NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOptionId,
-        PermissionOptionKind, PromptRequest, PromptResponse, ProtocolVersion,
+        NewSessionRequest, NewSessionResponse, PermissionOption, PromptRequest,
+        PromptResponse, ProtocolVersion, RequestPermissionRequest,
         SessionId, SessionNotification, SessionUpdate, StopReason, TextContent,
+        ToolCallId, ToolCallUpdate, ToolCallUpdateFields,
     };
     use agent_client_protocol::{Agent, Client, ConnectionTo, Responder};
     use tokio::io::DuplexStream;
@@ -71,7 +71,7 @@ mod inner {
         SimpleText { text: String, stop_reason: FakeStopReason },
         /// Immediately return with the given stop reason (no updates).
         Immediate(FakeStopReason),
-        /// Emit a `request_permission` for the given tool kind then complete.
+        /// Send a `session/request_permission` request to the client then complete.
         RequestPermission {
             options: Vec<PermissionOption>,
             stop_reason: FakeStopReason,
@@ -254,8 +254,25 @@ mod inner {
                 responder.respond(PromptResponse::new(stop_reason.into_acp()))
             }
             PromptScenario::RequestPermission { options, stop_reason } => {
-                let _ = options;
-                responder.respond(PromptResponse::new(stop_reason.into_acp()))
+                // Build a minimal ToolCallUpdate to accompany the permission request.
+                let tool_call = ToolCallUpdate::new(
+                    ToolCallId::new("fake-tc-perm"),
+                    ToolCallUpdateFields::default(),
+                );
+                let perm_req =
+                    RequestPermissionRequest::new(session_id, tool_call, options);
+
+                // cx.spawn() runs the future concurrently with the dispatch loop.
+                // We cannot use block_task() inline here — it would suspend the
+                // dispatch loop task and deadlock (the response can never arrive).
+                cx.spawn({
+                    let cx = cx.clone();
+                    async move {
+                        cx.send_request(perm_req).block_task().await?;
+                        responder.respond(PromptResponse::new(stop_reason.into_acp()))
+                    }
+                })?;
+                Ok(())
             }
             PromptScenario::AuthRequired => {
                 responder.respond_with_error(agent_client_protocol::util::internal_error(
@@ -314,6 +331,11 @@ mod inner {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use agent_client_protocol::schema::{
+            PermissionOptionId, PermissionOptionKind,
+            RequestPermissionOutcome, RequestPermissionResponse as AcpRequestPermissionResponse,
+            SelectedPermissionOutcome,
+        };
         use crate::agent::acp::adapter::AcpAdapter;
         use tokio::task::LocalSet;
 
@@ -371,7 +393,6 @@ mod inner {
             ];
             for r in reasons {
                 let acp = r.into_acp();
-                // Verify it's one of the known StopReason variants.
                 let _ = acp;
             }
         }
@@ -552,7 +573,8 @@ mod inner {
 
                     let result = Client
                         .connect_with(transport, |cx: ConnectionTo<Agent>| {
-                            let expected = expected_reason.clone();
+                            // StopReason is Copy — no .clone() needed
+                            let expected = expected_reason;
                             async move {
                                 cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
                                     .block_task()
@@ -582,8 +604,8 @@ mod inner {
             }).await;
         }
 
-        #[tokio::test(flavor = "current_thread")]
-        async fn fake_server_permission_scenarios_build_correctly() {
+        #[test]
+        fn fake_server_permission_scenarios_build_correctly() {
             let opts: Vec<PermissionOption> = vec![
                 PermissionOption::new(
                     PermissionOptionId::new("allow-once"),
@@ -617,8 +639,194 @@ mod inner {
                     stop_reason: FakeStopReason::EndTurn,
                 });
 
-            // Validate the scenarios were stored correctly.
             assert_eq!(fixture.scenarios.len(), 3);
+        }
+
+        /// Full round-trip: fake server sends `session/request_permission`; client
+        /// responds with `Selected`; server completes the prompt with `EndTurn`.
+        #[tokio::test(flavor = "current_thread")]
+        async fn fake_server_request_permission_full_flow() {
+            use agent_client_protocol::schema::{
+                NewSessionRequest as AcpNewSessionRequest, PromptRequest,
+            };
+
+            let opts = vec![
+                PermissionOption::new(
+                    PermissionOptionId::new("allow-once"),
+                    "Allow once",
+                    PermissionOptionKind::AllowOnce,
+                ),
+                PermissionOption::new(
+                    PermissionOptionId::new("reject-once"),
+                    "Reject once",
+                    PermissionOptionKind::RejectOnce,
+                ),
+            ];
+
+            let fixture = Fixture::new().with_scenario(PromptScenario::RequestPermission {
+                options: opts,
+                stop_reason: FakeStopReason::EndTurn,
+            });
+
+            let local = LocalSet::new();
+            local
+                .run_until(async {
+                    let (client_stream, _server) = spawn_fake_server(fixture).await;
+                    let (reader, writer) = tokio::io::split(client_stream);
+                    let transport = agent_client_protocol::ByteStreams::new(
+                        writer.compat_write(),
+                        reader.compat(),
+                    );
+
+                    let result = Client
+                        .builder()
+                        .on_receive_request(
+                            |req: RequestPermissionRequest,
+                             responder: Responder<AcpRequestPermissionResponse>,
+                             _cx: ConnectionTo<Agent>| {
+                                async move {
+                                    // Select the first option the server offered.
+                                    let option_id = req.options[0].option_id.clone();
+                                    responder.respond(AcpRequestPermissionResponse::new(
+                                        RequestPermissionOutcome::Selected(
+                                            SelectedPermissionOutcome::new(option_id),
+                                        ),
+                                    ))
+                                }
+                            },
+                            agent_client_protocol::on_receive_request!(),
+                        )
+                        .connect_with(transport, |cx: ConnectionTo<Agent>| async move {
+                            cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                                .block_task()
+                                .await?;
+                            let new_sess = cx
+                                .send_request(AcpNewSessionRequest::new(PathBuf::from("/tmp")))
+                                .block_task()
+                                .await?;
+                            let prompt_resp = cx
+                                .send_request(PromptRequest::new(
+                                    new_sess.session_id,
+                                    vec![ContentBlock::Text(TextContent::new("hello"))],
+                                ))
+                                .block_task()
+                                .await?;
+                            assert_eq!(
+                                prompt_resp.stop_reason,
+                                StopReason::EndTurn,
+                                "prompt should complete with EndTurn after permission exchange"
+                            );
+                            Ok(())
+                        })
+                        .await;
+
+                    assert!(
+                        result.is_ok(),
+                        "request_permission round-trip should succeed: {result:?}"
+                    );
+                })
+                .await;
+        }
+
+        /// Four permission modes × three scenarios each = 12 round-trips.
+        ///
+        /// Validates that the `RequestPermission` scenario correctly sends the
+        /// `session/request_permission` request and that the client's response is
+        /// received before the prompt completes.
+        #[tokio::test(flavor = "current_thread")]
+        async fn fake_server_request_permission_four_modes_three_scenarios() {
+            use agent_client_protocol::schema::{
+                NewSessionRequest as AcpNewSessionRequest, PromptRequest,
+            };
+
+            let modes_outcomes = [
+                (PermissionOptionKind::AllowOnce, StopReason::EndTurn),
+                (PermissionOptionKind::AllowAlways, StopReason::EndTurn),
+                (PermissionOptionKind::RejectOnce, StopReason::Cancelled),
+                (PermissionOptionKind::RejectAlways, StopReason::Cancelled),
+            ];
+
+            let local = LocalSet::new();
+            local
+                .run_until(async {
+                    for (kind, expected_stop_reason) in modes_outcomes {
+                        for scenario_idx in 0..3usize {
+                            let opts = vec![PermissionOption::new(
+                                PermissionOptionId::new(format!("opt-{scenario_idx}")),
+                                "Option",
+                                kind,
+                            )];
+                            let fake_stop = match expected_stop_reason {
+                                StopReason::EndTurn => FakeStopReason::EndTurn,
+                                _ => FakeStopReason::Cancelled,
+                            };
+                            let fixture = Fixture::new().with_scenario(
+                                PromptScenario::RequestPermission {
+                                    options: opts,
+                                    stop_reason: fake_stop,
+                                },
+                            );
+
+                            let (client_stream, _server) = spawn_fake_server(fixture).await;
+                            let (reader, writer) = tokio::io::split(client_stream);
+                            let transport = agent_client_protocol::ByteStreams::new(
+                                writer.compat_write(),
+                                reader.compat(),
+                            );
+
+                            let result = Client
+                                .builder()
+                                .on_receive_request(
+                                    |req: RequestPermissionRequest,
+                                     responder: Responder<AcpRequestPermissionResponse>,
+                                     _cx: ConnectionTo<Agent>| {
+                                        async move {
+                                            let option_id = req.options[0].option_id.clone();
+                                            responder.respond(AcpRequestPermissionResponse::new(
+                                                RequestPermissionOutcome::Selected(
+                                                    SelectedPermissionOutcome::new(option_id),
+                                                ),
+                                            ))
+                                        }
+                                    },
+                                    agent_client_protocol::on_receive_request!(),
+                                )
+                                .connect_with(
+                                    transport,
+                                    |cx: ConnectionTo<Agent>| async move {
+                                        cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                                            .block_task()
+                                            .await?;
+                                        let new_sess = cx
+                                            .send_request(AcpNewSessionRequest::new(
+                                                PathBuf::from("/tmp"),
+                                            ))
+                                            .block_task()
+                                            .await?;
+                                        let prompt_resp = cx
+                                            .send_request(PromptRequest::new(
+                                                new_sess.session_id,
+                                                vec![ContentBlock::Text(TextContent::new("q"))],
+                                            ))
+                                            .block_task()
+                                            .await?;
+                                        assert_eq!(
+                                            prompt_resp.stop_reason, expected_stop_reason,
+                                            "kind={kind:?} scenario={scenario_idx}"
+                                        );
+                                        Ok(())
+                                    },
+                                )
+                                .await;
+
+                            assert!(
+                                result.is_ok(),
+                                "mode={kind:?} scenario={scenario_idx} failed: {result:?}"
+                            );
+                        }
+                    }
+                })
+                .await;
         }
     }
 }

@@ -116,6 +116,10 @@ pub enum SympheoError {
     // PRD-v2 §5.2.3 — verification failure
     #[error("phase verification failed: {0}")]
     VerificationFailed(String),
+
+    // ACP §6.3 — protocol version negotiation
+    #[error("acp protocol version unsupported: {0}")]
+    AcpProtocolVersionUnsupported(String),
 }
 
 impl From<std::io::Error> for SympheoError {

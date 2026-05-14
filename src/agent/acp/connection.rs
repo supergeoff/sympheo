@@ -17,7 +17,7 @@ use agent_client_protocol::{Agent, Client, ConnectionTo};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tracing::debug;
 
-use crate::agent::acp::adapter::{sympheo_client_info, AcpAdapter};
+use crate::agent::acp::adapter::{AcpAdapter, sympheo_client_info};
 use crate::error::SympheoError;
 
 /// Minimum ACP protocol version Sympheo accepts.
@@ -86,10 +86,8 @@ impl AcpConnection {
             .take()
             .ok_or_else(|| SympheoError::TurnLaunchFailed("child stdout not available".into()))?;
 
-        let transport = agent_client_protocol::ByteStreams::new(
-            stdin.compat_write(),
-            stdout.compat(),
-        );
+        let transport =
+            agent_client_protocol::ByteStreams::new(stdin.compat_write(), stdout.compat());
 
         let client_capabilities = adapter.client_capabilities();
         let client_info = sympheo_client_info();
@@ -100,22 +98,17 @@ impl AcpConnection {
                     .client_capabilities(client_capabilities)
                     .client_info(client_info);
 
-                let resp = cx
-                    .send_request(init_req)
-                    .block_task()
-                    .await
-                    .map_err(|e| {
-                        agent_client_protocol::util::internal_error(format!("initialize failed: {e}"))
-                    })?;
+                let resp = cx.send_request(init_req).block_task().await.map_err(|e| {
+                    agent_client_protocol::util::internal_error(format!("initialize failed: {e}"))
+                })?;
 
                 debug!(
                     protocol_version = ?resp.protocol_version,
                     "ACP initialize OK"
                 );
 
-                check_protocol_version(resp.protocol_version).map_err(|e| {
-                    agent_client_protocol::util::internal_error(e.to_string())
-                })?;
+                check_protocol_version(resp.protocol_version)
+                    .map_err(|e| agent_client_protocol::util::internal_error(e.to_string()))?;
 
                 Ok(AcpConnection { _private: () })
             })
@@ -139,7 +132,10 @@ mod tests {
         let err = check_protocol_version(ProtocolVersion::V0).unwrap_err();
         match err {
             SympheoError::AcpProtocolVersionUnsupported(msg) => {
-                assert!(msg.contains("V0"), "message should name the offending version: {msg}");
+                assert!(
+                    msg.contains("V0"),
+                    "message should name the offending version: {msg}"
+                );
             }
             other => panic!("expected AcpProtocolVersionUnsupported, got {other:?}"),
         }

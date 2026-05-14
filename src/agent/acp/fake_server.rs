@@ -27,11 +27,10 @@ mod inner {
     use std::sync::Arc;
 
     use agent_client_protocol::schema::{
-        AgentCapabilities, ContentBlock, InitializeRequest, InitializeResponse,
-        NewSessionRequest, NewSessionResponse, PermissionOption, PromptRequest,
-        PromptResponse, ProtocolVersion, RequestPermissionRequest,
-        SessionId, SessionNotification, SessionUpdate, StopReason, TextContent,
-        ToolCallId, ToolCallUpdate, ToolCallUpdateFields,
+        AgentCapabilities, ContentBlock, InitializeRequest, InitializeResponse, NewSessionRequest,
+        NewSessionResponse, PermissionOption, PromptRequest, PromptResponse, ProtocolVersion,
+        RequestPermissionRequest, SessionId, SessionNotification, SessionUpdate, StopReason,
+        TextContent, ToolCallId, ToolCallUpdate, ToolCallUpdateFields,
     };
     use agent_client_protocol::{Agent, Client, ConnectionTo, Responder};
     use tokio::io::DuplexStream;
@@ -68,7 +67,10 @@ mod inner {
     #[derive(Debug, Clone)]
     pub enum PromptScenario {
         /// Emit a simple text update then complete.
-        SimpleText { text: String, stop_reason: FakeStopReason },
+        SimpleText {
+            text: String,
+            stop_reason: FakeStopReason,
+        },
         /// Immediately return with the given stop reason (no updates).
         Immediate(FakeStopReason),
         /// Send a `session/request_permission` request to the client then complete.
@@ -143,7 +145,9 @@ mod inner {
     /// half that can be passed to `AcpConnection::connect_streams`.
     ///
     /// The server task completes when the connection closes.
-    pub async fn spawn_fake_server(fixture: Fixture) -> (DuplexStream, tokio::task::JoinHandle<()>) {
+    pub async fn spawn_fake_server(
+        fixture: Fixture,
+    ) -> (DuplexStream, tokio::task::JoinHandle<()>) {
         let (client_stream, server_stream) = tokio::io::duplex(65536);
 
         let handle = tokio::task::spawn_local(async move {
@@ -166,9 +170,7 @@ mod inner {
         let transport =
             agent_client_protocol::ByteStreams::new(writer.compat_write(), reader.compat());
 
-        let protocol_version = fixture
-            .protocol_version
-            .unwrap_or(ProtocolVersion::V1);
+        let protocol_version = fixture.protocol_version.unwrap_or(ProtocolVersion::V1);
         let reject_initialize = fixture.reject_initialize;
         let scenarios = Arc::new(Mutex::new(fixture.scenarios));
 
@@ -253,14 +255,16 @@ mod inner {
             PromptScenario::Immediate(stop_reason) => {
                 responder.respond(PromptResponse::new(stop_reason.into_acp()))
             }
-            PromptScenario::RequestPermission { options, stop_reason } => {
+            PromptScenario::RequestPermission {
+                options,
+                stop_reason,
+            } => {
                 // Build a minimal ToolCallUpdate to accompany the permission request.
                 let tool_call = ToolCallUpdate::new(
                     ToolCallId::new("fake-tc-perm"),
                     ToolCallUpdateFields::default(),
                 );
-                let perm_req =
-                    RequestPermissionRequest::new(session_id, tool_call, options);
+                let perm_req = RequestPermissionRequest::new(session_id, tool_call, options);
 
                 // cx.spawn() runs the future concurrently with the dispatch loop.
                 // We cannot use block_task() inline here — it would suspend the
@@ -274,11 +278,8 @@ mod inner {
                 })?;
                 Ok(())
             }
-            PromptScenario::AuthRequired => {
-                responder.respond_with_error(agent_client_protocol::util::internal_error(
-                    "AUTH_REQUIRED",
-                ))
-            }
+            PromptScenario::AuthRequired => responder
+                .respond_with_error(agent_client_protocol::util::internal_error("AUTH_REQUIRED")),
         }
     }
 
@@ -286,9 +287,11 @@ mod inner {
     // AcpAdapter impl for tests
     // -----------------------------------------------------------------------
 
-    use std::collections::HashMap;
-    use agent_client_protocol::schema::{ClientCapabilities, NewSessionRequest as AcpNewSessionRequest};
     use crate::agent::acp::adapter::{AcpAdapter, default_client_capabilities};
+    use agent_client_protocol::schema::{
+        ClientCapabilities, NewSessionRequest as AcpNewSessionRequest,
+    };
+    use std::collections::HashMap;
 
     /// Minimal [`AcpAdapter`] used in unit tests to validate the trait signature.
     pub struct TestAdapter {
@@ -297,7 +300,9 @@ mod inner {
 
     impl TestAdapter {
         pub fn new(program: impl Into<String>) -> Self {
-            Self { program: program.into() }
+            Self {
+                program: program.into(),
+            }
         }
     }
 
@@ -331,12 +336,11 @@ mod inner {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use agent_client_protocol::schema::{
-            PermissionOptionId, PermissionOptionKind,
-            RequestPermissionOutcome, RequestPermissionResponse as AcpRequestPermissionResponse,
-            SelectedPermissionOutcome,
-        };
         use crate::agent::acp::adapter::AcpAdapter;
+        use agent_client_protocol::schema::{
+            PermissionOptionId, PermissionOptionKind, RequestPermissionOutcome,
+            RequestPermissionResponse as AcpRequestPermissionResponse, SelectedPermissionOutcome,
+        };
         use tokio::task::LocalSet;
 
         // Validate the TestAdapter satisfies the AcpAdapter trait signature.
@@ -402,147 +406,150 @@ mod inner {
         #[tokio::test(flavor = "current_thread")]
         async fn fake_server_v1_accepts_initialize() {
             let local = LocalSet::new();
-            local.run_until(async {
-                let fixture = Fixture::new();
-                let (client_stream, _server) = spawn_fake_server(fixture).await;
+            local
+                .run_until(async {
+                    let fixture = Fixture::new();
+                    let (client_stream, _server) = spawn_fake_server(fixture).await;
 
-                let (reader, writer) = tokio::io::split(client_stream);
-                let transport = agent_client_protocol::ByteStreams::new(
-                    writer.compat_write(),
-                    reader.compat(),
-                );
+                    let (reader, writer) = tokio::io::split(client_stream);
+                    let transport = agent_client_protocol::ByteStreams::new(
+                        writer.compat_write(),
+                        reader.compat(),
+                    );
 
-                let result = Client
-                    .connect_with(transport, |cx: ConnectionTo<Agent>| async move {
-                        let resp = cx
-                            .send_request(InitializeRequest::new(ProtocolVersion::V1))
-                            .block_task()
-                            .await?;
-                        assert_eq!(resp.protocol_version, ProtocolVersion::V1);
-                        Ok(())
-                    })
-                    .await;
+                    let result = Client
+                        .connect_with(transport, |cx: ConnectionTo<Agent>| async move {
+                            let resp = cx
+                                .send_request(InitializeRequest::new(ProtocolVersion::V1))
+                                .block_task()
+                                .await?;
+                            assert_eq!(resp.protocol_version, ProtocolVersion::V1);
+                            Ok(())
+                        })
+                        .await;
 
-                assert!(result.is_ok(), "V1 handshake should succeed: {result:?}");
-            }).await;
+                    assert!(result.is_ok(), "V1 handshake should succeed: {result:?}");
+                })
+                .await;
         }
 
         #[tokio::test(flavor = "current_thread")]
         async fn fake_server_v0_mismatch() {
             let local = LocalSet::new();
-            local.run_until(async {
-                let fixture = Fixture::new().with_protocol_version(ProtocolVersion::V0);
-                let (client_stream, _server) = spawn_fake_server(fixture).await;
+            local
+                .run_until(async {
+                    let fixture = Fixture::new().with_protocol_version(ProtocolVersion::V0);
+                    let (client_stream, _server) = spawn_fake_server(fixture).await;
 
-                let (reader, writer) = tokio::io::split(client_stream);
-                let transport = agent_client_protocol::ByteStreams::new(
-                    writer.compat_write(),
-                    reader.compat(),
-                );
+                    let (reader, writer) = tokio::io::split(client_stream);
+                    let transport = agent_client_protocol::ByteStreams::new(
+                        writer.compat_write(),
+                        reader.compat(),
+                    );
 
-                let result = Client
-                    .connect_with(transport, |cx: ConnectionTo<Agent>| async move {
-                        let resp = cx
-                            .send_request(InitializeRequest::new(ProtocolVersion::V1))
-                            .block_task()
-                            .await?;
-                        // Simulate what AcpConnection::connect does: version check
-                        crate::agent::acp::connection::check_protocol_version(
-                            resp.protocol_version,
-                        )
-                        .map_err(|e| {
-                            agent_client_protocol::util::internal_error(e.to_string())
+                    let result = Client
+                        .connect_with(transport, |cx: ConnectionTo<Agent>| async move {
+                            let resp = cx
+                                .send_request(InitializeRequest::new(ProtocolVersion::V1))
+                                .block_task()
+                                .await?;
+                            // Simulate what AcpConnection::connect does: version check
+                            crate::agent::acp::connection::check_protocol_version(
+                                resp.protocol_version,
+                            )
+                            .map_err(|e| agent_client_protocol::util::internal_error(e.to_string()))
                         })
-                    })
-                    .await;
+                        .await;
 
-                assert!(result.is_err(), "V0 should trigger an error");
-            }).await;
+                    assert!(result.is_err(), "V0 should trigger an error");
+                })
+                .await;
         }
 
         #[tokio::test(flavor = "current_thread")]
         async fn fake_server_reject_initialize_simulates_auth_required() {
             let local = LocalSet::new();
-            local.run_until(async {
-                let fixture = Fixture::new().with_reject_initialize();
-                let (client_stream, _server) = spawn_fake_server(fixture).await;
+            local
+                .run_until(async {
+                    let fixture = Fixture::new().with_reject_initialize();
+                    let (client_stream, _server) = spawn_fake_server(fixture).await;
 
-                let (reader, writer) = tokio::io::split(client_stream);
-                let transport = agent_client_protocol::ByteStreams::new(
-                    writer.compat_write(),
-                    reader.compat(),
-                );
+                    let (reader, writer) = tokio::io::split(client_stream);
+                    let transport = agent_client_protocol::ByteStreams::new(
+                        writer.compat_write(),
+                        reader.compat(),
+                    );
 
-                let result = Client
-                    .connect_with(transport, |cx: ConnectionTo<Agent>| async move {
-                        let _resp = cx
-                            .send_request(InitializeRequest::new(ProtocolVersion::V1))
-                            .block_task()
-                            .await?;
-                        Ok(())
-                    })
-                    .await;
+                    let result = Client
+                        .connect_with(transport, |cx: ConnectionTo<Agent>| async move {
+                            let _resp = cx
+                                .send_request(InitializeRequest::new(ProtocolVersion::V1))
+                                .block_task()
+                                .await?;
+                            Ok(())
+                        })
+                        .await;
 
-                assert!(result.is_err(), "AUTH_REQUIRED should produce an error");
-            }).await;
+                    assert!(result.is_err(), "AUTH_REQUIRED should produce an error");
+                })
+                .await;
         }
 
         #[tokio::test(flavor = "current_thread")]
         async fn fake_server_full_lifecycle() {
             use agent_client_protocol::schema::NewSessionRequest as AcpNewSessionRequest;
             let local = LocalSet::new();
-            local.run_until(async {
-                let fixture = Fixture::new()
-                    .with_scenario(PromptScenario::SimpleText {
+            local
+                .run_until(async {
+                    let fixture = Fixture::new().with_scenario(PromptScenario::SimpleText {
                         text: "result".to_string(),
                         stop_reason: FakeStopReason::EndTurn,
                     });
 
-                let (client_stream, _server) = spawn_fake_server(fixture).await;
-                let (reader, writer) = tokio::io::split(client_stream);
-                let transport = agent_client_protocol::ByteStreams::new(
-                    writer.compat_write(),
-                    reader.compat(),
-                );
+                    let (client_stream, _server) = spawn_fake_server(fixture).await;
+                    let (reader, writer) = tokio::io::split(client_stream);
+                    let transport = agent_client_protocol::ByteStreams::new(
+                        writer.compat_write(),
+                        reader.compat(),
+                    );
 
-                let result = Client
-                    .connect_with(transport, |cx: ConnectionTo<Agent>| async move {
-                        // initialize
-                        let init = cx
-                            .send_request(InitializeRequest::new(ProtocolVersion::V1))
-                            .block_task()
-                            .await?;
-                        assert_eq!(init.protocol_version, ProtocolVersion::V1);
+                    let result = Client
+                        .connect_with(transport, |cx: ConnectionTo<Agent>| async move {
+                            // initialize
+                            let init = cx
+                                .send_request(InitializeRequest::new(ProtocolVersion::V1))
+                                .block_task()
+                                .await?;
+                            assert_eq!(init.protocol_version, ProtocolVersion::V1);
 
-                        // session/new
-                        let new_sess = cx
-                            .send_request(AcpNewSessionRequest::new(PathBuf::from("/tmp")))
-                            .block_task()
-                            .await?;
-                        let session_id = new_sess.session_id;
+                            // session/new
+                            let new_sess = cx
+                                .send_request(AcpNewSessionRequest::new(PathBuf::from("/tmp")))
+                                .block_task()
+                                .await?;
+                            let session_id = new_sess.session_id;
 
-                        // session/prompt
-                        let prompt_resp = cx
-                            .send_request(
-                                agent_client_protocol::schema::PromptRequest::new(
+                            // session/prompt
+                            let prompt_resp = cx
+                                .send_request(agent_client_protocol::schema::PromptRequest::new(
                                     session_id,
                                     vec![ContentBlock::Text(TextContent::new("hello"))],
-                                ),
-                            )
-                            .block_task()
-                            .await?;
+                                ))
+                                .block_task()
+                                .await?;
 
-                        assert_eq!(
-                            prompt_resp.stop_reason,
-                            StopReason::EndTurn,
-                            "should complete with EndTurn"
-                        );
-                        Ok(())
-                    })
-                    .await;
+                            assert_eq!(
+                                prompt_resp.stop_reason,
+                                StopReason::EndTurn,
+                                "should complete with EndTurn"
+                            );
+                            Ok(())
+                        })
+                        .await;
 
-                assert!(result.is_ok(), "full lifecycle should succeed: {result:?}");
-            }).await;
+                    assert!(result.is_ok(), "full lifecycle should succeed: {result:?}");
+                })
+                .await;
         }
 
         #[tokio::test(flavor = "current_thread")]
@@ -559,49 +566,53 @@ mod inner {
             ];
 
             let local = LocalSet::new();
-            local.run_until(async {
-                for (fake_reason, expected_reason) in scenarios {
-                    let fixture = Fixture::new()
-                        .with_scenario(PromptScenario::Immediate(fake_reason));
+            local
+                .run_until(async {
+                    for (fake_reason, expected_reason) in scenarios {
+                        let fixture =
+                            Fixture::new().with_scenario(PromptScenario::Immediate(fake_reason));
 
-                    let (client_stream, _server) = spawn_fake_server(fixture).await;
-                    let (reader, writer) = tokio::io::split(client_stream);
-                    let transport = agent_client_protocol::ByteStreams::new(
-                        writer.compat_write(),
-                        reader.compat(),
-                    );
+                        let (client_stream, _server) = spawn_fake_server(fixture).await;
+                        let (reader, writer) = tokio::io::split(client_stream);
+                        let transport = agent_client_protocol::ByteStreams::new(
+                            writer.compat_write(),
+                            reader.compat(),
+                        );
 
-                    let result = Client
-                        .connect_with(transport, |cx: ConnectionTo<Agent>| {
-                            // StopReason is Copy — no .clone() needed
-                            let expected = expected_reason;
-                            async move {
-                                cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
-                                    .block_task()
-                                    .await?;
-                                let new_sess = cx
-                                    .send_request(AcpNewSessionRequest::new(PathBuf::from("/tmp")))
-                                    .block_task()
-                                    .await?;
-                                let prompt_resp = cx
-                                    .send_request(PromptRequest::new(
-                                        new_sess.session_id,
-                                        vec![ContentBlock::Text(TextContent::new("q"))],
-                                    ))
-                                    .block_task()
-                                    .await?;
-                                assert_eq!(
-                                    prompt_resp.stop_reason, expected,
-                                    "stop reason mismatch"
-                                );
-                                Ok(())
-                            }
-                        })
-                        .await;
+                        let result = Client
+                            .connect_with(transport, |cx: ConnectionTo<Agent>| {
+                                // StopReason is Copy — no .clone() needed
+                                let expected = expected_reason;
+                                async move {
+                                    cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                                        .block_task()
+                                        .await?;
+                                    let new_sess = cx
+                                        .send_request(AcpNewSessionRequest::new(PathBuf::from(
+                                            "/tmp",
+                                        )))
+                                        .block_task()
+                                        .await?;
+                                    let prompt_resp = cx
+                                        .send_request(PromptRequest::new(
+                                            new_sess.session_id,
+                                            vec![ContentBlock::Text(TextContent::new("q"))],
+                                        ))
+                                        .block_task()
+                                        .await?;
+                                    assert_eq!(
+                                        prompt_resp.stop_reason, expected,
+                                        "stop reason mismatch"
+                                    );
+                                    Ok(())
+                                }
+                            })
+                            .await;
 
-                    assert!(result.is_ok(), "stop reason test failed: {result:?}");
-                }
-            }).await;
+                        assert!(result.is_ok(), "stop reason test failed: {result:?}");
+                    }
+                })
+                .await;
         }
 
         #[test]
@@ -760,12 +771,11 @@ mod inner {
                                 StopReason::EndTurn => FakeStopReason::EndTurn,
                                 _ => FakeStopReason::Cancelled,
                             };
-                            let fixture = Fixture::new().with_scenario(
-                                PromptScenario::RequestPermission {
+                            let fixture =
+                                Fixture::new().with_scenario(PromptScenario::RequestPermission {
                                     options: opts,
                                     stop_reason: fake_stop,
-                                },
-                            );
+                                });
 
                             let (client_stream, _server) = spawn_fake_server(fixture).await;
                             let (reader, writer) = tokio::io::split(client_stream);
@@ -791,32 +801,29 @@ mod inner {
                                     },
                                     agent_client_protocol::on_receive_request!(),
                                 )
-                                .connect_with(
-                                    transport,
-                                    |cx: ConnectionTo<Agent>| async move {
-                                        cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
-                                            .block_task()
-                                            .await?;
-                                        let new_sess = cx
-                                            .send_request(AcpNewSessionRequest::new(
-                                                PathBuf::from("/tmp"),
-                                            ))
-                                            .block_task()
-                                            .await?;
-                                        let prompt_resp = cx
-                                            .send_request(PromptRequest::new(
-                                                new_sess.session_id,
-                                                vec![ContentBlock::Text(TextContent::new("q"))],
-                                            ))
-                                            .block_task()
-                                            .await?;
-                                        assert_eq!(
-                                            prompt_resp.stop_reason, expected_stop_reason,
-                                            "kind={kind:?} scenario={scenario_idx}"
-                                        );
-                                        Ok(())
-                                    },
-                                )
+                                .connect_with(transport, |cx: ConnectionTo<Agent>| async move {
+                                    cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                                        .block_task()
+                                        .await?;
+                                    let new_sess = cx
+                                        .send_request(AcpNewSessionRequest::new(PathBuf::from(
+                                            "/tmp",
+                                        )))
+                                        .block_task()
+                                        .await?;
+                                    let prompt_resp = cx
+                                        .send_request(PromptRequest::new(
+                                            new_sess.session_id,
+                                            vec![ContentBlock::Text(TextContent::new("q"))],
+                                        ))
+                                        .block_task()
+                                        .await?;
+                                    assert_eq!(
+                                        prompt_resp.stop_reason, expected_stop_reason,
+                                        "kind={kind:?} scenario={scenario_idx}"
+                                    );
+                                    Ok(())
+                                })
                                 .await;
 
                             assert!(

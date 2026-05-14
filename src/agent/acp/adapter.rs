@@ -138,7 +138,10 @@ mod tests {
         let cmd = MinimalAdapter.spawn_spec(&HashMap::new());
         let prog = cmd.get_program().to_string_lossy().into_owned();
         assert_eq!(prog, "mise");
-        let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
         assert_eq!(args[0], "exec");
         assert_eq!(args[1], "--");
         assert_eq!(args[2], "test-agent");
@@ -148,7 +151,9 @@ mod tests {
     fn spawn_spec_merges_env() {
         let env = HashMap::from([("FOO".to_string(), "bar".to_string())]);
         let cmd = MinimalAdapter.spawn_spec(&env);
-        let found = cmd.get_envs().any(|(k, v)| k == "FOO" && v == Some("bar".as_ref()));
+        let found = cmd
+            .get_envs()
+            .any(|(k, v)| k == "FOO" && v == Some("bar".as_ref()));
         assert!(found);
     }
 

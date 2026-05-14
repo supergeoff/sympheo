@@ -1,3 +1,4 @@
+use agent_client_protocol::Responder;
 /// §6.4 — `session/request_permission` handler.
 ///
 /// The matrix function and decision logic are pure and independently testable.
@@ -7,7 +8,6 @@ use agent_client_protocol::schema::{
     RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
     ToolKind as AcpToolKind,
 };
-use agent_client_protocol::Responder;
 use tracing::warn;
 
 use crate::agent::cli::Permission;
@@ -126,11 +126,7 @@ pub fn handle_request_permission(
     adapter: &str,
     cancelling: bool,
 ) -> Result<(), agent_client_protocol::Error> {
-    let tool_kind = request
-        .tool_call
-        .fields
-        .kind
-        .unwrap_or(AcpToolKind::Other);
+    let tool_kind = request.tool_call.fields.kind.unwrap_or(AcpToolKind::Other);
     let tool_title = request
         .tool_call
         .fields
@@ -208,93 +204,161 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn bypass_read() { check(Some(BypassPermissions), Read, Allow); }
+    fn bypass_read() {
+        check(Some(BypassPermissions), Read, Allow);
+    }
     #[test]
-    fn bypass_edit() { check(Some(BypassPermissions), Edit, Allow); }
+    fn bypass_edit() {
+        check(Some(BypassPermissions), Edit, Allow);
+    }
     #[test]
-    fn bypass_delete() { check(Some(BypassPermissions), Delete, Allow); }
+    fn bypass_delete() {
+        check(Some(BypassPermissions), Delete, Allow);
+    }
     #[test]
-    fn bypass_move() { check(Some(BypassPermissions), Move, Allow); }
+    fn bypass_move() {
+        check(Some(BypassPermissions), Move, Allow);
+    }
     #[test]
-    fn bypass_search() { check(Some(BypassPermissions), Search, Allow); }
+    fn bypass_search() {
+        check(Some(BypassPermissions), Search, Allow);
+    }
     #[test]
-    fn bypass_execute() { check(Some(BypassPermissions), Execute, Allow); }
+    fn bypass_execute() {
+        check(Some(BypassPermissions), Execute, Allow);
+    }
     #[test]
-    fn bypass_think() { check(Some(BypassPermissions), Think, Allow); }
+    fn bypass_think() {
+        check(Some(BypassPermissions), Think, Allow);
+    }
     #[test]
-    fn bypass_fetch() { check(Some(BypassPermissions), Fetch, Allow); }
+    fn bypass_fetch() {
+        check(Some(BypassPermissions), Fetch, Allow);
+    }
 
     // -----------------------------------------------------------------------
     // Matrix — AcceptEdits: 8 cells, all Allow
     // -----------------------------------------------------------------------
 
     #[test]
-    fn accept_edits_read() { check(Some(AcceptEdits), Read, Allow); }
+    fn accept_edits_read() {
+        check(Some(AcceptEdits), Read, Allow);
+    }
     #[test]
-    fn accept_edits_edit() { check(Some(AcceptEdits), Edit, Allow); }
+    fn accept_edits_edit() {
+        check(Some(AcceptEdits), Edit, Allow);
+    }
     #[test]
-    fn accept_edits_delete() { check(Some(AcceptEdits), Delete, Allow); }
+    fn accept_edits_delete() {
+        check(Some(AcceptEdits), Delete, Allow);
+    }
     #[test]
-    fn accept_edits_move() { check(Some(AcceptEdits), Move, Allow); }
+    fn accept_edits_move() {
+        check(Some(AcceptEdits), Move, Allow);
+    }
     #[test]
-    fn accept_edits_search() { check(Some(AcceptEdits), Search, Allow); }
+    fn accept_edits_search() {
+        check(Some(AcceptEdits), Search, Allow);
+    }
     #[test]
-    fn accept_edits_execute() { check(Some(AcceptEdits), Execute, Allow); }
+    fn accept_edits_execute() {
+        check(Some(AcceptEdits), Execute, Allow);
+    }
     #[test]
-    fn accept_edits_think() { check(Some(AcceptEdits), Think, Allow); }
+    fn accept_edits_think() {
+        check(Some(AcceptEdits), Think, Allow);
+    }
     #[test]
-    fn accept_edits_fetch() { check(Some(AcceptEdits), Fetch, Allow); }
+    fn accept_edits_fetch() {
+        check(Some(AcceptEdits), Fetch, Allow);
+    }
 
     // -----------------------------------------------------------------------
     // Matrix — Plan: 4 Allow, 4 Reject
     // -----------------------------------------------------------------------
 
     #[test]
-    fn plan_read() { check(Some(Plan), Read, Allow); }
+    fn plan_read() {
+        check(Some(Plan), Read, Allow);
+    }
     #[test]
-    fn plan_search() { check(Some(Plan), Search, Allow); }
+    fn plan_search() {
+        check(Some(Plan), Search, Allow);
+    }
     #[test]
-    fn plan_think() { check(Some(Plan), Think, Allow); }
+    fn plan_think() {
+        check(Some(Plan), Think, Allow);
+    }
     #[test]
-    fn plan_fetch() { check(Some(Plan), Fetch, Allow); }
+    fn plan_fetch() {
+        check(Some(Plan), Fetch, Allow);
+    }
     #[test]
-    fn plan_edit() { check(Some(Plan), Edit, Reject); }
+    fn plan_edit() {
+        check(Some(Plan), Edit, Reject);
+    }
     #[test]
-    fn plan_delete() { check(Some(Plan), Delete, Reject); }
+    fn plan_delete() {
+        check(Some(Plan), Delete, Reject);
+    }
     #[test]
-    fn plan_move() { check(Some(Plan), Move, Reject); }
+    fn plan_move() {
+        check(Some(Plan), Move, Reject);
+    }
     #[test]
-    fn plan_execute() { check(Some(Plan), Execute, Reject); }
+    fn plan_execute() {
+        check(Some(Plan), Execute, Reject);
+    }
 
     // -----------------------------------------------------------------------
     // Matrix — Default: 7 Allow, 1 Reject (Execute)
     // -----------------------------------------------------------------------
 
     #[test]
-    fn default_read() { check(Some(Default), Read, Allow); }
+    fn default_read() {
+        check(Some(Default), Read, Allow);
+    }
     #[test]
-    fn default_edit() { check(Some(Default), Edit, Allow); }
+    fn default_edit() {
+        check(Some(Default), Edit, Allow);
+    }
     #[test]
-    fn default_delete() { check(Some(Default), Delete, Allow); }
+    fn default_delete() {
+        check(Some(Default), Delete, Allow);
+    }
     #[test]
-    fn default_move() { check(Some(Default), Move, Allow); }
+    fn default_move() {
+        check(Some(Default), Move, Allow);
+    }
     #[test]
-    fn default_search() { check(Some(Default), Search, Allow); }
+    fn default_search() {
+        check(Some(Default), Search, Allow);
+    }
     #[test]
-    fn default_execute() { check(Some(Default), Execute, Reject); }
+    fn default_execute() {
+        check(Some(Default), Execute, Reject);
+    }
     #[test]
-    fn default_think() { check(Some(Default), Think, Allow); }
+    fn default_think() {
+        check(Some(Default), Think, Allow);
+    }
     #[test]
-    fn default_fetch() { check(Some(Default), Fetch, Allow); }
+    fn default_fetch() {
+        check(Some(Default), Fetch, Allow);
+    }
 
     // -----------------------------------------------------------------------
     // Matrix — None (no mode set): mirrors Default
     // -----------------------------------------------------------------------
 
     #[test]
-    fn none_execute_is_reject() { check(None, Execute, Reject); }
+    fn none_execute_is_reject() {
+        check(None, Execute, Reject);
+    }
     #[test]
-    fn none_read_is_allow() { check(None, Read, Allow); }
+    fn none_read_is_allow() {
+        check(None, Read, Allow);
+    }
 
     // -----------------------------------------------------------------------
     // decide_permission — cancelling in progress

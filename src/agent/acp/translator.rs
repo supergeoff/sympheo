@@ -92,9 +92,7 @@ fn map_tool_status(status: agent_client_protocol::schema::ToolCallStatus) -> Too
     }
 }
 
-fn map_plan_status(
-    status: agent_client_protocol::schema::PlanEntryStatus,
-) -> PlanStepStatus {
+fn map_plan_status(status: agent_client_protocol::schema::PlanEntryStatus) -> PlanStepStatus {
     use agent_client_protocol::schema::PlanEntryStatus as AcpStatus;
     match status {
         AcpStatus::Pending => PlanStepStatus::Pending,
@@ -209,8 +207,8 @@ fn translate_plan(plan: Plan) -> AgentEvent {
 mod tests {
     use super::*;
     use agent_client_protocol::schema::{
-        ContentChunk, Diff as AcpDiff, PlanEntry, PlanEntryPriority, PlanEntryStatus,
-        ToolCallId, ToolCallUpdate as AcpToolCallUpdate, ToolCallUpdateFields,
+        ContentChunk, Diff as AcpDiff, PlanEntry, PlanEntryPriority, PlanEntryStatus, ToolCallId,
+        ToolCallUpdate as AcpToolCallUpdate, ToolCallUpdateFields,
     };
 
     /// Convenience wrapper: translate a single update and assert exactly one event is returned.
@@ -258,7 +256,11 @@ mod tests {
         );
         assert_eq!(events.len(), 1);
         match &events[0] {
-            AgentEvent::Text { timestamp, session_id, part } => {
+            AgentEvent::Text {
+                timestamp,
+                session_id,
+                part,
+            } => {
                 assert_eq!(*timestamp, 12345);
                 assert_eq!(session_id, "my-session");
                 assert_eq!(part.session_id, "my-session");
@@ -288,7 +290,13 @@ mod tests {
             .raw_input(serde_json::json!({"path": "/tmp/foo"}));
         let event = translate_one(SessionUpdate::ToolCall(tc));
         match event {
-            AgentEvent::ToolCall { id, title, kind, raw_input, locations } => {
+            AgentEvent::ToolCall {
+                id,
+                title,
+                kind,
+                raw_input,
+                locations,
+            } => {
                 assert_eq!(id, "tc-1");
                 assert_eq!(title, "Read file");
                 assert_eq!(kind, ToolKind::Read);
@@ -320,7 +328,12 @@ mod tests {
         let tcu = AcpToolCallUpdate::new(ToolCallId::new("tc-3"), fields);
         let event = translate_one(SessionUpdate::ToolCallUpdate(tcu));
         match event {
-            AgentEvent::ToolCallUpdate { id, status, content, raw_output } => {
+            AgentEvent::ToolCallUpdate {
+                id,
+                status,
+                content,
+                raw_output,
+            } => {
                 assert_eq!(id, "tc-3");
                 assert_eq!(status, Some(ToolStatus::Completed));
                 assert!(content.is_empty());
@@ -336,7 +349,12 @@ mod tests {
         let tcu = AcpToolCallUpdate::new(ToolCallId::new("tc-4"), fields);
         let event = translate_one(SessionUpdate::ToolCallUpdate(tcu));
         match event {
-            AgentEvent::ToolCallUpdate { id, status, content, raw_output } => {
+            AgentEvent::ToolCallUpdate {
+                id,
+                status,
+                content,
+                raw_output,
+            } => {
                 assert_eq!(id, "tc-4");
                 assert!(status.is_none());
                 assert!(content.is_empty());
@@ -356,10 +374,19 @@ mod tests {
         let tcu = AcpToolCallUpdate::new(ToolCallId::new("tc-diff"), fields);
 
         let events = translate("", SessionUpdate::ToolCallUpdate(tcu), 0);
-        assert_eq!(events.len(), 2, "expected AgentEvent::Diff + AgentEvent::ToolCallUpdate");
+        assert_eq!(
+            events.len(),
+            2,
+            "expected AgentEvent::Diff + AgentEvent::ToolCallUpdate"
+        );
 
         match &events[0] {
-            AgentEvent::Diff { tool_call_id, path, old_text, new_text } => {
+            AgentEvent::Diff {
+                tool_call_id,
+                path,
+                old_text,
+                new_text,
+            } => {
                 assert_eq!(tool_call_id, "tc-diff");
                 assert_eq!(path.to_str().unwrap(), "/path/file.rs");
                 assert_eq!(old_text.as_deref(), Some("old content"));
@@ -388,7 +415,9 @@ mod tests {
         let events = translate("", SessionUpdate::ToolCallUpdate(tcu), 0);
         assert_eq!(events.len(), 2);
         match &events[0] {
-            AgentEvent::Diff { old_text, new_text, .. } => {
+            AgentEvent::Diff {
+                old_text, new_text, ..
+            } => {
                 assert!(old_text.is_none());
                 assert_eq!(new_text, "fn main() {}");
             }
@@ -401,7 +430,11 @@ mod tests {
         let fields = ToolCallUpdateFields::default();
         let tcu = AcpToolCallUpdate::new(ToolCallId::new("tc-nodiff"), fields);
         let events = translate("", SessionUpdate::ToolCallUpdate(tcu), 0);
-        assert_eq!(events.len(), 1, "no diff content → single ToolCallUpdate event");
+        assert_eq!(
+            events.len(),
+            1,
+            "no diff content → single ToolCallUpdate event"
+        );
         assert!(matches!(events[0], AgentEvent::ToolCallUpdate { .. }));
     }
 
@@ -411,7 +444,11 @@ mod tests {
     fn plan_translation() {
         let plan = Plan::new(vec![
             PlanEntry::new("Step 1", PlanEntryPriority::High, PlanEntryStatus::Pending),
-            PlanEntry::new("Step 2", PlanEntryPriority::Medium, PlanEntryStatus::InProgress),
+            PlanEntry::new(
+                "Step 2",
+                PlanEntryPriority::Medium,
+                PlanEntryStatus::InProgress,
+            ),
             PlanEntry::new("Step 3", PlanEntryPriority::Low, PlanEntryStatus::Completed),
         ]);
         let event = translate_one(SessionUpdate::Plan(plan));
@@ -450,9 +487,9 @@ mod tests {
     #[test]
     fn current_mode_update_maps_to_other() {
         use agent_client_protocol::schema::CurrentModeUpdate;
-        let event = translate_one(SessionUpdate::CurrentModeUpdate(
-            CurrentModeUpdate::new("build"),
-        ));
+        let event = translate_one(SessionUpdate::CurrentModeUpdate(CurrentModeUpdate::new(
+            "build",
+        )));
         assert!(matches!(event, AgentEvent::Other));
     }
 
@@ -491,7 +528,13 @@ mod tests {
     fn all_plan_statuses_map_correctly() {
         use agent_client_protocol::schema::PlanEntryStatus as AcpStatus;
         assert_eq!(map_plan_status(AcpStatus::Pending), PlanStepStatus::Pending);
-        assert_eq!(map_plan_status(AcpStatus::InProgress), PlanStepStatus::InProgress);
-        assert_eq!(map_plan_status(AcpStatus::Completed), PlanStepStatus::Completed);
+        assert_eq!(
+            map_plan_status(AcpStatus::InProgress),
+            PlanStepStatus::InProgress
+        );
+        assert_eq!(
+            map_plan_status(AcpStatus::Completed),
+            PlanStepStatus::Completed
+        );
     }
 }

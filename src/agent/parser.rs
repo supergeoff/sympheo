@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type")]
@@ -108,6 +109,65 @@ where
 {
     let v = i64::deserialize(d)?;
     Ok(v.max(0) as u64)
+}
+
+/// ACP-aligned tool kind — what category of operation a tool performs.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolKind {
+    Read,
+    Edit,
+    Delete,
+    Move,
+    Search,
+    Execute,
+    Think,
+    Fetch,
+    Other,
+}
+
+/// Lifecycle status of an in-flight tool call.
+/// NOTE: `Cancelled` is intentionally absent — cancellation flows through
+/// `PromptResponse`, not through the tool status channel.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Failed,
+}
+
+/// Execution status of a single step inside a `Plan`.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanStepStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+/// A file or code location referenced by a tool call.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct Location {
+    pub path: String,
+    pub start_line: Option<u32>,
+    pub end_line: Option<u32>,
+}
+
+/// A single content item returned in a `ToolCallUpdate`.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct ToolCallContent {
+    #[serde(rename = "type")]
+    pub content_type: String,
+    pub text: Option<String>,
+}
+
+/// A single step within a `Plan` event.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct PlanStep {
+    pub title: String,
+    pub status: PlanStepStatus,
 }
 
 /// SPEC §10.2.2: outcome of a single agent turn. Replaces the previous
@@ -245,6 +305,45 @@ pub enum AgentEvent {
         session_id: String,
         part: StepFinishPart,
     },
+    /// ACP `session/update` — tool invocation initiated by the agent.
+    #[serde(rename = "tool_call")]
+    ToolCall {
+        id: String,
+        title: String,
+        kind: ToolKind,
+        raw_input: serde_json::Value,
+        #[serde(default)]
+        locations: Vec<Location>,
+    },
+    /// ACP `session/update` — incremental or final update for a tool call.
+    /// All fields except `id` are optional to support merge-incremental delivery.
+    #[serde(rename = "tool_call_update")]
+    ToolCallUpdate {
+        id: String,
+        status: Option<ToolStatus>,
+        #[serde(default)]
+        content: Vec<ToolCallContent>,
+        raw_output: Option<serde_json::Value>,
+    },
+    /// ACP `session/update` — file diff produced by a tool call.
+    #[serde(rename = "diff")]
+    Diff {
+        tool_call_id: String,
+        path: PathBuf,
+        old_text: Option<String>,
+        new_text: String,
+    },
+    /// ACP `session/update` — structured execution plan emitted by the agent.
+    #[serde(rename = "plan")]
+    Plan {
+        #[serde(default)]
+        steps: Vec<PlanStep>,
+    },
+    /// ACP `session/update` — agent reasoning delta (extended thinking).
+    #[serde(rename = "thinking")]
+    Thinking { delta: String },
+    /// Catch-all for ACP types not yet handled (e.g. `available_commands_update`,
+    /// `current_mode_update`). Required because ACP types are `#[non_exhaustive]`.
     #[serde(other)]
     Other,
 }
@@ -433,5 +532,197 @@ mod tests {
     #[test]
     fn test_parse_event_line_malformed_ignored() {
         assert!(parse_event_line("not json").is_none());
+    }
+
+    // --- New ACP variant tests (Lot 2) ---
+
+    #[test]
+    fn test_parse_event_line_tool_call() {
+        let json = r#"{
+            "type": "tool_call",
+            "id": "tc-1",
+            "title": "Read file",
+            "kind": "read",
+            "raw_input": {"path": "/tmp/foo.txt"},
+            "locations": [{"path": "/tmp/foo.txt", "start_line": 1, "end_line": 10}]
+        }"#;
+        let event = parse_event_line(json).unwrap();
+        match event {
+            AgentEvent::ToolCall {
+                id,
+                title,
+                kind,
+                raw_input,
+                locations,
+            } => {
+                assert_eq!(id, "tc-1");
+                assert_eq!(title, "Read file");
+                assert_eq!(kind, ToolKind::Read);
+                assert_eq!(raw_input["path"], "/tmp/foo.txt");
+                assert_eq!(locations.len(), 1);
+                assert_eq!(locations[0].path, "/tmp/foo.txt");
+                assert_eq!(locations[0].start_line, Some(1));
+                assert_eq!(locations[0].end_line, Some(10));
+            }
+            _ => panic!("expected ToolCall"),
+        }
+    }
+
+    #[test]
+    fn test_parse_event_line_tool_call_update() {
+        let json = r#"{
+            "type": "tool_call_update",
+            "id": "tc-1",
+            "status": "completed",
+            "content": [{"type": "text", "text": "file contents here"}],
+            "raw_output": {"result": "ok"}
+        }"#;
+        let event = parse_event_line(json).unwrap();
+        match event {
+            AgentEvent::ToolCallUpdate {
+                id,
+                status,
+                content,
+                raw_output,
+            } => {
+                assert_eq!(id, "tc-1");
+                assert_eq!(status, Some(ToolStatus::Completed));
+                assert_eq!(content.len(), 1);
+                assert_eq!(content[0].content_type, "text");
+                assert_eq!(content[0].text.as_deref(), Some("file contents here"));
+                assert!(raw_output.is_some());
+            }
+            _ => panic!("expected ToolCallUpdate"),
+        }
+    }
+
+    #[test]
+    fn test_parse_event_line_tool_call_update_partial() {
+        let json = r#"{"type":"tool_call_update","id":"tc-2"}"#;
+        let event = parse_event_line(json).unwrap();
+        match event {
+            AgentEvent::ToolCallUpdate {
+                id,
+                status,
+                content,
+                raw_output,
+            } => {
+                assert_eq!(id, "tc-2");
+                assert!(status.is_none());
+                assert!(content.is_empty());
+                assert!(raw_output.is_none());
+            }
+            _ => panic!("expected ToolCallUpdate"),
+        }
+    }
+
+    #[test]
+    fn test_parse_event_line_diff() {
+        let json = r#"{
+            "type": "diff",
+            "tool_call_id": "tc-1",
+            "path": "/tmp/foo.rs",
+            "old_text": "fn old() {}",
+            "new_text": "fn new() {}"
+        }"#;
+        let event = parse_event_line(json).unwrap();
+        match event {
+            AgentEvent::Diff {
+                tool_call_id,
+                path,
+                old_text,
+                new_text,
+            } => {
+                assert_eq!(tool_call_id, "tc-1");
+                assert_eq!(path, PathBuf::from("/tmp/foo.rs"));
+                assert_eq!(old_text.as_deref(), Some("fn old() {}"));
+                assert_eq!(new_text, "fn new() {}");
+            }
+            _ => panic!("expected Diff"),
+        }
+    }
+
+    #[test]
+    fn test_parse_event_line_diff_no_old_text() {
+        let json = r#"{
+            "type": "diff",
+            "tool_call_id": "tc-3",
+            "path": "/tmp/new.rs",
+            "new_text": "fn created() {}"
+        }"#;
+        let event = parse_event_line(json).unwrap();
+        match event {
+            AgentEvent::Diff {
+                old_text, new_text, ..
+            } => {
+                assert!(old_text.is_none());
+                assert_eq!(new_text, "fn created() {}");
+            }
+            _ => panic!("expected Diff"),
+        }
+    }
+
+    #[test]
+    fn test_parse_event_line_plan() {
+        let json = r#"{
+            "type": "plan",
+            "steps": [
+                {"title": "Step 1", "status": "pending"},
+                {"title": "Step 2", "status": "in_progress"},
+                {"title": "Step 3", "status": "completed"}
+            ]
+        }"#;
+        let event = parse_event_line(json).unwrap();
+        match event {
+            AgentEvent::Plan { steps } => {
+                assert_eq!(steps.len(), 3);
+                assert_eq!(steps[0].title, "Step 1");
+                assert_eq!(steps[0].status, PlanStepStatus::Pending);
+                assert_eq!(steps[1].status, PlanStepStatus::InProgress);
+                assert_eq!(steps[2].status, PlanStepStatus::Completed);
+            }
+            _ => panic!("expected Plan"),
+        }
+    }
+
+    #[test]
+    fn test_parse_event_line_thinking() {
+        let json = r#"{"type":"thinking","delta":"I should read the file first"}"#;
+        let event = parse_event_line(json).unwrap();
+        match event {
+            AgentEvent::Thinking { delta } => {
+                assert_eq!(delta, "I should read the file first");
+            }
+            _ => panic!("expected Thinking"),
+        }
+    }
+
+    #[test]
+    fn test_tool_status_no_cancelled() {
+        let result: Result<ToolStatus, _> = serde_json::from_str(r#""cancelled""#);
+        assert!(
+            result.is_err(),
+            "ToolStatus must not have a Cancelled variant"
+        );
+    }
+
+    #[test]
+    fn test_parse_event_line_available_commands_update_is_other() {
+        let json = r#"{"type":"available_commands_update","commands":["help","quit"]}"#;
+        let event = parse_event_line(json).unwrap();
+        assert!(
+            matches!(event, AgentEvent::Other),
+            "available_commands_update should map to Other"
+        );
+    }
+
+    #[test]
+    fn test_parse_event_line_current_mode_update_is_other() {
+        let json = r#"{"type":"current_mode_update","mode":"build"}"#;
+        let event = parse_event_line(json).unwrap();
+        assert!(
+            matches!(event, AgentEvent::Other),
+            "current_mode_update should map to Other"
+        );
     }
 }

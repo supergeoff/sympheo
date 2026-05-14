@@ -176,6 +176,12 @@ mod tests {
         terminate_all_blocking(Duration::from_millis(0));
     }
 
+    // Safety: TEST_LOCK is held across the await deliberately to serialize
+    // access to the global test state. No deadlock is possible: the only
+    // async task in this tokio test runtime is the test itself; the other
+    // (sync) tests block on separate OS threads and never contend inside
+    // the runtime.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_terminate_all_async_kills_real_subprocess() {
         let _lock = TEST_LOCK.lock().unwrap();

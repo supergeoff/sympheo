@@ -133,7 +133,13 @@ pub fn install_panic_hook(grace: std::time::Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use std::time::Duration;
+
+    // Serialize tests that touch REGISTRY / NEXT_TOKEN. cargo test runs tests
+    // within a module concurrently by default; without this lock, one test's
+    // reset_registry() can race with another's inserts and break assertions.
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     /// Reset registry between tests (they all share global state).
     fn reset_registry() {
@@ -142,6 +148,7 @@ mod tests {
 
     #[test]
     fn test_register_and_snapshot() {
+        let _lock = TEST_LOCK.lock().unwrap();
         reset_registry();
         let _g1 = register(12345);
         let _g2 = register(12346);
@@ -154,6 +161,7 @@ mod tests {
 
     #[test]
     fn test_drop_guard_removes_entry() {
+        let _lock = TEST_LOCK.lock().unwrap();
         reset_registry();
         let g1 = register(99001);
         assert_eq!(snapshot().len(), 1);
@@ -163,12 +171,14 @@ mod tests {
 
     #[test]
     fn test_terminate_all_empty_is_noop() {
+        let _lock = TEST_LOCK.lock().unwrap();
         reset_registry();
         terminate_all_blocking(Duration::from_millis(0));
     }
 
     #[tokio::test]
     async fn test_terminate_all_async_kills_real_subprocess() {
+        let _lock = TEST_LOCK.lock().unwrap();
         reset_registry();
         // Spawn a real long-sleeping subprocess in its own process group so
         // killpg actually kills it. We can't use tokio::process easily here

@@ -1,2 +1,4 @@
 [tools]
+"github:multica-ai/multica" = "latest"
+"npm:@agentclientprotocol/claude-agent-acp" = "latest"
 "pipx:robotframework" = "latest"

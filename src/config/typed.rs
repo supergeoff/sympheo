@@ -249,6 +249,27 @@ impl ServiceConfig {
             .max(0) as u64
     }
 
+    pub fn cli_session_start_timeout_ms(&self) -> u64 {
+        self.cli()
+            .and_then(|m| resolver::get_i64(m, "session_start_timeout_ms"))
+            .unwrap_or(30000)
+            .max(0) as u64
+    }
+
+    pub fn cli_tool_progress_timeout_ms(&self) -> u64 {
+        self.cli()
+            .and_then(|m| resolver::get_i64(m, "tool_progress_timeout_ms"))
+            .unwrap_or(60000)
+            .max(0) as u64
+    }
+
+    pub fn cli_cancel_grace_ms(&self) -> u64 {
+        self.cli()
+            .and_then(|m| resolver::get_i64(m, "cancel_grace_ms"))
+            .unwrap_or(5000)
+            .max(0) as u64
+    }
+
     pub fn cli_stall_timeout_ms(&self) -> i64 {
         // SPEC §5.3.6 default: 300000 (5 min). Operators MAY override in WORKFLOW.md.
         self.cli()

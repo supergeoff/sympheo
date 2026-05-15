@@ -172,8 +172,7 @@ impl AgentBackend for AcpBackend {
         "acp"
     }
 
-    // Reason: trait signature is fixed; parameters map 1-to-1 to the AgentBackend contract
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)] // Reason: trait signature is fixed by SPEC §10.2.2; parameters map 1-to-1 to the AgentBackend contract
     async fn run_turn(
         &self,
         _issue: &Issue,

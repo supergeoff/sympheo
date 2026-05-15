@@ -1,0 +1,106 @@
+{% include "partials/head.html" %}
+<main class="container">
+  <header class="topline">
+    <div>
+      <p class="eyebrow">Sympheo · orchestrator</p>
+      <h1>Status</h1>
+    </div>
+    <div class="topline-meta">
+      <span class="meta">Last tick: {{ last_tick }}</span>
+      <button class="btn-primary"
+              hx-post="/api/v1/refresh"
+              hx-swap="none">
+        Refresh
+      </button>
+    </div>
+  </header>
+
+  {{ stat_grid|safe }}
+
+  <section>
+    <h2>Ticket summary</h2>
+    {{ summary_grid|safe }}
+  </section>
+
+  <section>
+    <h2>Recent movements</h2>
+    <article class="table-card">
+      <table>
+        <thead>
+          <tr><th>Issue</th><th>State</th><th>Last changed</th></tr>
+        </thead>
+        <tbody hx-get="/fragments/recent"
+               hx-trigger="every 5s"
+               hx-swap="innerHTML">
+{{ recent_rows|safe }}
+        </tbody>
+      </table>
+    </article>
+  </section>
+
+  <section>
+    <h2>Blocked or delayed</h2>
+    <article class="table-card">
+      <table>
+        <thead>
+          <tr><th>Issue</th><th>State</th><th>Reason</th></tr>
+        </thead>
+        <tbody hx-get="/fragments/blocked"
+               hx-trigger="every 5s"
+               hx-swap="innerHTML">
+{{ blocked_rows|safe }}
+        </tbody>
+      </table>
+    </article>
+  </section>
+
+  <section>
+    <h2>Active sessions</h2>
+    <article class="table-card">
+      <table>
+        <thead>
+          <tr>
+            <th></th>
+            <th>Issue</th>
+            <th>State</th>
+            <th>Session</th>
+            <th>Turns</th>
+            <th>Started</th>
+            <th>Last event</th>
+            <th>Last message</th>
+            <th>Tokens (in / out)</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody hx-get="/fragments/sessions"
+               hx-trigger="every 3s"
+               hx-swap="innerHTML">
+{{ session_rows|safe }}
+        </tbody>
+      </table>
+    </article>
+  </section>
+
+  <section>
+    <h2>Retry queue</h2>
+    <article class="table-card">
+      <table>
+        <thead>
+          <tr>
+            <th></th>
+            <th>Issue</th>
+            <th>Attempt</th>
+            <th>Error</th>
+            <th>Due in</th>
+          </tr>
+        </thead>
+        <tbody hx-get="/fragments/retries"
+               hx-trigger="every 3s"
+               hx-swap="innerHTML">
+{{ retry_rows|safe }}
+        </tbody>
+      </table>
+    </article>
+  </section>
+</main>
+{% include "partials/foot.html" %}

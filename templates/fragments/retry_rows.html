@@ -1,0 +1,13 @@
+{% if rows.is_empty() %}
+<tr><td colspan="5" class="empty">No retries queued</td></tr>
+{% else %}
+{% for row in rows %}
+<tr>
+  <td class="row-id-cell"><span class="indicator retrying"></span></td>
+  <td class="mono">{{ row.identifier }}</td>
+  <td>{{ row.attempt }}</td>
+  <td>{{ row.error_text }}</td>
+  <td class="mono">{{ row.due_in }}</td>
+</tr>
+{% endfor %}
+{% endif %}

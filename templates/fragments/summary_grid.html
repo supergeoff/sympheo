@@ -1,0 +1,18 @@
+<div id="summary-grid" class="summary-grid"
+     hx-get="/fragments/summary"
+     hx-trigger="every 5s"
+     hx-swap="outerHTML">
+{% if items.is_empty() %}
+  <article>
+    <p class="eyebrow">No active tickets</p>
+    <p class="display">0</p>
+  </article>
+{% else %}
+{% for item in items %}
+  <article>
+    <p class="eyebrow">{{ item.state }}</p>
+    <p class="display">{{ item.count }}</p>
+  </article>
+{% endfor %}
+{% endif %}
+</div>

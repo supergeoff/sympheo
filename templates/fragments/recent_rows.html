@@ -1,0 +1,7 @@
+{% if rows.is_empty() %}
+<tr><td colspan="3" class="empty">No recent changes</td></tr>
+{% else %}
+{% for row in rows %}
+<tr><td class="mono">{{ row.identifier }}</td><td>{{ row.state }}</td><td>{{ row.ago }}</td></tr>
+{% endfor %}
+{% endif %}

@@ -1,0 +1,8 @@
+  <script>
+    if (window.lucide) lucide.createIcons();
+    document.body.addEventListener('htmx:afterSwap', () => {
+      if (window.lucide) lucide.createIcons();
+    });
+  </script>
+</body>
+</html>

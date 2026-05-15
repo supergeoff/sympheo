@@ -1,0 +1,21 @@
+<div id="stat-grid" class="stat-grid"
+     hx-get="/fragments/stats"
+     hx-trigger="every 3s"
+     hx-swap="outerHTML">
+  <article class="ink">
+    <p class="eyebrow">Running</p>
+    <p class="display">{{ running_count }}</p>
+  </article>
+  <article>
+    <p class="eyebrow">Retrying</p>
+    <p class="display">{{ retrying_count }}</p>
+  </article>
+  <article>
+    <p class="eyebrow">Tokens</p>
+    <p class="display">{{ total_tokens }}</p>
+  </article>
+  <article>
+    <p class="eyebrow">Runtime</p>
+    <p class="display">{{ runtime_secs }}s</p>
+  </article>
+</div>

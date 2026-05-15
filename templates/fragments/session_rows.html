@@ -1,0 +1,18 @@
+{% if rows.is_empty() %}
+<tr><td colspan="10" class="empty">No active sessions</td></tr>
+{% else %}
+{% for row in rows %}
+<tr>
+  <td class="row-id-cell"><span class="indicator {{ row.indicator_class }}"></span></td>
+  <td class="mono">{{ row.identifier }}</td>
+  <td>{{ row.state }}</td>
+  <td class="mono">{{ row.session_id }}</td>
+  <td>{{ row.turn_count }}</td>
+  <td class="mono">{{ row.started_at }}</td>
+  <td>{{ row.last_event }}</td>
+  <td>{{ row.last_message|safe }}</td>
+  <td class="mono">{{ row.tokens }}</td>
+  <td><button class="btn-ghost" hx-post="/api/v1/{{ row.identifier_url_safe }}/cancel" hx-confirm="Kill worker {{ row.identifier }}? It will be retried after backoff." hx-swap="none">Kill</button></td>
+</tr>
+{% endfor %}
+{% endif %}

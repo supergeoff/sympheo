@@ -80,6 +80,14 @@ mod inner {
         },
         /// Return an `AUTH_REQUIRED` error.
         AuthRequired,
+        /// Never respond to the prompt request — triggers tool_progress_timeout / read_timeout.
+        Silence,
+        /// Send `trailing_count` text notifications then respond with the given stop reason.
+        /// Used to test cooperative cancel: the fake server is mid-work when cancel arrives.
+        CancelTrailingUpdates {
+            trailing_count: usize,
+            stop_reason: FakeStopReason,
+        },
     }
 
     impl Default for PromptScenario {
@@ -109,6 +117,8 @@ mod inner {
         pub protocol_version: Option<ProtocolVersion>,
         /// Close immediately without responding to initialize (AUTH_REQUIRED sim).
         pub reject_initialize: bool,
+        /// Do not respond to `initialize` at all — triggers session_start_timeout.
+        pub silence_on_initialize: bool,
         /// Per-prompt scenarios (each prompt pops one; empty = default).
         pub scenarios: Vec<PromptScenario>,
     }
@@ -127,6 +137,12 @@ mod inner {
         /// Simulate an auth-required failure by not responding to initialize.
         pub fn with_reject_initialize(mut self) -> Self {
             self.reject_initialize = true;
+            self
+        }
+
+        /// Silence the initialize response — the client's session_start_timeout fires.
+        pub fn with_silence_on_initialize(mut self) -> Self {
+            self.silence_on_initialize = true;
             self
         }
 
@@ -172,6 +188,7 @@ mod inner {
 
         let protocol_version = fixture.protocol_version.unwrap_or(ProtocolVersion::V1);
         let reject_initialize = fixture.reject_initialize;
+        let silence_on_initialize = fixture.silence_on_initialize;
         let scenarios = Arc::new(Mutex::new(fixture.scenarios));
 
         Agent
@@ -188,7 +205,16 @@ mod inner {
                         // `protocol_version` remains in the closure's captured environment.
                         let pv = protocol_version.clone();
                         let ri = reject_initialize;
+                        let si = silence_on_initialize;
                         async move {
+                            if si {
+                                // Hold the responder for a very long time so the client's
+                                // session_start_timeout fires before we ever respond.
+                                tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+                                return responder.respond_with_error(
+                                    agent_client_protocol::util::internal_error("timed out"),
+                                );
+                            }
                             if ri {
                                 return responder.respond_with_error(
                                     agent_client_protocol::util::internal_error("AUTH_REQUIRED"),
@@ -280,6 +306,132 @@ mod inner {
             }
             PromptScenario::AuthRequired => responder
                 .respond_with_error(agent_client_protocol::util::internal_error("AUTH_REQUIRED")),
+            PromptScenario::Silence => {
+                // Hold the responder without responding so the client's
+                // tool_progress_timeout (or cancel_grace) fires first.
+                cx.spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+                    responder.respond(PromptResponse::new(StopReason::EndTurn))
+                })?;
+                Ok(())
+            }
+            PromptScenario::CancelTrailingUpdates {
+                trailing_count,
+                stop_reason,
+            } => {
+                // Emit trailing_count text updates (with short delays) then respond.
+                // Simulates a server that respects cancel by draining in-flight work.
+                cx.spawn({
+                    let cx = cx.clone();
+                    async move {
+                        for i in 0..trailing_count {
+                            let update = SessionUpdate::AgentMessageChunk(
+                                agent_client_protocol::schema::ContentChunk::new(
+                                    ContentBlock::Text(TextContent::new(format!("trailing-{i}"))),
+                                ),
+                            );
+                            if cx
+                                .send_notification(SessionNotification::new(
+                                    session_id.clone(),
+                                    update,
+                                ))
+                                .is_err()
+                            {
+                                break;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        }
+                        responder.respond(PromptResponse::new(stop_reason.into_acp()))
+                    }
+                })?;
+                Ok(())
+            }
+        }
+    }
+
+    /// Serve the fake ACP protocol on the process's stdin/stdout.
+    ///
+    /// Called from the `fake_acp_server` binary target so that integration tests
+    /// can spawn a real subprocess that speaks ACP.
+    pub async fn serve_on_io(fixture: Fixture) {
+        use std::sync::Mutex;
+
+        let reader = tokio::io::stdin();
+        let writer = tokio::io::stdout();
+        let transport =
+            agent_client_protocol::ByteStreams::new(writer.compat_write(), reader.compat());
+
+        let protocol_version = fixture.protocol_version.unwrap_or(ProtocolVersion::V1);
+        let reject_initialize = fixture.reject_initialize;
+        let silence_on_initialize = fixture.silence_on_initialize;
+        let scenarios = Arc::new(Mutex::new(fixture.scenarios));
+
+        let result = Agent
+            .builder()
+            .on_receive_request(
+                {
+                    move |req: InitializeRequest,
+                          responder: Responder<InitializeResponse>,
+                          _cx: ConnectionTo<Client>| {
+                        let _ = req;
+                        let pv = protocol_version.clone();
+                        let ri = reject_initialize;
+                        let si = silence_on_initialize;
+                        async move {
+                            if si {
+                                tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+                                return responder.respond_with_error(
+                                    agent_client_protocol::util::internal_error("timed out"),
+                                );
+                            }
+                            if ri {
+                                return responder.respond_with_error(
+                                    agent_client_protocol::util::internal_error("AUTH_REQUIRED"),
+                                );
+                            }
+                            responder.respond(
+                                InitializeResponse::new(pv)
+                                    .agent_capabilities(AgentCapabilities::new()),
+                            )
+                        }
+                    }
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                |req: NewSessionRequest,
+                 responder: Responder<NewSessionResponse>,
+                 _cx: ConnectionTo<Client>| {
+                    let _ = req;
+                    async move { responder.respond(NewSessionResponse::new("fake-session-1")) }
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                {
+                    let scenarios = scenarios.clone();
+                    move |req: PromptRequest,
+                          responder: Responder<PromptResponse>,
+                          cx: ConnectionTo<Client>| {
+                        let session_id = req.session_id.clone();
+                        let scenario = {
+                            let mut guard = scenarios.lock().unwrap();
+                            if guard.is_empty() {
+                                PromptScenario::default()
+                            } else {
+                                guard.remove(0)
+                            }
+                        };
+                        handle_prompt(scenario, session_id, responder, cx)
+                    }
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_to(transport)
+            .await;
+
+        if let Err(e) = result {
+            eprintln!("[fake_acp_server] error: {e:?}");
         }
     }
 

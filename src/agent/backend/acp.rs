@@ -646,4 +646,60 @@ mod tests {
         assert_eq!(cfg.cancel_grace, Duration::from_millis(1000));
         assert_eq!(cfg.turn_timeout, Duration::from_millis(900000));
     }
+
+    // -----------------------------------------------------------------------
+    // map_stop_reason — 5 variants × 2 cancel states
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn map_stop_reason_end_turn_no_cancel_succeeds() {
+        assert_eq!(
+            map_stop_reason(StopReason::EndTurn, false),
+            TurnOutcome::Succeeded
+        );
+    }
+
+    #[test]
+    fn map_stop_reason_end_turn_with_cancel_is_cancelled() {
+        assert_eq!(
+            map_stop_reason(StopReason::EndTurn, true),
+            TurnOutcome::Cancelled
+        );
+    }
+
+    #[test]
+    fn map_stop_reason_cancelled_is_always_cancelled() {
+        assert_eq!(
+            map_stop_reason(StopReason::Cancelled, false),
+            TurnOutcome::Cancelled
+        );
+        assert_eq!(
+            map_stop_reason(StopReason::Cancelled, true),
+            TurnOutcome::Cancelled
+        );
+    }
+
+    #[test]
+    fn map_stop_reason_max_tokens_is_failed() {
+        assert_eq!(
+            map_stop_reason(StopReason::MaxTokens, false),
+            TurnOutcome::Failed
+        );
+    }
+
+    #[test]
+    fn map_stop_reason_max_turn_requests_is_failed() {
+        assert_eq!(
+            map_stop_reason(StopReason::MaxTurnRequests, false),
+            TurnOutcome::Failed
+        );
+    }
+
+    #[test]
+    fn map_stop_reason_refusal_is_failed() {
+        assert_eq!(
+            map_stop_reason(StopReason::Refusal, false),
+            TurnOutcome::Failed
+        );
+    }
 }

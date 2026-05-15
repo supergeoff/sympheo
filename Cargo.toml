@@ -35,7 +35,13 @@ tokio-util = { version = "0.7", features = ["compat"] }
 [features]
 fake-acp = []
 
+[[bin]]
+name = "fake_acp_server"
+path = "src/bin/fake_acp_server.rs"
+required-features = ["fake-acp"]
+
 [dev-dependencies]
 tokio-test = "0.4"
 wiremock = "0.6"
 reqwest = { version = "0.13", features = ["json"] }
+tracing-test = "0.2"
